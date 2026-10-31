@@ -122,33 +122,60 @@ details.adv[open]>summary::before{content:"▾ ";}
 .navtbl th:first-child,.navtbl td:first-child{text-align:left}
 .navtbl td{padding:7px 4px;border-bottom:1px dashed var(--line);text-align:right}
 .navtbl tbody tr:last-child td{border-bottom:0}
-/* ---------- 产品页收益表（v45：机构筛选 + 列排序） ----------
-   7 列在手机上放不下，用横向滚动而不是压缩字号 —— 数字要看清，
-   第一列（产品名）粘在左边，滚动时不至于不知道这行是谁。 */
+/* ---------- 产品页收益表（v45 机构筛选 + 列排序；v48 两行表头 + 精简/全部两种列模式） ----------
+   7 列在手机上放不宽。v47 之前是直接把表撑到 600px 让用户横滑，实测没人意识到能滑，
+   「显示不全」在用户那边等同于「列不存在」。v48 三件事一起做：
+     · 产品名改成两行截断 → 第一列 190px 降到 88px（完整名字在点进去的详情弹层里就有）
+     · 表头改两行竖排、完整口径留在 title、排序方向改成 CSS 三角 → 数字列 56~78px 降到 28~50px
+     · 默认「精简」5 列（宽屏自动「全部」），要看 14/30 日年化时一键切过去
+   切到全部后 360px 一档的窄屏仍然差四十来 px，所以右下角那道渐影就是「还能往右滑」的提示。 */
+/* 外层只管给渐影定位，内层只管滚动：两件事挤在同一个元素上不成立，
+   overflow 容器会把自己的 ::after 一起裁掉，渐影就永远看不见。 */
+.board-edge{position:relative}
+.board-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 /* 不能给滚动容器加左右 padding：sticky 的 left:0 是贴着滚动视口（含 padding 区）算的，
    一有 padding，粘住的列就盖不住左侧那几个像素，滚动时后面那列的字会露出一小截。 */
-.board-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-/* table-layout:fixed + 每列定宽：产品名要能省略号截断（auto 布局下 max-width 会被
-   内容撑开，粘左的列一旦变宽，右边几列就全滚出屏了）。
+.board-fade{display:none;position:absolute;top:0;right:0;bottom:0;width:26px;pointer-events:none;
+  background:linear-gradient(90deg,rgba(255,255,255,0),#fff 76%)}
+.board-edge.more>.board-fade{display:block}
+/* table-layout:fixed + 每列定宽：产品名要能截断（auto 布局下 max-width 会被内容撑开，
+   粘左的列一旦变宽，右边几列就全滚出屏了）。
    border-collapse 必须是 separate：collapse 模式下 sticky 单元格背景会被折叠边框
-   裁掉一条，横向滚动时后面那列的字会「漏」进产品名这一列（实测现象：名字左边冒出半个字）。 */
-.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11.5px;font-variant-numeric:tabular-nums;width:600px;min-width:600px}
-.boardtbl th:nth-child(1),.boardtbl td:nth-child(1){width:190px}
-.boardtbl th:nth-child(2),.boardtbl td:nth-child(2){width:56px}
-.boardtbl th:nth-child(3),.boardtbl td:nth-child(3){width:66px}
-.boardtbl th:nth-child(4),.boardtbl td:nth-child(4){width:76px}
-.boardtbl th:nth-child(5),.boardtbl td:nth-child(5){width:78px}
-.boardtbl th:nth-child(6),.boardtbl td:nth-child(6){width:78px}
-.boardtbl th:nth-child(7),.boardtbl td:nth-child(7){width:56px}
-.boardtbl th{font-size:10.5px;color:var(--ink3);font-weight:600;text-align:right;padding:6px 5px;border-bottom:1px solid var(--line);white-space:nowrap}
-.boardtbl th:first-child,.boardtbl td:first-child{text-align:left;position:sticky;left:0;background:var(--card);z-index:1;width:190px;min-width:190px;box-shadow:1px 0 0 var(--line)}
+   裁掉一条，横向滚动时后面那列的字会「漏」进产品名这一列（实测现象：名字左边冒出半个字）。
+   width:100% 配 min-width：宽屏铺满卡片，窄屏按 min-width 溢出、交给横滑 ——
+   这样不用为每种屏宽写一套断点，列宽也只有一处定义。 */
+.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:344px}
+/* 精简 = 5 列（116 的首列 + 28/48/50/28）；270px 在 360 屏的 300px 可用宽度里不用滑 */
+.boardtbl.lean{min-width:270px}
+.boardtbl .c-nm{width:88px}
+.boardtbl.lean .c-nm{width:116px}
+.boardtbl .c-hold{width:28px}
+.boardtbl .c-wan{width:48px}
+.boardtbl .c-a{width:50px}
+.boardtbl .c-zero{width:28px}
+.boardtbl th{font-size:10px;color:var(--ink3);font-weight:600;text-align:right;padding:5px 2px;border-bottom:1px solid var(--line);line-height:1.15}
+/* 第二行是「年化 / 收益」这类补语：压到 9px、颜色更浅，一眼扫过去先认出 7日/14日/30日。
+    nowrap 是为了让排序角标和补语永远待在第二行，不会被挤到第三行去。 */
+.boardtbl th .l2{display:block;font-size:9px;font-weight:500;color:var(--ink3);white-space:nowrap}
+/* 排序方向用 CSS 三角，不用「↑ / ↓」字符：这两个字符在 DejaVu / Noto 里连字宽带空格
+   要 12~15px，28~48px 的窄列一挂上去就溢出到左边那一列的数字上（v47 实测就是这个）。
+   三角只占 8px + 2px 间隙，颜色跟 currentColor 走，升序朝上、降序朝下。 */
+.boardtbl th .mk{display:inline-block;width:0;height:0;margin-left:2px;vertical-align:middle;
+  border-left:4px solid transparent;border-right:4px solid transparent}
+.boardtbl th .mk.d{border-top:6px solid currentColor}
+.boardtbl th .mk.u{border-bottom:6px solid currentColor}
+.boardtbl th:first-child,.boardtbl td:first-child{text-align:left;position:sticky;left:0;background:var(--card);z-index:1;box-shadow:1px 0 0 var(--line)}
 .boardtbl th.srt{cursor:pointer;color:var(--brand)}
 .boardtbl th.srt:hover{text-decoration:underline}
-.boardtbl td{padding:7px 5px;border-bottom:1px dashed var(--line);text-align:right;white-space:nowrap}
-.boardtbl td.nm{overflow:hidden}
-/* 截断要落在里面的按钮上：td 自己加 ellipsis 对子元素无效，
-   名字长时会把整格挤出去、盖住相邻列 */
-.boardtbl td.nm .link{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom;text-align:left}
+.boardtbl td{padding:6px 2px;border-bottom:1px dashed var(--line);text-align:right;white-space:nowrap}
+.boardtbl td.nm{white-space:normal;overflow:hidden}
+/* 两行截断要落在里面的按钮上（td 自己加 clamp 对块级子元素无效），
+   且 display 必须是 -webkit-box：inline-block 上 -webkit-line-clamp 不生效。
+   两行比单行 ellipsis 值这一列宽：单行时「招银理财季季宝」和「招银理财季季宝 180 天版」
+   截断后看着是同一个产品。 */
+.boardtbl td.nm .link{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  max-width:100%;overflow:hidden;white-space:normal;overflow-wrap:break-word;text-align:left;
+  font-size:11px;line-height:1.25}
 /* 挂零天数用琥珀警示，不用 .down 的红：红色在本页一律表示亏钱，
    而「这天没派息」不是亏损，只是这只产品本月有不计息的披露日。 */
 .boardtbl td.warn-n{color:#8a6300;font-weight:650}
@@ -392,10 +419,16 @@ details.adv[open]>summary::before{content:"▾ ";}
   </div>
 
   <!-- ========== 产品看板 ==========
-       v45：产品管理内容已迁往「交易」页，本页换成可按机构筛选、可按列排序的收益对比表。 -->
+       v45：产品管理内容已迁往「交易」页，本页换成可按机构筛选、可按列排序的收益对比表。
+       v48：表头两行竖排 + 精简/全部两种列模式，右上角那颗按钮就是切换器。 -->
   <div class="page" id="pg-prod">
     <div class="card">
-      <div class="card-t"><h2>产品收益表</h2><span class="hint" id="bdCount">—</span></div>
+      <div class="card-t"><h2>产品收益表</h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span class="hint" id="bdCount">—</span>
+          <button id="bdColsBtn" class="mini" onclick="toggleBdCols()" title="列太多放不下时切成精简；要看 14/30 日年化切成全部">—</button>
+        </div>
+      </div>
       <div class="det-tools">
         <div class="chips" id="bdInstChips" style="margin:0 0 8px"></div>
         <div class="actin" style="margin-bottom:8px">
@@ -403,7 +436,10 @@ details.adv[open]>summary::before{content:"▾ ";}
           <button class="mini" onclick="clearBdSearch()">清除</button>
         </div>
       </div>
-      <div class="board-wrap"><table class="boardtbl" id="boardTbl"></table></div>
+      <div class="board-edge" id="boardEdge">
+        <div class="board-wrap" id="boardWrap"><table class="boardtbl" id="boardTbl"></table></div>
+        <div class="board-fade"></div>
+      </div>
       <div class="cap" style="padding:8px 0 0" id="bdNote"></div>
     </div>
     <div class="card">
@@ -413,7 +449,9 @@ details.adv[open]>summary::before{content:"▾ ";}
         万收：最新披露日的万份收益 =（当日净值 − 前一日净值）× 10000 ÷ 间隔自然日数。<br>
         近 7 / 14 / 30 日年化：(最新净值 ÷ N 个自然日前最近一条披露净值 − 1) × 365 ÷ N。<br>
         月挂 0 数：本月万份收益为 0 的<b>披露日</b>天数，没披露不计。<br>
-        样本不足显示「—」，排序时这类行永远排在最后；数据以官方披露为准。
+        样本不足显示「—」，排序时这类行永远排在最后；数据以官方披露为准。<br>
+        表头点一下按该列排序、再点翻转方向；右上角「精简 / 全部」切换列数，
+        近 14 / 30 日年化默认收在「全部」里，这个选择只存本机、不跟其它设备同步。
       </div>
     </div>
   </div>

@@ -10,12 +10,14 @@
      · 截图 OCR 的「日期 + 净值」配对（错一行就是错一笔账） */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { fmtDate } from "../js/core/util.js";
 import { ORG_ALIAS, ORG_NAME, detectOrg, detectOrgByProdCode } from "../js/core/orgs.js";
 import { parseProductInput } from "../js/core/paste.js";
 import { navSeries, latestNav, navOnOrBefore, navHit } from "../js/domain/nav.js";
 import { sharesOn, hasAnyTrade, computePosition } from "../js/domain/position.js";
 import { ocrNavLines } from "../js/domain/ocr.js";
+import { BOARD_COLS } from "../js/domain/board.js";
 
 const today = fmtDate(new Date());
 const plusDays = n => fmtDate(new Date(Date.now() + n * 86400000));
@@ -363,6 +365,34 @@ test("隐藏：渲染函数不许用裸 cls()，份额不许裸 toFixed(2)", () 
 
 test("隐藏：产品收益表只放公开披露口径（不该出现金额列）", () => {
   const b = fnBody("renderBoard");
-  assert.ok(b.includes("BOARD_COLS"), "renderBoard() 不再引用 BOARD_COLS：表头口径失控");
+  assert.ok(b.includes("boardCols("), "renderBoard() 不再走 boardCols()：精简/全部两种列模式失效");
   assert.ok(!/\bmoney\(/.test(b), "renderBoard() 出现金额格式化：公开口径表不该有金额");
 });
+
+/* v48 起这张表的列宽（CSS 类名）与单元格（渲染函数）都按 key 查表：
+   少一个 key 就是 renderBoard() 抛异常（整个产品页空白），
+   类名写了但 index.html 里没有对应的宽度规则，则等于该列不限宽、又变回撑破屏幕。
+   两种都是「改了列定义忘了改另一处」，肉眼看不出来，只能在这里拦。 */
+test("产品收益表：每个列 key 都有类名、单元格渲染与 CSS 宽度", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const clsBody = mapBody("BD_CLS"), cellBody = mapBody("BD_CELL");
+  for (const c of BOARD_COLS) {
+    const k = c[0];
+    assert.ok(new RegExp(`(^|[\\s,{])${k}\\s*:`).test(clsBody), `BD_CLS 缺列 ${k}：表头没有类名`);
+    assert.ok(new RegExp(`(^|[\\s,{])${k}\\s*:`).test(cellBody), `BD_CELL 缺列 ${k}：渲染时会抛 TypeError`);
+    const m = clsBody.match(new RegExp(`${k}\\s*:\\s*"([^"]+)"`));
+    assert.ok(m, `BD_CLS 里 ${k} 的值不是字符串`);
+    for (const one of m[1].split(/\s+/)) {
+      assert.ok(new RegExp("\\.boardtbl[^{]*\\." + one + "\\s*\\{[^}]*width:").test(html),
+        `index.html 里没有 .${one} 的列宽规则：这一列会按内容乱宽`);
+    }
+  }
+});
+/* 从 `const NAME = {` 切到配对的 `\n};`：只用于本仓这两个平铺的查表常量 */
+function mapBody(name) {
+  const i = APP_SRC.indexOf(`const ${name} = {`);
+  assert.ok(i > 0, `app.js 里找不到 const ${name} = {`);
+  const j = APP_SRC.indexOf("\n};", i);
+  assert.ok(j > i, `const ${name} = { 没有收尾`);
+  return APP_SRC.slice(i, j + 3);
+}

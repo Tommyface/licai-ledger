@@ -6,7 +6,7 @@
    所以这三件事必须在 CI 里被执行一次，而不是靠肉眼看渲染结果。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BOARD_COLS, NO_INST, instKey, instLabel, boardFilter, boardInstChips,
+import { BOARD_COLS, BOARD_LEAN, boardCols, NO_INST, instKey, instLabel, boardFilter, boardInstChips,
   isZeroWan, monthZeroDays, boardSort } from "../js/domain/board.js";
 
 const row = (o) => ({ name: "P", ikey: NO_INST, inst: "", code: "", prodCode: "",
@@ -20,6 +20,37 @@ test("表头顺序与列数不能漂", () => {
     ["产品名称", "持有天数", "万收", "近7日年化", "近14日年化", "近30日年化", "月挂0数"]);
   /* 每列都得有口径说明：万收/N 日年化这类折算口径不写清就会被当成官方数字 */
   for (const c of BOARD_COLS) assert.ok(c[2] && c[2].length > 8, `列 ${c[1]} 缺口径说明`);
+});
+
+/* ---- 两行短表头（v48）：宽度是这张表的稀缺资源，短表头必须比完整文案更短 ---- */
+test("每列的两行短表头都存在且不超过 4 字", () => {
+  for (const c of BOARD_COLS) {
+    for (const i of [3, 4]) {
+      const s = c[i];
+      assert.ok(typeof s === "string" && s.length >= 1, `列 ${c[1]} 缺第 ${i - 2} 行短表头`);
+      assert.ok(s.length <= 4, `列 ${c[1]} 的短表头「${s}」${s.length} 字，会撑破列宽`);
+    }
+  }
+});
+
+/* ---- 精简 / 全部两种列模式 ---- */
+test("精简列必须是全部列的子集，且保留首列与挂零列", () => {
+  const all = BOARD_COLS.map(c => c[0]);
+  for (const k of BOARD_LEAN) assert.ok(all.indexOf(k) >= 0, `精简列 ${k} 不在 BOARD_COLS 里`);
+  assert.equal(BOARD_LEAN[0], "name", "精简模式首列必须是产品名，否则整行认不出是谁");
+  assert.ok(BOARD_LEAN.indexOf("zero") >= 0, "精简模式要留住挂 0 天数：停息是必须看见的风险");
+  assert.ok(BOARD_LEAN.length < BOARD_COLS.length, "精简模式没有真的少列");
+});
+
+test("boardCols()：full 给全 7 列，其它一律按精简", () => {
+  assert.equal(boardCols("full").length, BOARD_COLS.length);
+  assert.deepEqual(boardCols("lean").map(c => c[0]), BOARD_LEAN);
+  assert.deepEqual(boardCols("").map(c => c[0]), BOARD_LEAN);
+  assert.deepEqual(boardCols(undefined).map(c => c[0]), BOARD_LEAN);
+  /* full 返回副本：调用方排序不能改到模块级的 BOARD_COLS */
+  const f = boardCols("full");
+  f.pop();
+  assert.equal(BOARD_COLS.length, 7, "boardCols('full') 返回的不是副本");
 });
 
 /* ---- 机构键 ---- */

@@ -25,8 +25,8 @@ import { normTomb, mergeTombs, purgeTombs, applyTombs as applyTombsIn } from "./
 import { mergeForPush } from "./js/domain/sync.js";
 import { syncBadge, syncLine } from "./js/domain/syncstatus.js";
 import { readRelease, updateVerdict } from "./js/domain/update.js";
-import { BOARD_COLS, NO_INST, instKey, instLabel, boardFilter, boardInstChips,
-  monthZeroDays, boardSort } from "./js/domain/board.js";
+import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
+  boardCols, monthZeroDays, boardSort } from "./js/domain/board.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -37,10 +37,13 @@ const LS_SYNC = "licai_ledger_sync_v1";
    反而让另一台设备漏掉该看到的提醒。 */
 const LS_NOTIFY = "licai_ledger_notify_v1";
 const LS_ALERT = "licai_ledger_alert_v1";
+/* 产品收益表的列模式（"full" / "lean"）只存本机：一台手机一块屏，
+   列数合不合得下是各设备自己的事，同步过去反而会把窄屏设备顶成横滑。 */
+const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v47";
+const APP_VER = "v48";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -106,8 +109,9 @@ let NOTIFY = { on: false, lastCheck: 0 };
 /* 用户已忽略的抓取告警签名（按「失败集合」生成，集合一变就重新提示） */
 let ALERT_DISMISSED = "";
 let UI = { range: "day", groupBy: "inst", calY: 0, calM: 0, selDate: "", activePick: "", viewProd: "", detTab: "active", prodRange: "3m", prodOv: "a7", detQ: "", detInst: "", detSort: "dayP", detAsc: false,
-  /* 产品页收益表：机构筛选 / 搜索 / 排序列与方向（默认按持有天数降序） */
-  bdQ: "", bdInst: "", bdSort: "holdDays", bdAsc: false };
+  /* 产品页收益表：机构筛选 / 搜索 / 排序列与方向（默认按持有天数降序）
+     bdCols = "" 表示这台设备还没选过列模式，此时按屏宽给默认（见 bdMode()） */
+  bdQ: "", bdInst: "", bdSort: "holdDays", bdAsc: false, bdCols: "" };
 
 /* ---------- 「隐藏」开关的两个唯一出口 ----------
    以前各处手写「隐藏时输出四个星」的三元式，写漏一处就等于没遮：
@@ -179,6 +183,8 @@ function loadLocal() {
     }
     DIRTY = localStorage.getItem(LS_DATA + ".dirty") === "1";   /* v32 P0-2 */
     try { SYNC_ST = Object.assign(SYNC_ST, JSON.parse(localStorage.getItem(LS_ST) || "{}")); } catch (e) { }
+    /* 列模式只认这两个值：别的（包括旧版本写坏的值）一律当「没选过」，让屏宽来决定 */
+    try { const m = localStorage.getItem(LS_BD); if (m === "full" || m === "lean") UI.bdCols = m; } catch (e) { }
     /* 老数据只有布尔、没有时间点：只能从「看见它还没推」的这一刻算起，
        否则界面会显示「最后编辑 5900 天前」这种荒唐话。 */
     if (DIRTY && !SYNC_ST.dirtyAt) SYNC_ST.dirtyAt = Date.now();
@@ -956,9 +962,51 @@ const wan4 = (v) => (v === null ? "—" : v.toFixed(4));
 /** 年化：与详情页 pctFmt 同口径，null 显示「—」 */
 const pct4 = (v) => (v === null ? "—" : `${v >= 0 ? "+" : ""}${pct(v)}`);
 
+/* ---------- 产品收益表的列宽与渲染（v48） ----------
+   列宽从 nth-child 改成挂在类名上：精简模式少了两列，按位置定的宽度会整排错位
+   （v47 只能把表写死成 600px 就是这个原因）。表头和表体共用下面这两张表，
+   少列时两边不可能对不上。每个 key 都必须有类名和渲染函数，
+   漏了会被 tests/app_core.test.mjs 的门禁直接跑红。 */
+const BD_CLS = {
+  name: "c-nm", holdDays: "c-hold", wan: "c-wan",
+  a7: "c-a", a14: "c-a", a30: "c-a", zero: "c-zero",
+};
+const BD_CELL = {
+  /* 名字两行截断，所以补一个 title：手机上没有 hover，长按能看到全名 */
+  name: (r) => `<td class="nm c-nm"><button class="link" title="${esc(r.name)}" onclick="openProdDetail('${r.id}')">${esc(r.name)}</button></td>`,
+  holdDays: (r) => `<td class="c-hold">${r.holdDays}</td>`,
+  wan: (r) => `<td class="c-wan ${cls(r.wan === null ? 0 : r.wan)}">${wan4(r.wan)}</td>`,
+  a7: (r) => `<td class="c-a ${cls(r.a7 === null ? 0 : r.a7)}">${pct4(r.a7)}</td>`,
+  a14: (r) => `<td class="c-a ${cls(r.a14 === null ? 0 : r.a14)}">${pct4(r.a14)}</td>`,
+  a30: (r) => `<td class="c-a ${cls(r.a30 === null ? 0 : r.a30)}">${pct4(r.a30)}</td>`,
+  zero: (r) => `<td class="c-zero ${r.zero ? "warn-n" : "muted"}">${r.zero}</td>`,
+};
+
+/** 这台设备的列模式。没手动选过时按视口宽给默认：420px 以下 7 列必然溢出，一律精简。 */
+function bdMode() {
+  if (UI.bdCols === "full" || UI.bdCols === "lean") return UI.bdCols;
+  const w = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 360;
+  return w >= 420 ? "full" : "lean";
+}
+function toggleBdCols() {
+  UI.bdCols = bdMode() === "full" ? "lean" : "full";
+  try { localStorage.setItem(LS_BD, UI.bdCols); } catch (e) { }
+  renderBoard();
+}
+/** 右侧渐影 = 「这边还有列没露出来」。只在真的还能滑时显示，切到精简后自己消失。 */
+function bdEdge() {
+  const edge = $("boardEdge"), wrap = $("boardWrap");
+  if (!edge || !wrap) return;
+  edge.classList.toggle("more", wrap.scrollWidth - wrap.clientWidth > 2);
+}
+
 function renderBoard() {
   const tbl = $("boardTbl");
   if (!tbl) return;
+  const full = bdMode() === "full";
+  const cols = boardCols(full ? "full" : "lean");
+  tbl.className = full ? "boardtbl" : "boardtbl lean";
+  if ($("bdColsBtn")) $("bdColsBtn").textContent = full ? "精简" : "全部";
   const all = boardRows();
   const total = all.length;
   const list = boardSort(boardFilter(all, UI.bdInst, UI.bdQ), UI.bdSort, UI.bdAsc);
@@ -974,37 +1022,34 @@ function renderBoard() {
   }
   if ($("bdCount")) $("bdCount").textContent = total ? `共 ${total} 只 · 显示 ${list.length}` : "共 0 只";
 
-  const sortMark = (k) => (UI.bdSort === k ? (UI.bdAsc ? " ↑" : " ↓") : "");
-  const head = BOARD_COLS.map(([k, lab, tip]) =>
-    `<th class="srt" title="${esc(tip)}" onclick="setBdSort('${k}')">${esc(lab)}${sortMark(k)}</th>`).join("");
+  /* 表头两行竖排：第一行认列、第二行放补语与排序角标，完整口径（lab + tip）留在 title */
+  const sortMark = (k) => (UI.bdSort === k ? `<span class="mk ${UI.bdAsc ? "u" : "d"}"></span>` : "");
+  const head = cols.map(([k, lab, tip, l1, l2]) =>
+    `<th class="srt ${BD_CLS[k]}" title="${esc(lab)}：${esc(tip)}" onclick="setBdSort('${k}')">`
+    + `<span class="l1">${esc(l1)}</span><span class="l2">${esc(l2)}${sortMark(k)}</span></th>`).join("");
 
   if (!total) {
     tbl.innerHTML = "";
     if ($("bdNote")) $("bdNote").innerHTML = `<div class="empty">还没有产品。到「交易」页点「+ 添加产品」按登记编码查询。</div>`;
+    bdEdge();
     return;
   }
   if (!list.length) {
     tbl.innerHTML = "";
     if ($("bdNote")) $("bdNote").innerHTML = `<div class="empty">没有匹配的产品，点「清除」重置筛选</div>`;
+    bdEdge();
     return;
   }
   /* 金额类一列都没有，所以这张表不需要走 shown() 遮蔽：
      万收与年化是产品公开披露口径，持有天数与挂零天数不含金额信息。 */
   tbl.innerHTML = `<thead><tr>${head}</tr></thead><tbody>`
-    + list.map(r => `<tr>
-        <td class="nm"><button class="link" onclick="openProdDetail('${r.id}')">${esc(r.name)}</button></td>
-        <td>${r.holdDays}</td>
-        <td class="${cls(r.wan === null ? 0 : r.wan)}">${wan4(r.wan)}</td>
-        <td class="${cls(r.a7 === null ? 0 : r.a7)}">${pct4(r.a7)}</td>
-        <td class="${cls(r.a14 === null ? 0 : r.a14)}">${pct4(r.a14)}</td>
-        <td class="${cls(r.a30 === null ? 0 : r.a30)}">${pct4(r.a30)}</td>
-        <td class="${r.zero ? "warn-n" : "muted"}">${r.zero}</td>
-      </tr>`).join("")
+    + list.map(r => `<tr>` + cols.map(c => BD_CELL[c[0]](r)).join("") + `</tr>`).join("")
     + `</tbody>`;
   if ($("bdNote")) {
     const ld = list.reduce((m, r) => (r.lastDate > m ? r.lastDate : m), "");
     $("bdNote").innerHTML = `<span class="muted">数据截至 ${esc(ld || "—")}</span>`;
   }
+  bdEdge();
 }
 function setBdInst(k) { UI.bdInst = (UI.bdInst === k && k !== "") ? "" : k; renderBoard(); }
 function setBdSort(k) {
@@ -3573,7 +3618,7 @@ Object.assign(window, {
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv,
-  setProdRange, setRange, syncPull, syncPush, toggleHide, toggleNotify, triggerFetch
+  setProdRange, setRange, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });
 
 (function init() {
@@ -3595,6 +3640,9 @@ Object.assign(window, {
     if (SYNC.owner) syncPull(false);
     if (nativeFetchAvailable()) { try { window.__nativeAutoFetch(); } catch (e) { } }
   });
+  /* 横屏 / 桌面窗口拉伸都会改变产品收益表能不能一屏放下 —— 渐影是量出来的，
+     不重算就会留在错的那一档（该提示能滑时不提示，不能滑时还挂着道影子）。 */
+  window.addEventListener("resize", bdEdge);
   /* App 内：必须等云端数据到位再抓 —— 首次安装时本地还没有产品，
      固定 1.2 秒的定时器会扑空，表现成「装完一直没净值」。最多等 6 秒。 */
   if (nativeFetchAvailable()) {
