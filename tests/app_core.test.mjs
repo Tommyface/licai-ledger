@@ -390,8 +390,9 @@ test("产品收益表：每个列 key 都有类名、单元格渲染与 CSS 宽�
 });
 /* ---------- v49：玻璃皮肤之下的宽度预算 ---------- */
 /* index.html 里「全部 / 精简」两套列宽 + min-width 是量出来的预算表，不是估的：
-   360 视口下 boardWrap 的 clientWidth = 330px（Playwright 实测），7 列必须排得进去。
-   超出哪怕 2px 就变成横滑，而 v49 要解决的正是「一屏看完 7 列」。
+   360 视口下 boardWrap 的 clientWidth = 330px（Playwright 实测），6 列必须排得进去
+   （v54 起「全部」是 6 列：持有天数按用户要求删掉了）。
+   超出哪怕 2px 就变成横滑，而 v49 要解决的正是「一屏看完」。
    v52 把 .board-edge 往外顶到卡片内边距（margin:0 -16px），带子从 298 涨到 330 ——
    这里必须跟着实测值改，不然预算表悄悄松了 32px，谁都不会发现。
    带子里侧还有 .board-plate 左右各 6px（字不能真贴着带子边），表格实得 318px。
@@ -413,7 +414,9 @@ function cssWidths(html, mode) {
   const out = {};
   let m;
   while ((m = re.exec(html))) out[m[1]] = +m[2];
-  assert.ok(Object.keys(out).length >= 5, `index.html 里只读到 ${Object.keys(out).length} 条列宽规则，解析方式该跟着 CSS 改了`);
+  /* 4 条规则 = c-nm / c-wan / c-a / c-zero：三列年化共用 .c-a，所以「6 列」在这里只有 4 个类名。
+     少于 4 条就是解析脱靶（比如类名改了、或者规则被并进了简写），预算会变成静默的空检查。 */
+  assert.ok(Object.keys(out).length >= 4, `index.html 里只读到 ${Object.keys(out).length} 条列宽规则，解析方式该跟着 CSS 改了`);
   return out;
 }
 function cssMinWidth(html, mode) {
@@ -435,7 +438,7 @@ function clsKeyMap() {
   return out;
 }
 
-test("产品收益表：「全部」7 列的宽度预算必须塞得进 360 屏", () => {
+test("产品收益表：「全部」6 列的宽度预算必须塞得进 360 屏", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const cls = clsKeyMap();
   for (const mode of ["full", "lean"]) {
@@ -467,7 +470,8 @@ test("产品收益表：年化列不带正号、|≥10%| 退一位小数（上�
   assert.ok(body.includes("\n};"), "pctBd() 没收尾，提取方式需要跟着改");
   assert.ok(!body.includes('"+"'), `pctBd() 里出现正号：${body}`);
   assert.ok(/Math\.abs\(p\)\s*>=\s*10\s*\?\s*p\.toFixed\(1\)/.test(body),
-    "pctBd() 没在 |年化|≥10% 时退到一位小数：「-12.34%」要 50px，比 c-a 的 46px 还宽，nowrap 会把「%」挤到隔壁那列的数字上");
+    "pctBd() 没在 |年化|≥10% 时退到一位小数：不退的话最坏串从「-12.3%」(43px) 变「-12.34%」(46px)，"
+    + "再加三列就吃掉 9px，nowrap 会把「%」挤到隔壁那列的数字上");
 });
 
 test("产品收益表：粘在左边的首列必须是不透明底", () => {
@@ -492,7 +496,25 @@ test("产品收益表：渐影跟着「滑到底」消失，默认门槛不高�
     "没接 scroll 事件：渐影只在重渲染时更新，用户手动滑的时候它不动");
   const m = fnBody("bdMode").match(/w >= (\d+)/);
   assert.ok(m, "bdMode() 里找不到视口门槛");
-  assert.ok(+m[1] <= 360, `默认门槛 ${m[1]} > 360：主流屏又退回 5 列，上面那份宽度预算白做`);
+  assert.ok(+m[1] <= 360, `默认门槛 ${m[1]} > 360：主流屏又退回精简档，上面那份宽度预算白做`);
+});
+
+/* ---------- v54：底部 inset 也归页面管（原生 padding 挪不动 position:fixed） ---------- */
+test("底部三处固定元素必须读 --safe-b：壳的 WebView padding 顶不动 fixed 底栏", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  /* v52 的修法是在原生侧给 WebView 加底部 padding，实测没用：fixed + bottom:0 贴的是
+     可视视口的底，view padding 只压内容绘制区。现在和顶部同一套 —— 原生量完写成
+     --safe-b，页面自己垫。这条测试和上面 --sb 那条是一对，两边都要有壳喂的值。 */
+  const tb = html.match(/\.tabbar\{[^}]*padding:([^;]*);/);
+  assert.ok(tb, "找不到 .tabbar 的 padding 规则：底部标签栏没垫 inset，就会被手势小白条压掉半截");
+  assert.ok(/var\(--safe-b,\s*env\(safe-area-inset-bottom,\s*0px\)\)/.test(tb[1]),
+    ".tabbar 下内边距必须优先读壳注入的 --safe-b、再落回 env()（WebView 里 env() 恒为 0）：" + tb[1]);
+  const sh = html.match(/\.sheet\{[^}]*padding:([^;]*);/);
+  assert.ok(sh && /var\(--safe-b/.test(sh[1]), "底部弹层 .sheet 没垫 --safe-b：最后一行按钮落在小白条底下");
+  /* 正文的下边距也要跟着长：tabbar 高了，最后那张卡就得往下让同样的量 */
+  const wrap = html.match(/\.wrap\{[^}]*padding:([^;]*);/);
+  assert.ok(wrap && /var\(--safe-b/.test(wrap[1]), ".wrap 底部留白没跟着 --safe-b 长：最后那张卡会被垫高后的 tabbar 盖住");
+  /* 原生侧的对应物在壳里（MainActivity.pushSafeInsets），这边只盯页面确实把值用上了 */
 });
 
 test("顶栏必须给状态栏留那一格：--sb 优先、env() 兜底", () => {
@@ -528,12 +550,13 @@ test("产品收益表：首列基准宽不能再涨回去（用户要的就是�
     + "名字就成省略号串了 —— 用户要的是「名字窄一点」，不是「名字没了」");
 });
 
-test("产品收益表：320 屏也得一屏看完 7 列（v52 铺满之后新拿下的预算）", () => {
+test("产品收益表：320 屏也得一屏看完 6 列（v52 铺满之后新拿下的预算）", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   /* 320 视口下 boardWrap 的 clientWidth 实测 290px：320 − .wrap 左右内边距 28 − 卡片
      左右内边距 32 − 卡片描边 2 + .board-edge 顶回去的 32。这一档以前要横滑 38px，
      铺满之后不用了，所以把它跟 360 那条一起钉住。
-     注意这里是「刚好」：278 + plate 左右 12 = 290，一个像素的余量都没有。 */
+     v53 那版 278 + plate 左右 12 = 290，余量为 0；v54 删掉持有天数、万收收到两位之后
+     六列合计 252 + 12 = 264，极窄屏终于有了 26px 余量。 */
   const cls = clsKeyMap();
   for (const mode of ["full", "lean"]) {
     const w = cssWidths(html, mode);
@@ -543,6 +566,44 @@ test("产品收益表：320 屏也得一屏看完 7 列（v52 铺满之后新拿
     assert.ok(total <= room,
       `${mode} 合计 ${total}px > 320 屏表格实得 ${room}px：极窄屏又退回横滑，上面那条预算的前提就没了`);
   }
+});
+
+/* ---------- v54：持有天数下线、万收两位小数 ---------- */
+test("产品收益表：没有持有天数列，万收在表里只给两位", () => {
+  /* 用户两条要求都是「看着烦」：持有天数不参与挑产品、万收第四位小数是噪声。
+     显示位数变了，宽度预算跟着变（上面那两条预算测试读的就是新 CSS），
+     所以这两件事得有独立的断言，不能只靠预算测试间接盯住。 */
+  const cls = mapBody("BD_CLS");
+  const cell = mapBody("BD_CELL");
+  assert.ok(!/holdDays/.test(cls), "BD_CLS 里还有 holdDays：那一列已经按用户要求下线了");
+  assert.ok(!/holdDays/.test(cell), "BD_CELL 里还有 holdDays：表里没有这一列，渲染函数不该再拼它");
+  const wan = cell.split("\n").find(l => /^\s*wan:/.test(l)) || "";
+  assert.ok(/wan2\(/.test(wan) && !/wan4\(/.test(wan), `表里的万收必须用 wan2()：${wan}`);
+  /* 详情页维持四位：那是单只产品看精度的地方，没有宽度压力，两个口径各留一处 */
+  assert.ok(/wan4\(wan\)/.test(APP_SRC), "详情页的万份收益不再用 wan4()：表里收到两位之后，四位只能在这里看");
+  /* 两个 helper 是箭头函数常量，fnBody()（按顶层 function 切）取不到，直接认声明行 */
+  const w2 = (APP_SRC.match(/^const wan2 = .*$/m) || [""])[0];
+  const w4 = (APP_SRC.match(/^const wan4 = .*$/m) || [""])[0];
+  assert.ok(/toFixed\(2\)/.test(w2), "wan2() 不是两位小数：" + w2);
+  assert.ok(/toFixed\(4\)/.test(w4), "wan4() 不再是四位：" + w4);
+});
+
+test("产品收益表：数字列宽度不得低于 v54 实测最坏串（离屏 nowrap 量出来的）", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const w = cssWidths(html, "full");
+  /* 这些数字来自 Playwright 实测：把最坏串放到表外的离屏探针上、white-space:nowrap、
+     字体逐项取真单元格的 computed 值来量（探针脚本不在仓里，方法写在这里）。
+     不能用子元素的 scrollWidth —— 被拉伸的格子里它恒等于格子宽，量出来永远是「刚好够」。 */
+  const need = {
+    "c-wan": 33,   /* wan2 最坏「-1.40」+ td 左右 4px */
+    "c-a": 50,     /* pctBd 最坏「-123.4%」+ 4px（退一位小数后 ≥100% 仍是三位整数） */
+    "c-zero": 21,  /* 表头「挂0 / 天」，内容最宽不过 2 位数 */
+  };
+  for (const [c, n] of Object.entries(need)) {
+    assert.ok(w[c] >= n, `全部模式 .${c} 基准 ${w[c]}px < 实测下限 ${n}px：nowrap 之下多出来的像素会盖到邻列`);
+  }
+  /* 排序默认键：持有天数没了，默认落在 7 日年化上（用户最常看的一列） */
+  assert.ok(/bdSort:\s*"a7"/.test(APP_SRC), "默认排序键不是 a7：持有天数下线后这是表里第一列数字，默认得落在它身上");
 });
 
 /* ---------- v53：更新判断的出口在界面上真的存在 ---------- */

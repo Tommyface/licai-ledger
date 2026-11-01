@@ -41,7 +41,9 @@ body{
   background-attachment:fixed;
   min-height:100vh;
 }
-.wrap{max-width:520px;margin:0 auto;padding:0 14px 90px;position:relative}
+/* 底部留白跟着 --safe-b 长：标签栏是 fixed 的、它自己变高，正文若不跟着多让一点，
+   最后那张卡就会被压在标签栏底下（v54 起底部 inset 归页面管，这里必须一起算）。 */
+.wrap{max-width:520px;margin:0 auto;padding:0 14px calc(90px + var(--safe-b, env(safe-area-inset-bottom, 0px)));position:relative}
 /* ---------- 顶栏 ---------- */
 .topbar{
   position:sticky;top:0;z-index:40;margin:0 -14px 12px;
@@ -160,7 +162,7 @@ details.adv[open]>summary::before{content:"▾ ";}
 .navtbl td{padding:7px 4px;border-bottom:1px dashed var(--line);text-align:right}
 .navtbl tbody tr:last-child td{border-bottom:0}
 /* ---------- 产品页收益表（v45 机构筛选 + 列排序；v48 两行表头 + 精简/全部两种列模式；
-   v49 数字列压到实测必需值，「全部」7 列在 360 屏也不用横滑了） ----------
+   v49 数字列压到实测必需值；v54 去掉持有天数 + 万收两位小数）----------
    7 列在手机上放不宽。v47 之前是直接把表撑到 600px 让用户横滑，实测没人意识到能滑，
    「显示不全」在用户那边等同于「列不存在」。v48 三件事一起做：
      · 产品名改成两行截断 → 第一列 190px 降到 88px（完整名字在点进去的详情弹层里就有）
@@ -170,7 +172,10 @@ details.adv[open]>summary::before{content:"▾ ";}
    而这一列本来就用颜色标了涨跌，正号是多余信息 —— 去掉之后（负数仍带「-」），
    数字列按「表头 / 最坏内容」里较宽的那个定宽（年化 46 / 万收 47 / 持有 25 / 挂0 20 = 230px），
    360 屏可用 298px，剩下的 66px 给产品名，七列合计 296px，不用再横滑。
-   320px 这种极窄屏当时仍需滑约 38px —— v52 把表格往外顶满之后，320 屏也放得下了。 */
+   320px 这种极窄屏当时仍需滑约 38px —— v52 把表格往外顶满之后，320 屏也放得下了。
+   v54 按用户要求去掉「持有天数」这一列、万收从四位小数收到两位：省下的 25px 没有全留给
+   表头，而是把年化列从 46 补到实测的 50（最坏串「-123.4%」）、万收按两位小数最坏串「-1.40」定到 33。
+   现在「全部」= 6 列 252px、「精简」= 4 列 242px，两个数都是列宽直加，min-width 必须跟它相等。 */
 /* 外层只管给渐影定位，内层只管滚动：两件事挤在同一个元素上不成立，
    overflow 容器会把自己的 ::after 一起裁掉，渐影就永远看不见。
    v52 再把这一层往外顶到卡片的内边距（卡片 padding 是 16px）：表格是这页最宽的
@@ -197,24 +202,22 @@ details.adv[open]>summary::before{content:"▾ ";}
    裁掉一条，横向滚动时后面那列的字会「漏」进产品名这一列（实测现象：名字左边冒出半个字）。
    width:100% 配 min-width：宽屏铺满卡片，窄屏按 min-width 溢出、交给横滑 ——
    这样不用为每种屏宽写一套断点，列宽也只有一处定义。 */
-.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:278px}
-/* 「全部」7 列的宽度是量出来的，数字列每列取「两行表头」与「最坏内容」里较宽的那个：
-   年化 46（表头「7日年化」）、万收 47（「-1.4000」）、持有 25（「341」）、挂0 20（表头），
-   合计 230px。表格铺满卡片内边距之后，360 屏带子有 330px（298 + 左右各 16），
+.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:252px}
+/* 「全部」6 列（v54 起没有持有天数）的宽度是量出来的，数字列取「两行表头」与「最坏内容」里较宽的那个：
+   年化 50（「-123.4%」）、万收 33（v54 起两位小数，最坏「-1.40」）、挂0 21（表头「挂0/天」），
+   48 + 33 + 21 + 3×50 = 252px。表格铺满卡片内边距之后，360 屏带子有 330px（298 + 左右各 16），
    扣掉 plate 那 6px×2，表格实得 318px；产品名给 48px 起 —— 多出来的宽度由 fixed
    布局按比例分给各列（不是只给首列），所以这里写的是「下限」不是「实得」：
-   48 在 360 屏实得 55px、411 屏 64px，两行 8~10 个汉字，数字列各多 7~15px。
+   48 在 360 屏实得 61px、411 屏 70px，两行 10 个汉字上下，数字列各多 4~12px。
    名字再宽就是抢数字的地盘了。完整名字在详情里，长按标题也能看全。 */
 .boardtbl .c-nm{width:48px}
-.boardtbl .c-hold{width:25px}
-.boardtbl .c-wan{width:47px}
-.boardtbl .c-a{width:46px}
-.boardtbl .c-zero{width:20px}
-/* 精简 = 5 列，只有 270px，首列可以给回 116px（两行约 20 个汉字），数字列维持 v48 尺寸 */
-.boardtbl.lean{min-width:270px}
-.boardtbl.lean .c-nm{width:116px}
-.boardtbl.lean .c-hold{width:28px}
-.boardtbl.lean .c-wan{width:48px}
+.boardtbl .c-wan{width:33px}
+.boardtbl .c-a{width:50px}
+.boardtbl .c-zero{width:21px}
+/* 精简 = 4 列，242px：首列给回 130px（两行约 22 个汉字），数字列维持实测宽度 */
+.boardtbl.lean{min-width:242px}
+.boardtbl.lean .c-nm{width:130px}
+.boardtbl.lean .c-wan{width:34px}
 .boardtbl.lean .c-a{width:50px}
 .boardtbl.lean .c-zero{width:28px}
 .boardtbl th{font-size:10px;color:var(--ink3);font-weight:600;text-align:right;padding:5px 2px;border-bottom:1px solid var(--line);line-height:1.15}
@@ -281,9 +284,15 @@ details.adv[open]>summary::before{content:"▾ ";}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .row-btn{display:flex;gap:9px}
 /* ---------- 底部导航 ---------- */
+/* v54：底部留白改成和顶部同一套机制 —— 壳量到的 inset 由原生写进 --safe-b，页面自己垫。
+   v52 是在原生给 WebView 加底部 padding 来让位的，没生效：position:fixed 的 bottom:0
+   贴的是「可视视口」的底，而 WebView 的 view padding 只挪内容绘制区，不动 fixed 元素 ——
+   结果标签栏照样画到小白条底下（用户实机反馈「底部小白条你没有修复」）。
+   两条路和 --sb 一样：--safe-b 优先（原生喂的真实值，含 24dp 下限），env() 兜底给浏览器 / PWA。 */
 .tabbar{
   position:fixed;bottom:0;left:0;right:0;z-index:50;background:rgba(255,255,255,.94);
-  backdrop-filter:blur(14px);border-top:1px solid var(--line);display:flex;padding:6px 0 calc(6px + env(safe-area-inset-bottom))
+  backdrop-filter:blur(14px);border-top:1px solid var(--line);display:flex;
+  padding:6px 0 calc(6px + var(--safe-b, env(safe-area-inset-bottom, 0px)))
 }
 .tabbar .tb{flex:1;background:none;border:0;font-family:inherit;color:var(--ink3);font-size:10.5px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 0;cursor:pointer;font-weight:600}
 .tabbar .tb .i{font-size:19px;line-height:1}
@@ -293,7 +302,7 @@ details.adv[open]>summary::before{content:"▾ ";}
 .mask.show{display:flex}
 .sheet{
   background:#fff;width:100%;max-width:520px;border-radius:20px 20px 0 0;max-height:92vh;overflow:auto;
-  padding:18px 16px calc(20px + env(safe-area-inset-bottom));animation:up .22s ease
+  padding:18px 16px calc(20px + var(--safe-b, env(safe-area-inset-bottom, 0px)));animation:up .22s ease
 }
 @keyframes up{from{transform:translateY(30px);opacity:.6}to{transform:none;opacity:1}}
 .sheet-t{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
@@ -336,7 +345,7 @@ details.adv[open]>summary::before{content:"▾ ";}
 .note.g{background:#e9f7f1;border-color:#c8ecdc;color:#0d7a52}
 .note.r{background:#fdeeee;border-color:#f3cfcf;color:#8a1f1f}
 .empty{text-align:center;color:var(--ink3);font-size:12.5px;padding:26px 0}
-.toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(20px);background:rgba(28,32,51,.94);color:#fff;padding:11px 18px;border-radius:24px;font-size:13px;z-index:200;opacity:0;transition:.25s;pointer-events:none;max-width:86%;text-align:center}
+.toast{position:fixed;left:50%;bottom:calc(96px + var(--safe-b, env(safe-area-inset-bottom, 0px)));transform:translateX(-50%) translateY(20px);background:rgba(28,32,51,.94);color:#fff;padding:11px 18px;border-radius:24px;font-size:13px;z-index:200;opacity:0;transition:.25s;pointer-events:none;max-width:86%;text-align:center}
 .toast.show{opacity:1;transform:translateX(-50%)}
 .spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -511,13 +520,12 @@ details.adv[open]>summary::before{content:"▾ ";}
     <div class="card">
       <div class="card-t"><h2>口径说明</h2></div>
       <div class="foot" style="text-align:left;padding-top:0">
-        持有天数：首笔确认日 → 今天，无成交记 0。<br>
-        万收：最新披露日的万份收益 =（当日净值 − 前一日净值）× 10000 ÷ 间隔自然日数。<br>
+        万收：最新披露日的万份收益 =（当日净值 − 前一日净值）× 10000 ÷ 间隔自然日数；表里取两位小数，详情页给四位。<br>
         近 7 / 14 / 30 日年化：(最新净值 ÷ N 个自然日前最近一条披露净值 − 1) × 365 ÷ N。<br>
         月挂 0 数：本月万份收益为 0 的<b>披露日</b>天数，没披露不计。<br>
         样本不足显示「—」，排序时这类行永远排在最后；数据以官方披露为准。<br>
         表头点一下按该列排序、再点翻转方向；右上角「精简 / 全部」切换列数，
-        近 14 / 30 日年化默认收在「全部」里（七列铺满到卡片边缘，320 宽的屏也刚好放得下，再窄才横滑，右边那道渐影就是提示），
+        近 14 / 30 日年化默认收在「全部」里（六列铺满到卡片边缘，320 宽的屏也刚好放得下，再窄才横滑，右边那道渐影就是提示），
         这个选择只存本机、不跟其它设备同步。
       </div>
     </div>

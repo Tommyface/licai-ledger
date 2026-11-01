@@ -10,14 +10,17 @@ import { BOARD_COLS, BOARD_LEAN, boardCols, NO_INST, instKey, instLabel, boardFi
   isZeroWan, monthZeroDays, boardSort } from "../js/domain/board.js";
 
 const row = (o) => ({ name: "P", ikey: NO_INST, inst: "", code: "", prodCode: "",
-  holdDays: 0, wan: null, a7: null, a14: null, a30: null, zero: 0, ...o });
+  wan: null, a7: null, a14: null, a30: null, zero: 0, ...o });
 
 /* ---- 列定义：顺序与文案就是产品页表头，改错了用户会读错口径 ---- */
 test("表头顺序与列数不能漂", () => {
   assert.deepEqual(BOARD_COLS.map(c => c[0]),
-    ["name", "holdDays", "wan", "a7", "a14", "a30", "zero"]);
+    ["name", "wan", "a7", "a14", "a30", "zero"]);
   assert.deepEqual(BOARD_COLS.map(c => c[1]),
-    ["产品名称", "持有天数", "万收", "近7日年化", "近14日年化", "近30日年化", "月挂0数"]);
+    ["产品名称", "万收", "近7日年化", "近14日年化", "近30日年化", "月挂0数"]);
+  /* v54 按用户要求砍掉「持有天数」列：台账页那张卡还在算持有天数，产品表里它既占宽
+     又不参与挑产品，删的是列不是口径（有测试盯着 BOARD_COLS 里不能再出现它）。 */
+  assert.ok(!BOARD_COLS.some(c => c[0] === "holdDays"), "持有天数列已按用户要求移除");
   /* 每列都得有口径说明：万收/N 日年化这类折算口径不写清就会被当成官方数字 */
   for (const c of BOARD_COLS) assert.ok(c[2] && c[2].length > 8, `列 ${c[1]} 缺口径说明`);
 });
@@ -42,7 +45,7 @@ test("精简列必须是全部列的子集，且保留首列与挂零列", () =>
   assert.ok(BOARD_LEAN.length < BOARD_COLS.length, "精简模式没有真的少列");
 });
 
-test("boardCols()：full 给全 7 列，其它一律按精简", () => {
+test("boardCols()：full 给全 6 列，其它一律按精简", () => {
   assert.equal(boardCols("full").length, BOARD_COLS.length);
   assert.deepEqual(boardCols("lean").map(c => c[0]), BOARD_LEAN);
   assert.deepEqual(boardCols("").map(c => c[0]), BOARD_LEAN);
@@ -50,7 +53,7 @@ test("boardCols()：full 给全 7 列，其它一律按精简", () => {
   /* full 返回副本：调用方排序不能改到模块级的 BOARD_COLS */
   const f = boardCols("full");
   f.pop();
-  assert.equal(BOARD_COLS.length, 7, "boardCols('full') 返回的不是副本");
+  assert.equal(BOARD_COLS.length, 6, "boardCols('full') 返回的不是副本");
 });
 
 /* ---- 机构键 ---- */
@@ -137,12 +140,12 @@ test("挂零列升序时 0 在前，同值按名称稳定", () => {
   assert.deepEqual(boardSort(rows, "zero", true).map(r => r.name), ["C", "A", "B"]);
 });
 test("排序不改动入参数组（渲染会反复调，原地排会打乱上一轮结果）", () => {
-  const rows = [row({ name: "A", holdDays: 1 }), row({ name: "B", holdDays: 9 })];
-  boardSort(rows, "holdDays", false);
+  const rows = [row({ name: "A", a7: 1 }), row({ name: "B", a7: 9 })];
+  boardSort(rows, "a7", false);
   assert.deepEqual(rows.map(r => r.name), ["A", "B"]);
 });
-test("缺列值按字符串比也不抛（holdDays 与 name 混型时）", () => {
-  const rows = [row({ name: "A", holdDays: 3 }), row({ name: "B", holdDays: "10" })];
-  const out = boardSort(rows, "holdDays", false);
+test("缺列值按字符串比也不抛（数字列混进字符串时）", () => {
+  const rows = [row({ name: "A", a7: 3 }), row({ name: "B", a7: "10" })];
+  const out = boardSort(rows, "a7", false);
   assert.equal(out.length, 2);
 });

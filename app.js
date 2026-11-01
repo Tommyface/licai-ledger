@@ -43,7 +43,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v53";
+const APP_VER = "v54";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -109,9 +109,10 @@ let NOTIFY = { on: false, lastCheck: 0 };
 /* 用户已忽略的抓取告警签名（按「失败集合」生成，集合一变就重新提示） */
 let ALERT_DISMISSED = "";
 let UI = { range: "day", groupBy: "inst", calY: 0, calM: 0, selDate: "", activePick: "", viewProd: "", detTab: "active", prodRange: "3m", prodOv: "a7", detQ: "", detInst: "", detSort: "dayP", detAsc: false,
-  /* 产品页收益表：机构筛选 / 搜索 / 排序列与方向（默认按持有天数降序）
+  /* 产品页收益表：机构筛选 / 搜索 / 排序列与方向（默认按 7 日年化降序 ——
+     v54 起持有天数那一列已下线，默认键跟着落到表里第一列数字上）
      bdCols = "" 表示这台设备还没选过列模式，此时按屏宽给默认（见 bdMode()） */
-  bdQ: "", bdInst: "", bdSort: "holdDays", bdAsc: false, bdCols: "" };
+  bdQ: "", bdInst: "", bdSort: "a7", bdAsc: false, bdCols: "" };
 
 /* ---------- 「隐藏」开关的两个唯一出口 ----------
    以前各处手写「隐藏时输出四个星」的三元式，写漏一处就等于没遮：
@@ -937,7 +938,6 @@ function renderProd() {
 function boardRows() {
   const ym = today().slice(0, 7);
   return DATA.products.map(p => {
-    const pos = position(p);
     const st = navStats(p);
     return {
       id: String(p.id),
@@ -946,7 +946,6 @@ function boardRows() {
       ikey: instKey(p.inst),
       code: p.code || "",
       prodCode: p.prodCode || "",
-      holdDays: pos.holdDays,
       lastDate: st.dates.length ? st.dates[st.dates.length - 1] : "",
       /* null = 没有可比的前值 / 样本不足，渲染成「—」，排序永远垫底 */
       wan: lastNum(st.wan),
@@ -957,15 +956,20 @@ function boardRows() {
     };
   });
 }
-/** 万收：4 位小数。2 位会把 0.45 和 0.48 显示成同一个数，表就白排了 */
+/** 万收：详情页给 4 位（单个产品看精度，那里没有宽度压力，0.4512 与 0.4548 得分得开） */
 const wan4 = (v) => (v === null ? "—" : v.toFixed(4));
+/* 表里给 2 位（v54，用户要求）：这一列是用来横向比哪只高的，第四位小数是噪声，
+   而它要 4 个字宽 —— 2 位省下 12px，整张表的宽度预算跟着松一档。
+   排序仍按原始数值走，不受显示位数影响（boardSort 读的是 r.wan，不是这个字符串）。 */
+const wan2 = (v) => (v === null ? "—" : v.toFixed(2));
 /* 年化：数值口径与详情页一致（同一套 navStats），null 显示「—」；
    但表里的写法故意与详情页不同 —— 不带正号、|≥10%| 只给一位小数：
    三列年化各要 7 个字宽，「+」一个符号就吃掉 7px × 3 = 21px，而这一列本来就用颜色
    标了涨跌（红涨绿跌），负数仍会带「-」。省下来的 21px 全部还给产品名，
-   这是「全部」7 列能塞进 360 屏的关键。
-   退一位小数是同一条理由：「-12.34%」要 50px，比列宽（46）还宽 4px，
-   nowrap 会把「%」挤到隔壁那一列的数字上。两位小数的精度在这里本来就是噪声。 */
+   这是「全部」六列能塞进 360 屏的关键。
+   退一位小数是同一条理由：列宽 50px 是按最坏串「-123.4%」量的，不退的话同样三位整数
+   要多写一位小数（「-123.4%」→「-123.45%」≈ 56px），nowrap 就把「%」挤到隔壁那一列的数字上。
+   两位小数的精度在这里本来就是噪声。 */
 const pctBd = (v) => {
   if (v === null) return "—";
   const p = v * 100;
@@ -978,22 +982,21 @@ const pctBd = (v) => {
    少列时两边不可能对不上。每个 key 都必须有类名和渲染函数，
    漏了会被 tests/app_core.test.mjs 的门禁直接跑红。 */
 const BD_CLS = {
-  name: "c-nm", holdDays: "c-hold", wan: "c-wan",
+  name: "c-nm", wan: "c-wan",
   a7: "c-a", a14: "c-a", a30: "c-a", zero: "c-zero",
 };
 const BD_CELL = {
   /* 名字两行截断，所以补一个 title：手机上没有 hover，长按能看到全名 */
   name: (r) => `<td class="nm c-nm"><button class="link" title="${esc(r.name)}" onclick="openProdDetail('${r.id}')">${esc(r.name)}</button></td>`,
-  holdDays: (r) => `<td class="c-hold">${r.holdDays}</td>`,
-  wan: (r) => `<td class="c-wan ${cls(r.wan === null ? 0 : r.wan)}">${wan4(r.wan)}</td>`,
+  wan: (r) => `<td class="c-wan ${cls(r.wan === null ? 0 : r.wan)}">${wan2(r.wan)}</td>`,
   a7: (r) => `<td class="c-a ${cls(r.a7 === null ? 0 : r.a7)}">${pctBd(r.a7)}</td>`,
   a14: (r) => `<td class="c-a ${cls(r.a14 === null ? 0 : r.a14)}">${pctBd(r.a14)}</td>`,
   a30: (r) => `<td class="c-a ${cls(r.a30 === null ? 0 : r.a30)}">${pctBd(r.a30)}</td>`,
   zero: (r) => `<td class="c-zero ${r.zero ? "warn-n" : "muted"}">${r.zero}</td>`,
 };
 
-/** 这台设备的列模式。没手动选过时按视口宽给默认：v49 起 7 列只要 296px，
-    360 屏就放得下，所以默认直接「全部」；只有 320 这类极窄屏才退回精简。 */
+/** 这台设备的列模式。没手动选过时按视口宽给默认：v54 起「全部」六列只要 252px，
+    连 320 屏（表格实得 278px）都放得下，所以默认直接「全部」；再窄才退回精简。 */
 function bdMode() {
   if (UI.bdCols === "full" || UI.bdCols === "lean") return UI.bdCols;
   const w = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 360;
@@ -1056,7 +1059,7 @@ function renderBoard() {
     return;
   }
   /* 金额类一列都没有，所以这张表不需要走 shown() 遮蔽：
-     万收与年化是产品公开披露口径，持有天数与挂零天数不含金额信息。 */
+     万收与年化是产品公开披露口径，挂零天数不含金额信息。 */
   tbl.innerHTML = `<thead><tr>${head}</tr></thead><tbody>`
     + list.map(r => `<tr>` + cols.map(c => BD_CELL[c[0]](r)).join("") + `</tr>`).join("")
     + `</tbody>`;
