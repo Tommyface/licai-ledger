@@ -2,7 +2,7 @@
    外壳缓存优先；数据由 GitHub 同步，不走缓存
    注意：改 app.js / index.html 后必须把下面的 CACHE 版本号 +1，
         并与 app.js 里的 APP_VER 保持一致（scripts/check-version.sh 会校验）。 */
-const CACHE = "licai-ledger-v54";
+const CACHE = "licai-ledger-v55";
 const SHELL = ["./", "./index.html", "./app.js", "./manifest.json", "./icon-192.png", "./icon-512.png",
   /* 拆出去的 ES module：漏一个就会「index 新、模块旧」或装完离线打不开
      （check-version.sh 会从 app.js 的 import 逐层走一遍，比对这张表） */
@@ -10,7 +10,8 @@ const SHELL = ["./", "./index.html", "./app.js", "./manifest.json", "./icon-192.
   "./js/domain/nav.js", "./js/domain/position.js", "./js/domain/ocr.js",
   "./js/domain/calendar.js", "./js/domain/tomb.js", "./js/domain/sync.js",
   "./js/domain/syncstatus.js", "./js/domain/update.js",
-  "./js/domain/board.js"];
+  "./js/domain/board.js",
+  "./js/domain/monthly.js"];
 
 self.addEventListener("install", e => {
   /* 预缓存外壳。这里不能用 cache.addAll(SHELL)：

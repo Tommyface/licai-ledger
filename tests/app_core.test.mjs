@@ -314,11 +314,13 @@ function shownSpans(src) {
 }
 const SPANS = shownSpans(APP_SRC);
 const inSpan = (idx, offset = 0) => SPANS.some(([a, b]) => idx + offset > a && idx + offset < b);
+/* v55 资产月报：报告是全新的一整屏个人数字（月收益、构成、期初期末），
+   以前「隐藏」管不到的地方现在全都露在一张弹层里，所以两个函数都要进门禁。 */
 const TONE_FN = ["renderHome", "setStat", "renderCal", "pendingHtml", "closedHtml",
-  "renderDetailBody", "renderTrade", "renderProd"];
+  "renderDetailBody", "renderTrade", "renderProd", "renderMonthly", "monthlyHintText"];
 /* 个人数字的遮蔽面：金额 + 份额。份额两位小数，6.9 万份就是 6.9 万元，
    遮了金额不遮份额等于没遮；净值 / 成本净值是四位小数的公开或衍生口径，不在此列。 */
-const MASK_FN = [...TONE_FN, "renderProdDetail"];
+const MASK_FN = [...TONE_FN, "renderProdDetail"];   /* renderMonthly / monthlyHintText 已随 TONE_FN 进入 */
 
 test("隐藏：app.js 里不许再手写「隐藏时输出星号」的三元式", () => {
   const hits = APP_SRC.match(/hideAmount\s*\?\s*["'`]\*{2,}["'`]/g) || [];
@@ -632,3 +634,56 @@ function mapBody(name) {
   assert.ok(j > i, `const ${name} = { 没有收尾`);
   return APP_SRC.slice(i, j + 3);
 }
+
+/* ---------- v55：资产月报与「我的持仓 · 持仓年化」 ----------
+   这一组守的是接线，不是算法（算法在 tests/monthly.test.mjs）：
+   弹层里的 class 有没有对应样式、内联 onclick 的函数有没有挂到 window、
+   以及首页与月报是不是还在用同一份月收益公式。 */
+const HTML55 = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+
+test("月报：弹层用到的每个 class 都得有样式，不然就是一堆裸文字", () => {
+  const body = fnBody("renderMonthly");
+  const used = new Set();
+  for (const m of body.matchAll(/class="([^"$]+)"/g)) {
+    for (const t of m[1].trim().split(/\s+/)) if (t) used.add(t);
+  }
+  /* chip 的选中态由模板拼出来的 `${k === ym ? " on" : ""}`，单独补进来 */
+  used.add("on");
+  assert.ok(used.size >= 12, `只读到 ${used.size} 个 class 名：月报模板是不是被删了`);
+  const miss = [...used].filter(c => !new RegExp("\\." + c + "[\\s{,:>.]").test(HTML55));
+  assert.deepEqual(miss, [], `这些 class 在 index.html 里没有样式规则：${miss.join(", ")}`);
+});
+
+test("月报：入口在内联 onclick 里调用，函数就必须挂到 window", () => {
+  /* ES module 的顶层声明不再自动进 window —— 漏一个导出就是点一下报一次
+     ReferenceError，而且只在真机上、页面已经渲染完之后才看得见。 */
+  const bridge = APP_SRC.slice(APP_SRC.indexOf("Object.assign(window, {"));
+  assert.ok(bridge.slice(0, 2000).includes("openMonthly"), "openMonthly 没进 window 桥：首页入口点不动");
+  assert.ok(bridge.slice(0, 2000).includes("setRepMonth"), "setRepMonth 没进 window 桥：月份芯片点不动");
+  assert.ok(/onclick="openMonthly\(\)"/.test(HTML55), "首页没有资产月报入口");
+  assert.ok(/id="monthlyHint"/.test(HTML55), "入口没有提示行元素：renderHome 无处写月份与收益");
+  assert.ok(/\$\("monthlyHint"\)/.test(fnBody("renderHome")),
+    "renderHome 不刷新入口提示：改完数据那行字还停在旧月份");
+});
+
+test("我的持仓：持仓年化紧跟在持仓收益后面，不足 7 天不给数", () => {
+  const b = fnBody("renderProdDetail");
+  const i = (t) => b.indexOf(t);
+  assert.ok(i("持仓收益") > 0 && i("持仓年化") > i("持仓收益") && i("持仓份额") > i("持仓年化"),
+    "持仓年化没排在持仓收益之后（用户要求的位置）");
+  assert.ok(/annualValid \? shown\(pct\(pos\.holdAnnual\)\)/.test(b),
+    "持仓年化没走 annualValid / shown：不足 7 天会给出夸张年化，隐藏时还会明文");
+  assert.ok(/持有不足 7 天/.test(b), "不足 7 天时要有替代文案，不能显示 0.00%");
+});
+
+test("月收益只有一份实现：首页与月报共用 monthly.js", () => {
+  /* v55 把 monthProfit / marketOn 的循环本体搬进 js/domain/monthly.js。
+     谁要是再在 app.js 里手写一遍「份额 × 净值差」，首页与月报就会算出两个数 ——
+     而这两个数就摆在同一屏上。 */
+  assert.ok(/productMonthDays\(p, DATA\.trades/.test(fnBody("monthProfit")),
+    "monthProfit 不再复用 productMonthDays：月收益出现了第二份实现");
+  assert.ok(/marketOnAt\(DATA\.products, DATA\.trades/.test(fnBody("marketOn")),
+    "marketOn 不再复用 monthly.js：年化分母出现了第二份实现");
+  assert.ok(!/navSeries\(p\)[\s\S]{0,200}?i === 0/.test(fnBody("monthProfit")),
+    "monthProfit 里又出现了逐日循环");
+});

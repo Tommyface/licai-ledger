@@ -4,7 +4,7 @@
   "type": "module",
   "description": "个人理财台账：纯静态 PWA，无构建步骤。此文件只为让 Node 把 .js 当 ES module（CI 的 node --check / node --test）",
   "scripts": {
-    "test": "node --test tests/app_core.test.mjs tests/handlers.test.mjs tests/calendar.test.mjs tests/tomb.test.mjs tests/sync_merge.test.mjs tests/board.test.mjs tests/syncstatus.test.mjs tests/update.test.mjs",
+    "test": "node --test tests/app_core.test.mjs tests/handlers.test.mjs tests/calendar.test.mjs tests/tomb.test.mjs tests/sync_merge.test.mjs tests/board.test.mjs tests/syncstatus.test.mjs tests/update.test.mjs tests/monthly.test.mjs",
     "typecheck": "tsc -p jsconfig.json",
     "check": "bash scripts/check-version.sh && node scripts/check-calendar.mjs && npm run typecheck && npm test"
   }

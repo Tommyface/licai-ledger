@@ -110,6 +110,31 @@ details.adv[open]>summary::before{content:"▾ ";}
 .entry .tx b{display:block;font-size:13px;font-weight:650}
 .entry .tx span{font-size:11px;color:var(--ink2)}
 .entry .go{background:var(--brand);color:#fff;border:0;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:650;font-family:inherit;cursor:pointer}
+/* ---------- 资产月报（v55）：报告弹层里新加的三块视图 ----------
+   横向条形（收益构成）、环形（资产构成）、两行式小结（交易小结）。
+   宽度全部用 flex + 省略号：机构名是用户自己填的，长起来没有边界，
+   不能让它把右边的数字挤到下一行去。 */
+.mbar{display:flex;align-items:center;gap:8px;margin:8px 0}
+.mbar .nm{flex:0 0 62px;font-size:11.5px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mbar .tr{flex:1;height:8px;border-radius:5px;background:var(--track);overflow:hidden}
+/* 条的颜色跟着 tone() 走：隐藏开关打开时 tone 返回 muted，
+   条就退回中性紫 —— 不然一片红绿等于把每家的盈亏方向直接写在屏幕上。 */
+.mbar .fl{height:100%;border-radius:5px;background:var(--brand)}
+.mbar .fl.up{background:var(--up)}
+.mbar .fl.down{background:var(--down)}
+.mbar .vv{flex:0 0 82px;display:flex;flex-direction:column;align-items:flex-end;line-height:1.25;text-align:right;font-size:11.5px;font-weight:650;font-variant-numeric:tabular-nums}
+.mbar .vv i{font-style:normal;font-weight:500;font-size:10px;color:var(--ink3)}
+.donut{display:flex;gap:12px;align-items:center}
+.donut>svg{width:116px;height:116px;flex:0 0 116px}
+.dlegend{flex:1;min-width:0;font-size:11.5px;color:var(--ink2)}
+.dlegend .r{display:flex;align-items:center;gap:6px;margin:5px 0}
+.dlegend i{width:9px;height:9px;border-radius:3px;flex:0 0 9px}
+.dlegend .n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dlegend .p{font-weight:650;font-variant-numeric:tabular-nums}
+.mline{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:7px 0;border-bottom:1px dashed var(--line)}
+.mline:last-child{border-bottom:0}
+.mline span{color:var(--ink2);min-width:0}
+.mline b{font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap}
 /* ---------- 今日收益 ---------- */
 .sum-head{text-align:center;padding:4px 0 12px}
 .sum-head .big{font-size:30px;font-weight:750;line-height:1.2}
@@ -389,6 +414,11 @@ details.adv[open]>summary::before{content:"▾ ";}
         </div>
         <button class="mini" id="btnHide" onclick="toggleHide()">隐藏</button>
       </div>
+      <div class="entry" onclick="openMonthly()">
+        <div class="ic">报</div>
+        <div class="tx"><b>资产月报</b><span id="monthlyHint">按月看收益、构成与资产变动</span></div>
+        <button class="go" onclick="event.stopPropagation();openMonthly()">查看</button>
+      </div>
       <div class="entry" onclick="go('pg-trade')">
         <div class="ic">⇄</div>
         <div class="tx"><b>交易中心</b><span id="tradeHint">按时间查看买入、赎回与收益</span></div>
@@ -572,6 +602,8 @@ details.adv[open]>summary::before{content:"▾ ";}
         · N 日年化 = (nav<sub>t</sub> ÷ N 个自然日前最近净值 − 1) ÷ N × 365（N 取 7 / 14 / 30）<br>
         · 持仓年化 = 持仓盈亏 ÷ 成本 × 365 ÷ 持有天数（<b>本金天数加权</b>，不足 7 天不给年化）<br>
         · 成立以来年化 = (末值 ÷ 首值 − 1) ÷ 持有天数 × 365<br>
+        · <b>资产月报</b>：月收益 = 逐日「当日已确认份额 × 净值差」之和（与首页本月收益同一个数）；<br>
+          月年化 = 月收益 ÷ 期末市值 × 365 ÷ 当月天数；买入/赎回按<b>确认日</b>归月，在途不计息、不计入净投入<br>
         样本不足时显示「—」，<b>不估算、不补齐</b>。以上均为便于横向对比的折算口径，与官方年化可能存在差异。
       </div>
       <div class="note" style="margin-top:10px">

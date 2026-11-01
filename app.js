@@ -16,7 +16,7 @@ import { $, pad, fmtDate, parseDate, today, money, signMoney, pct, cls, uid, esc
 import { ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus }
   from "./js/core/orgs.js";
 import { parseProductInput, rowAddable } from "./js/core/paste.js";
-import { navSeries, navAt, navOnOrBefore, latestNav, navHit } from "./js/domain/nav.js";
+import { navSeries, navAt, latestNav, navHit } from "./js/domain/nav.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
   computePosition } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
@@ -27,6 +27,8 @@ import { syncBadge, syncLine } from "./js/domain/syncstatus.js";
 import { readRelease, updateVerdict } from "./js/domain/update.js";
 import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
   boardCols, monthZeroDays, boardSort } from "./js/domain/board.js";
+import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
+  productMonthDays, profitShares } from "./js/domain/monthly.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -43,7 +45,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v54";
+const APP_VER = "v55";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -112,7 +114,9 @@ let UI = { range: "day", groupBy: "inst", calY: 0, calM: 0, selDate: "", activeP
   /* 产品页收益表：机构筛选 / 搜索 / 排序列与方向（默认按 7 日年化降序 ——
      v54 起持有天数那一列已下线，默认键跟着落到表里第一列数字上）
      bdCols = "" 表示这台设备还没选过列模式，此时按屏宽给默认（见 bdMode()） */
-  bdQ: "", bdInst: "", bdSort: "a7", bdAsc: false, bdCols: "" };
+  bdQ: "", bdInst: "", bdSort: "a7", bdAsc: false, bdCols: "",
+  /* 资产月报（v55）：当前查看的月份。0 = 还没打开过，首次打开落到最近一个有收益变动的月份 */
+  repY: 0, repM: 0 };
 
 /* ---------- 「隐藏」开关的两个唯一出口 ----------
    以前各处手写「隐藏时输出四个星」的三元式，写漏一处就等于没遮：
@@ -458,36 +462,22 @@ function dayProfit(date) {
 }
 /* 某自然月收益（#19 口径，2026-09-15）：该月每个披露日的日收益加总
    （当日已确认份额 × 净值差），与日历逐日加总完全一致。
-   产品序列首条披露日无前值，不产生收益（与 dayProfit 同规则）。 */
+   v55 起这条循环本体搬到 js/domain/monthly.js 的 productMonthDays ——
+   首页那两格「本月 / 上月收益」与资产月报的月收益必须是同一个数，
+   两处各写一遍迟早会算出两个版本（用户拿它对银行 App 的账）。 */
 function monthProfit(y, m) {
-  const first = `${y}-${pad(m)}-01`;
-  const last = `${y}-${pad(m)}-${pad(new Date(y, m, 0).getDate())}`;
+  const b = monthBounds(y, m);
   let s = 0;
   for (const p of DATA.products) {
-    const s0 = navSeries(p);
-    for (let i = 0; i < s0.length; i++) {
-      const d = s0[i][0];
-      if (d < first || d > last || i === 0) continue;
-      const sh = sharesOn(p, d);
-      if (sh > 0) s += sh * (Number(s0[i][1]) - Number(s0[i - 1][1]));
-    }
+    for (const [, v] of productMonthDays(p, DATA.trades, b.first, b.last)) s += v;
   }
   return s;
 }
 
 /* 某日的组合市值（截至该日已确认份额 × 该日最近净值）—— 年化分母用，
-   不能拿今天的市值去折算历史月份（当月加仓会把上月年化压低） */
-function marketOn(endDate) {
-  let s = 0;
-  for (const p of DATA.products) {
-    const sh = sharesOn(p, endDate);
-    if (sh <= 0) continue;
-    const b = navOnOrBefore(p, endDate);
-    if (!b) continue;
-    s += sh * Number(b[1]);
-  }
-  return s;
-}
+   不能拿今天的市值去折算历史月份（当月加仓会把上月年化压低）。
+   本体同样搬进 monthly.js，首页年化与月报年化的分母从此是同一句话。 */
+function marketOn(endDate) { return marketOnAt(DATA.products, DATA.trades, endDate); }
 
 /* 组合年化（本月/上月）：区间收益 / 该月末市值 × 365 / 在册天数 */
 function annualize(profit, y, m) {
@@ -509,6 +499,8 @@ function renderHome() {
   $("totalAsset").textContent = shown(money(pf.totalAsset));
   $("tradeHint").textContent = `共 ${DATA.trades.length} 笔交易 · ${pf.rows.length} 只持仓`
     + (pf.pendingRows.length ? ` · ${pf.pendingRows.length} 只在途` : "");
+  /* 资产月报入口那行提示（v55）：让用户不点开也知道这个月赚了多少、值不值得看 */
+  if ($("monthlyHint")) $("monthlyHint").textContent = monthlyHintText();
   /* 今日/区间收益 */
   const now = new Date(); const y = now.getFullYear(), m = now.getMonth() + 1;
   let val = 0, lab = "";
@@ -1721,8 +1713,11 @@ function lastNum(arr) {
 }
 
 /* 内联 SVG 双轴折线图：vals 走左轴（净值），ov 走右轴（叠加指标） */
-function svgChart(dates, vals, ov) {
+/* 纵轴标签格式化：净值图用四位小数（默认），月报的累计收益用元。
+   fmt 由调用方传入，且必须是「已经遮过」的文本 —— 画图这一层不认识钱。 */
+function svgChart(dates, vals, ov, fmt) {
   const W = 640, H = 230, L = 50, R = 58, T = 16, B = 26;
+  const lab = fmt || (v => v.toFixed(4));
   const iw = W - L - R, ih = H - T - B;
   const n = vals.length;
   if (!n) return `<div class="empty">该区间内没有净值数据</div>`;
@@ -1767,8 +1762,8 @@ function svgChart(dates, vals, ov) {
   g += `<polyline points="${navPts.join(" ")}" fill="none" stroke="#5b5bd6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
   g += `<circle cx="${X(n - 1).toFixed(1)}" cy="${Yn(vals[n - 1]).toFixed(1)}" r="3" fill="#5b5bd6"/>`;
   /* 左轴：净值 */
-  g += `<text x="${L - 8}" y="${T + 4}" text-anchor="end" font-size="10" fill="#9aa0bb">${nMax.toFixed(4)}</text>`;
-  g += `<text x="${L - 8}" y="${T + ih}" text-anchor="end" font-size="10" fill="#9aa0bb">${nMin.toFixed(4)}</text>`;
+  g += `<text x="${L - 8}" y="${T + 4}" text-anchor="end" font-size="10" fill="#9aa0bb">${lab(nMax)}</text>`;
+  g += `<text x="${L - 8}" y="${T + ih}" text-anchor="end" font-size="10" fill="#9aa0bb">${lab(nMin)}</text>`;
   /* 右轴：叠加指标 */
   if (hasOv) {
     g += `<text x="${L + iw + 8}" y="${T + 4}" font-size="10" fill="#e08b00">${oHi.toFixed(2)}</text>`;
@@ -1890,6 +1885,7 @@ function renderProdDetail() {
     <div class="grid2">
       <div class="stat"><div class="l">持有金额</div><div class="v">${shown(money(pos.market))}</div><div class="cap">已确认份额 × 最新净值</div></div>
       <div class="stat"><div class="l">持仓收益</div><div class="v ${tone(pos.profit)}">${shown(signMoney(pos.profit))}</div><div class="cap">市值 − 持仓成本</div></div>
+      <div class="stat"><div class="l">持仓年化</div><div class="v ${pos.annualValid ? tone(pos.holdAnnual) : "muted"}" style="font-size:16px">${pos.annualValid ? shown(pct(pos.holdAnnual)) : "持有不足 7 天"}</div><div class="cap">${pos.annualValid ? `收益 ÷ 成本 × 365 ÷ ${pos.holdDays} 天` : "天数太短，折算没有意义"}</div></div>
       <div class="stat"><div class="l">持仓份额</div><div class="v" style="font-size:15px">${shown(pos.shares.toFixed(2))}</div><div class="cap">已确认份额，不含在途</div></div>
       <div class="stat"><div class="l">成本净值</div><div class="v" style="font-size:15px">${pos.shares > 0 ? shown((pos.cost / pos.shares).toFixed(4)) : "—"}</div><div class="cap">买入金额合计 ÷ 份额</div></div>
     </div>` : ""}
@@ -1932,6 +1928,155 @@ function chartBlock(st, i0, ovArr, _i) {
   const dates = st.dates.slice(i0), vals = st.vals.slice(i0);
   const ov = ovArr ? ovArr.slice(i0) : null;
   return svgChart(dates, vals, ov);
+}
+
+/* ============================================================
+   资产月报（v55）
+   ------------------------------------------------------------
+   算钱的部分全部在 js/domain/monthly.js（每一条口径都有 tests/monthly.test.mjs 盯着），
+   这里只负责把结果拼成一张报告弹层。三件事写在前面：
+     · 数字一律走 shown() / tone()。「隐藏」是按给旁边的人看时按的，
+       报告里任何一处明文，等于把整月盈亏摆在大屏上。
+     · 图上的坐标文字也是数字：格式化函数由这里传进 svgChart / svgDonut，
+       画图的两个函数自己不认识钱，遮蔽与否只由渲染层决定。
+     · 翻月份就重算整月，不做缓存。monthReport 只扫净值序列，一次几十毫秒；
+       缓存换来的是「编辑完交易，报告还停在旧数」这种更难解释的现象。
+   ============================================================ */
+/* 环形配色：品牌紫打头，其余按「能分开、不刺眼」排。
+   机构数量超过 8 家时循环复用（此时每一环旁边都有文字图例，不会认错）。 */
+const REP_COLORS = ["#5b5bd6", "#f0a020", "#1a9e6a", "#e8474f", "#8b6fd6", "#5aa8e0", "#c9a227", "#9aa0bb"];
+
+/* 打开报告时默认落在哪个月、入口提示报哪个月：倒着找最近一个「有收益变动」的月份。
+   当月刚开头、净值还没披露时，落回当月只会显示一份全 0 的表 —— 那正是该看上月的时候。
+   一个月都没变动（新设备、整年挂零）才落回当月，界面总得有个起点。 */
+function repLatest() {
+  const now = new Date();
+  const td = today();
+  const list = monthList(DATA.products, now.getFullYear(), now.getMonth() + 1);
+  let cur = null;
+  for (const ym of list) {
+    const r = monthReport(DATA.products, DATA.trades, Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), td);
+    if (!cur) cur = r;
+    if (r.profit) return r;
+  }
+  return cur;
+}
+
+/* 入口下面那行提示：月份 + 月收益 + 月年化，一眼看出这个月有没有必要点开。
+   逐字段走 shown()：整串一起遮会把月份也变星号，看不出是「没数据」还是「已隐藏」。 */
+function monthlyHintText() {
+  const r = repLatest();
+  if (!r || (!r.profit && !r.assetEnd)) return "还没有可报告的月份";
+  const lab = `${r.y}年${r.m}月${r.isCurrent ? "（本月）" : ""}`;
+  return `${lab} ${shown(signMoney(r.profit))} · 月年化 ${shown(pct(r.annual))}`;
+}
+
+function openMonthly() {
+  if (!UI.repY) {
+    const r = repLatest();
+    const now = new Date();
+    UI.repY = r ? r.y : now.getFullYear();
+    UI.repM = r ? r.m : now.getMonth() + 1;
+  }
+  renderMonthly();
+}
+function setRepMonth(btn, ym) {
+  if (btn) { btn.parentElement.querySelectorAll("button").forEach(b => b.classList.remove("on")); btn.classList.add("on"); }
+  UI.repY = Number(ym.slice(0, 4)); UI.repM = Number(ym.slice(5, 7));
+  renderMonthly();
+}
+
+/* 环形图。中心两行文字由调用方传进来（已经 shown() 处理过），这个函数只做排版。
+   每段是一条 stroke-dasharray 圆弧：圆周长 × 占比 = 段长，offset 累加负位移 = 起点。 */
+function svgDonut(parts, top, val) {
+  const S = 116, C = S / 2, R = 44, SW = 16;
+  const circ = 2 * Math.PI * R;
+  let g = `<svg viewBox="0 0 ${S} ${S}" role="img" style="display:block">`;
+  g += `<circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="var(--track)" stroke-width="${SW}"/>`;
+  let off = 0;
+  for (const p of parts) {
+    const len = Math.max(0, Math.min(1, p.share)) * circ;
+    if (len < 0.2) continue;                    /* 小于 0.2 单位的弧画出来只是一条缝，不画 */
+    g += `<circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="${p.color}" stroke-width="${SW}"`
+      + ` stroke-dasharray="${len.toFixed(1)} ${(circ - len).toFixed(1)}"`
+      + ` stroke-dashoffset="${(-off).toFixed(1)}" transform="rotate(-90 ${C} ${C})"/>`;
+    off += len;
+  }
+  g += `<text x="${C}" y="${C - 4}" text-anchor="middle" font-size="10" fill="#9aa0bb">${esc(top)}</text>`;
+  g += `<text x="${C}" y="${C + 12}" text-anchor="middle" font-size="14" font-weight="700" fill="#1c2033">${esc(val)}</text>`;
+  return g + `</svg>`;
+}
+
+function renderMonthly() {
+  const now = new Date();
+  const nowY = now.getFullYear(), nowM = now.getMonth() + 1;
+  const td = today();
+  const y = UI.repY || nowY, m = UI.repM || nowM;
+  const r = monthReport(DATA.products, DATA.trades, y, m, td);
+  const list = monthList(DATA.products, nowY, nowM);
+  const ym = `${y}-${m < 10 ? "0" + m : m}`;
+
+  /* 收益构成条：长度按 |profit| 归一（有亏有赚时贡献之和仍为 100%），正负用颜色区分（红涨绿跌与本 App 一致） */
+  const pShares = profitShares(r.byInst);
+  const maxAbs = r.byInst.reduce((mx, x) => Math.max(mx, Math.abs(x.profit)), 0);   /* 最长的那根当 100% */
+  const bars = r.byInst.map((x, i) => `
+    <div class="mbar">
+      <div class="nm" title="${esc(x.label)}">${esc(x.label)}</div>
+      <div class="tr"><div class="fl ${tone(x.profit)}" style="width:${maxAbs > 0 ? (Math.abs(x.profit) / maxAbs * 100).toFixed(1) : 0}%"></div></div>
+      <div class="vv"><span class="${tone(x.profit)}">${shown(signMoney(x.profit))}</span><i>${shown(pct(pShares[i]))}</i></div>
+    </div>`).join("");
+
+  /* 资产构成环：只画有市值的机构，合计写在圆心 */
+  const parts = r.byInst.filter(x => x.asset > 0)
+    .map((x, i) => ({ label: x.label, share: x.share, color: REP_COLORS[i % REP_COLORS.length] }));
+  const legend = parts.map(p => `
+    <div class="r"><i style="background:${p.color}"></i><span class="n" title="${esc(p.label)}">${esc(p.label)}</span>
+      <span class="p">${shown((p.share * 100).toFixed(1) + "%")}</span></div>`).join("");
+
+  /* 累计收益曲线：把 1 号 0 元作为起点，月份看起来是「从 0 涨到多少」而不是凭空一段线 */
+  const cDates = [r.first], cVals = [0];
+  for (const [d, v] of r.cum) { cDates.push(d); cVals.push(v); }
+  if (!r.cum.length) { cDates.push(r.end); cVals.push(0); }
+
+  openSheet(`<div class="sheet-t"><h3>资产月报</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    <div class="chips" style="margin:0 0 12px">
+      ${list.map(k => `<button class="chip${k === ym ? " on" : ""}" onclick="setRepMonth(this,'${k}')">${k.slice(0, 4)}年${Number(k.slice(5, 7))}月</button>`).join("")}
+    </div>
+    <div class="sum-head">
+      <div class="big ${tone(r.profit)}">${shown(signMoney(r.profit))}</div>
+      <div class="sub"><span class="rate ${tone(r.annual)}">${shown(pct(r.annual))}</span> 月年化 · ${r.m}月${r.isCurrent ? "进行中" : "整月"}</div>
+      <div class="cap" style="text-align:center;margin-top:5px">${r.first} ~ ${r.end} · 共 ${r.days} 天</div>
+    </div>
+    <div class="grid2">
+      <div class="stat"><div class="l">月资产变动</div><div class="v ${tone(r.change)}">${shown(signMoney(r.change))}</div><div class="cap">期末市值 − 期初市值</div></div>
+      <div class="stat"><div class="l">期末资产</div><div class="v">${shown(money(r.assetEnd))}</div><div class="cap">${r.isCurrent ? "按最新披露净值" : `${r.m}月末市值`}</div></div>
+      <div class="stat"><div class="l">净投入</div><div class="v ${tone(r.netInflow)}">${shown(signMoney(r.netInflow))}</div><div class="cap">买入 − 赎回到账 · 按确认日归月</div></div>
+      <div class="stat"><div class="l">持有明细</div><div class="v">${r.holdN}</div><div class="cap">${r.best ? "本月表现最好：" + esc(r.best.name) : "本月无收益变动"}</div></div>
+    </div>
+
+    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">累计收益走势</h2><span class="hint">单位：元</span></div>
+    <div class="chart-wrap">${svgChart(cDates, cVals, null, v => shown(Math.round(v).toLocaleString("zh-CN")))}</div>
+
+    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">收益构成</h2><span class="hint">按发行机构</span></div>
+    ${r.byInst.some(x => x.profit) ? bars : `<div class="cap">这个月没有任何收益变动。</div>`}
+
+    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">资产构成</h2><span class="hint">${r.holdN} 只持仓 / ${parts.length} 家机构</span></div>
+    ${parts.length ? `<div class="donut">${svgDonut(parts, "期末资产", shown(money(r.assetEnd)))}<div class="dlegend">${legend}</div></div>`
+      : `<div class="cap">期末没有持仓市值，画不出构成。</div>`}
+
+    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">交易小结</h2></div>
+    <div class="mline"><span>买入</span><b>${r.buyN} 笔 · ${shown(money(r.buyAmt))} 元</b></div>
+    <div class="mline"><span>赎回</span><b>${r.sellN} 笔 · 到账 ${shown(money(r.sellAmt))} 元</b></div>
+    <div class="mline"><span>赎回结算收益</span><b class="${tone(r.realized)}">${shown(signMoney(r.realized))}</b></div>
+    <div class="mline"><span>期初 → 期末</span><b>${shown(money(r.assetStart))} → ${shown(money(r.assetEnd))}</b></div>
+
+    <div class="cap" style="margin-top:14px">
+      月收益 = 逐日「当日已确认份额 × 净值差」之和，未披露日不做均摊，在途份额不计息；
+      月年化 = 月收益 ÷ 期末市值 × 365 ÷ 当月天数，本金天数加权，为本工具折算口径、非机构披露；
+      资产变动 = 期末市值 − 期初市值，它与「净投入 + 月收益」往往有小额出入：净投入按成交金额登记、
+      份额只保留两位小数，市值按期末披露净值折算，申购与赎回各自还会带进确认日当天的净值差。
+      持仓与收益均来自个人记账，以官方披露为准，不构成投资建议。
+    </div>`);
 }
 /* ============================================================
    批量粘贴文本解析（净值 / 产品）
@@ -3636,10 +3781,10 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openLinkAdd,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openLinkAdd, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink,
-  saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv,
+  saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,
   setProdRange, setRange, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });
 
