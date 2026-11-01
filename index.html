@@ -170,14 +170,17 @@ details.adv[open]>summary::before{content:"▾ ";}
    而这一列本来就用颜色标了涨跌，正号是多余信息 —— 去掉之后（负数仍带「-」），
    数字列按「表头 / 最坏内容」里较宽的那个定宽（年化 46 / 万收 47 / 持有 25 / 挂0 20 = 230px），
    360 屏可用 298px，剩下的 66px 给产品名，七列合计 296px，不用再横滑。
-   320px 这种极窄屏仍需滑约 38px，那道渐影就是「还能往右滑」的提示。 */
+   320px 这种极窄屏当时仍需滑约 38px —— v51 把表格往外顶满之后，320 屏也放得下了。 */
 /* 外层只管给渐影定位，内层只管滚动：两件事挤在同一个元素上不成立，
-   overflow 容器会把自己的 ::after 一起裁掉，渐影就永远看不见。 */
-.board-edge{position:relative}
+   overflow 容器会把自己的 ::after 一起裁掉，渐影就永远看不见。
+   v51 再把这一层往外顶到卡片的内边距（卡片 padding 是 16px）：表格是这页最宽的
+   东西，左右各留 16px 等于白扔 32px —— 那些像素拿回来给数字列。 */
+.board-edge{position:relative;margin:0 -16px}
 .board-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 /* 表格底下垫一张实底「纸」：卡片是半透的，而 sticky 首列必须盖得住滚过去的数字，
-   所以这一层用不透明的 --plate，描一道极浅的边让它看着是有意垫进去的。 */
-.board-plate{background:var(--plate);border:1px solid rgba(91,91,214,.10);border-radius:11px}
+   所以这一层用不透明的 --plate。铺满之后它就成了卡片里的一条整幅带子，
+   左右描边与圆角一起去掉（贴着卡片内边距再画一道圆角，看着像没对齐）。 */
+.board-plate{background:var(--plate);border-top:1px solid rgba(91,91,214,.10);border-bottom:1px solid rgba(91,91,214,.10)}
 /* 不能给滚动容器加左右 padding：sticky 的 left:0 是贴着滚动视口（含 padding 区）算的，
    一有 padding，粘住的列就盖不住左侧那几个像素，滚动时后面那列的字会露出一小截。 */
 .board-fade{display:none;position:absolute;top:0;right:0;bottom:0;width:26px;pointer-events:none;
@@ -189,12 +192,15 @@ details.adv[open]>summary::before{content:"▾ ";}
    裁掉一条，横向滚动时后面那列的字会「漏」进产品名这一列（实测现象：名字左边冒出半个字）。
    width:100% 配 min-width：宽屏铺满卡片，窄屏按 min-width 溢出、交给横滑 ——
    这样不用为每种屏宽写一套断点，列宽也只有一处定义。 */
-.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:296px}
-/* 「全部」7 列的宽度是量出来的，每列取「两行表头」与「最坏内容」里较宽的那个：
+.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:278px}
+/* 「全部」7 列的宽度是量出来的，数字列每列取「两行表头」与「最坏内容」里较宽的那个：
    年化 46（表头「7日年化」）、万收 47（「-1.4000」）、持有 25（「341」）、挂0 20（表头），
-   数字列合计 230px；360 屏可用 298px，剩下的 66px 全给产品名
-   （两行约 10 个汉字，完整名字在详情里，长按标题也能看全）。 */
-.boardtbl .c-nm{width:66px}
+   合计 230px。表格铺满卡片内边距之后，360 屏可用 330px（298 + 左右各 16），
+   产品名给 48px 起 —— 多出来的宽度由 fixed 布局按比例分给各列（不是只给首列），
+   所以这里写的是「下限」不是「实得」：48 在 360 屏实得 57px、411 屏 66px，
+   两行 9~11 个汉字，数字列各多 7~16px。名字再宽就是抢数字的地盘了。
+   完整名字在详情里，长按标题也能看全。 */
+.boardtbl .c-nm{width:48px}
 .boardtbl .c-hold{width:25px}
 .boardtbl .c-wan{width:47px}
 .boardtbl .c-a{width:46px}
@@ -506,7 +512,7 @@ details.adv[open]>summary::before{content:"▾ ";}
         月挂 0 数：本月万份收益为 0 的<b>披露日</b>天数，没披露不计。<br>
         样本不足显示「—」，排序时这类行永远排在最后；数据以官方披露为准。<br>
         表头点一下按该列排序、再点翻转方向；右上角「精简 / 全部」切换列数，
-        近 14 / 30 日年化默认收在「全部」里（窄屏仍会横滑，右边那道渐影就是提示），
+        近 14 / 30 日年化默认收在「全部」里（七列铺满到卡片边缘，320 宽的屏也刚好放得下，再窄才横滑，右边那道渐影就是提示），
         这个选择只存本机、不跟其它设备同步。
       </div>
     </div>
