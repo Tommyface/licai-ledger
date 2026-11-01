@@ -17,7 +17,7 @@ import { parseProductInput } from "../js/core/paste.js";
 import { navSeries, latestNav, navOnOrBefore, navHit } from "../js/domain/nav.js";
 import { sharesOn, hasAnyTrade, computePosition } from "../js/domain/position.js";
 import { ocrNavLines } from "../js/domain/ocr.js";
-import { BOARD_COLS } from "../js/domain/board.js";
+import { BOARD_COLS, BOARD_LEAN } from "../js/domain/board.js";
 
 const today = fmtDate(new Date());
 const plusDays = n => fmtDate(new Date(Date.now() + n * 86400000));
@@ -388,6 +388,101 @@ test("产品收益表：每个列 key 都有类名、单元格渲染与 CSS 宽�
     }
   }
 });
+/* ---------- v49：玻璃皮肤之下的宽度预算 ---------- */
+/* index.html 里「全部 / 精简」两套列宽 + min-width 是量出来的预算表，不是估的：
+   360 视口下 boardWrap 的 clientWidth = 298px（Playwright 实测），7 列必须排得进去。
+   超出哪怕 2px 就变成横滑，而 v49 要解决的正是「一屏看完 7 列」。
+   改任何一条宽度都得同时改 min-width，否则这里立刻红。 */
+const AVAIL_360 = 298;
+
+/* 把 .boardtbl .c-xxx{width:NNpx} 这类规则读成 {类名: 宽度}；mode 决定读哪一档 */
+function cssWidths(html, mode) {
+  const re = new RegExp("\\.boardtbl" + (mode === "lean" ? "\\.lean" : "")
+    + " \\.(c-[a-z-]+)\\s*\\{[^}]*?width:(\\d+)px", "g");
+  const out = {};
+  let m;
+  while ((m = re.exec(html))) out[m[1]] = +m[2];
+  assert.ok(Object.keys(out).length >= 5, `index.html 里只读到 ${Object.keys(out).length} 条列宽规则，解析方式该跟着 CSS 改了`);
+  return out;
+}
+function cssMinWidth(html, mode) {
+  const m = html.match(mode === "lean"
+    ? /\.boardtbl\.lean\s*\{[^}]*?min-width:(\d+)px/
+    : /\.boardtbl\s*\{[^}]*?min-width:(\d+)px/);
+  assert.ok(m, `index.html 里找不到${mode === "lean" ? "精简" : "全部"}那一档 .boardtbl 的 min-width`);
+  return +m[1];
+}
+/* key → 类名（BD_CLS 是 app.js 里那张平铺表） */
+function clsKeyMap() {
+  const body = mapBody("BD_CLS");
+  const out = {};
+  for (const c of BOARD_COLS) {
+    const m = body.match(new RegExp(`${c[0]}\\s*:\\s*"([^"]+)"`));
+    assert.ok(m, `BD_CLS 缺列 ${c[0]}`);
+    out[c[0]] = m[1].split(/\s+/)[0];
+  }
+  return out;
+}
+
+test("产品收益表：「全部」7 列的宽度预算必须塞得进 360 屏", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const cls = clsKeyMap();
+  for (const mode of ["full", "lean"]) {
+    const w = cssWidths(html, mode);
+    const keys = mode === "full" ? BOARD_COLS.map(c => c[0]) : BOARD_LEAN;
+    const total = keys.reduce((s, k) => {
+      const c = cls[k];
+      assert.ok(w[c] > 0, `index.html 没给${mode === "lean" ? "精简" : "全部"}模式的 .${c} 定宽：这一列会按内容乱宽`);
+      return s + w[c];
+    }, 0);
+    const min = cssMinWidth(html, mode);
+    assert.equal(total, min, `${mode} 列宽合计 ${total} ≠ min-width ${min}：改了宽度要一起改 min-width`);
+    assert.ok(total <= AVAIL_360, `${mode} 合计 ${total}px > 360 屏可用 ${AVAIL_360}px，这张表又要横滑了`);
+  }
+});
+
+test("产品收益表：年化列不带正号、|≥10%| 退一位小数（上面那份预算的前提）", () => {
+  const cellBody = mapBody("BD_CELL");
+  for (const k of ["a7", "a14", "a30"]) {
+    const line = cellBody.split("\n").find(l => new RegExp(`^\\s*${k}:`).test(l)) || "";
+    assert.ok(line, `BD_CELL 里找不到 ${k}`);
+    assert.ok(/pctBd\(/.test(line), `${k} 没用 pctBd()：一个「+」就是 7px × 3 列，全部模式装不进 360 屏`);
+    assert.ok(!/\bpct4\b|\bpctFmt\b|\bpct\(r\./.test(line), `${k} 用了带正号的格式化函数`);
+  }
+  const i = APP_SRC.indexOf("const pctBd =");
+  assert.ok(i > 0, "app.js 里找不到 const pctBd =");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\n};", i) + 3);
+  assert.ok(body.includes("\n};"), "pctBd() 没收尾，提取方式需要跟着改");
+  assert.ok(!body.includes('"+"'), `pctBd() 里出现正号：${body}`);
+  assert.ok(/Math\.abs\(p\)\s*>=\s*10\s*\?\s*p\.toFixed\(1\)/.test(body),
+    "pctBd() 没在 |年化|≥10% 时退到一位小数：「-12.34%」要 50px，比 c-a 的 46px 还宽，nowrap 会把「%」挤到隔壁那列的数字上");
+});
+
+test("产品收益表：粘在左边的首列必须是不透明底", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  /* 玻璃皮肤之后卡片是半透明的，横滑时后面那列的数字会从首列底下透出来（v47 实测现象）。
+     首列必须垫一块实色 --plate，右侧渐影也要渐变到同一块颜色，不然会在表上留一道白边。 */
+  const m = html.match(/\.boardtbl th:first-child,\.boardtbl td:first-child\s*\{([^}]*)\}/);
+  assert.ok(m, "找不到首列规则：sticky 首列一旦没底，横滑就漏字");
+  assert.ok(/background:\s*var\(--plate\)/.test(m[1]), "首列底色必须走 var(--plate)");
+  for (const p of html.match(/--plate\s*:\s*[^;]+;/g) || []) {
+    assert.ok(!/rgba\(/.test(p), `--plate 不能带 alpha：${p.trim()}`);
+  }
+  assert.ok(/\.board-fade\{[^}]*background:linear-gradient\(90deg,var\(--fade0\),var\(--fade1\)/.test(html.replace(/\s+/g, " ")),
+    "渐影没渐变到 --fade1（= 板底色）：玻璃皮肤下会在表右缘留一块发白的边");
+});
+
+test("产品收益表：渐影跟着「滑到底」消失，默认门槛不高于 360", () => {
+  const b = fnBody("bdEdge");
+  assert.ok(/scrollLeft/.test(b) && /atEnd/.test(b),
+    "bdEdge() 没算 scrollLeft：滑到最右边渐影还挂着，等于一直提示「还有列没露出来」的假信号");
+  assert.ok(/addEventListener\("scroll",\s*bdEdge/.test(APP_SRC),
+    "没接 scroll 事件：渐影只在重渲染时更新，用户手动滑的时候它不动");
+  const m = fnBody("bdMode").match(/w >= (\d+)/);
+  assert.ok(m, "bdMode() 里找不到视口门槛");
+  assert.ok(+m[1] <= 360, `默认门槛 ${m[1]} > 360：主流屏又退回 5 列，上面那份宽度预算白做`);
+});
+
 /* 从 `const NAME = {` 切到配对的 `\n};`：只用于本仓这两个平铺的查表常量 */
 function mapBody(name) {
   const i = APP_SRC.indexOf(`const ${name} = {`);

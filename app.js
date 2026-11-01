@@ -43,7 +43,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v48";
+const APP_VER = "v49";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -959,8 +959,18 @@ function boardRows() {
 }
 /** 万收：4 位小数。2 位会把 0.45 和 0.48 显示成同一个数，表就白排了 */
 const wan4 = (v) => (v === null ? "—" : v.toFixed(4));
-/** 年化：与详情页 pctFmt 同口径，null 显示「—」 */
-const pct4 = (v) => (v === null ? "—" : `${v >= 0 ? "+" : ""}${pct(v)}`);
+/* 年化：数值口径与详情页一致（同一套 navStats），null 显示「—」；
+   但表里的写法故意与详情页不同 —— 不带正号、|≥10%| 只给一位小数：
+   三列年化各要 7 个字宽，「+」一个符号就吃掉 7px × 3 = 21px，而这一列本来就用颜色
+   标了涨跌（红涨绿跌），负数仍会带「-」。省下来的 21px 全部还给产品名，
+   这是「全部」7 列能塞进 360 屏的关键。
+   退一位小数是同一条理由：「-12.34%」要 50px，比列宽（46）还宽 4px，
+   nowrap 会把「%」挤到隔壁那一列的数字上。两位小数的精度在这里本来就是噪声。 */
+const pctBd = (v) => {
+  if (v === null) return "—";
+  const p = v * 100;
+  return (Math.abs(p) >= 10 ? p.toFixed(1) : p.toFixed(2)) + "%";
+};
 
 /* ---------- 产品收益表的列宽与渲染（v48） ----------
    列宽从 nth-child 改成挂在类名上：精简模式少了两列，按位置定的宽度会整排错位
@@ -976,28 +986,33 @@ const BD_CELL = {
   name: (r) => `<td class="nm c-nm"><button class="link" title="${esc(r.name)}" onclick="openProdDetail('${r.id}')">${esc(r.name)}</button></td>`,
   holdDays: (r) => `<td class="c-hold">${r.holdDays}</td>`,
   wan: (r) => `<td class="c-wan ${cls(r.wan === null ? 0 : r.wan)}">${wan4(r.wan)}</td>`,
-  a7: (r) => `<td class="c-a ${cls(r.a7 === null ? 0 : r.a7)}">${pct4(r.a7)}</td>`,
-  a14: (r) => `<td class="c-a ${cls(r.a14 === null ? 0 : r.a14)}">${pct4(r.a14)}</td>`,
-  a30: (r) => `<td class="c-a ${cls(r.a30 === null ? 0 : r.a30)}">${pct4(r.a30)}</td>`,
+  a7: (r) => `<td class="c-a ${cls(r.a7 === null ? 0 : r.a7)}">${pctBd(r.a7)}</td>`,
+  a14: (r) => `<td class="c-a ${cls(r.a14 === null ? 0 : r.a14)}">${pctBd(r.a14)}</td>`,
+  a30: (r) => `<td class="c-a ${cls(r.a30 === null ? 0 : r.a30)}">${pctBd(r.a30)}</td>`,
   zero: (r) => `<td class="c-zero ${r.zero ? "warn-n" : "muted"}">${r.zero}</td>`,
 };
 
-/** 这台设备的列模式。没手动选过时按视口宽给默认：420px 以下 7 列必然溢出，一律精简。 */
+/** 这台设备的列模式。没手动选过时按视口宽给默认：v49 起 7 列只要 296px，
+    360 屏就放得下，所以默认直接「全部」；只有 320 这类极窄屏才退回精简。 */
 function bdMode() {
   if (UI.bdCols === "full" || UI.bdCols === "lean") return UI.bdCols;
   const w = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 360;
-  return w >= 420 ? "full" : "lean";
+  return w >= 350 ? "full" : "lean";
 }
 function toggleBdCols() {
   UI.bdCols = bdMode() === "full" ? "lean" : "full";
   try { localStorage.setItem(LS_BD, UI.bdCols); } catch (e) { }
   renderBoard();
 }
-/** 右侧渐影 = 「这边还有列没露出来」。只在真的还能滑时显示，切到精简后自己消失。 */
+/** 右侧渐影 = 「这边还有列没露出来」。只在真的还能滑时显示，切到精简后自己消失。
+    v49 补一条：滑到最右也要收掉 —— 之前只在渲染时判定一次，人已经滑到底了
+    那道「还能往右」的影子还挂着，提示反过来说了假话。 */
 function bdEdge() {
   const edge = $("boardEdge"), wrap = $("boardWrap");
   if (!edge || !wrap) return;
-  edge.classList.toggle("more", wrap.scrollWidth - wrap.clientWidth > 2);
+  const more = wrap.scrollWidth - wrap.clientWidth > 2;
+  const atEnd = wrap.scrollLeft + wrap.clientWidth >= wrap.scrollWidth - 2;
+  edge.classList.toggle("more", more && !atEnd);
 }
 
 function renderBoard() {
@@ -3643,6 +3658,9 @@ Object.assign(window, {
   /* 横屏 / 桌面窗口拉伸都会改变产品收益表能不能一屏放下 —— 渐影是量出来的，
      不重算就会留在错的那一档（该提示能滑时不提示，不能滑时还挂着道影子）。 */
   window.addEventListener("resize", bdEdge);
+  /* 渐影还得跟着滚动位置走：滑到最右时它必须收掉，否则「还能往右」成了假提示 */
+  const boardWrapEl = $("boardWrap");
+  if (boardWrapEl) boardWrapEl.addEventListener("scroll", bdEdge, { passive: true });
   /* App 内：必须等云端数据到位再抓 —— 首次安装时本地还没有产品，
      固定 1.2 秒的定时器会扑空，表现成「装完一直没净值」。最多等 6 秒。 */
   if (nativeFetchAvailable()) {

@@ -4,7 +4,7 @@
   "description": "净值型理财产品记账与收益跟踪，数据存自有 GitHub 私有仓库",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#f5f6fb",
+  "background_color": "#f2f1fa",
   "theme_color": "#5b5bd6",
   "orientation": "portrait",
   "icons": [
