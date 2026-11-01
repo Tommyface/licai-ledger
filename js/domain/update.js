@@ -95,36 +95,44 @@ export function readRelease(j) {
 
 /**
  * 该不该提示更新。curVersion 取 App 自己的 versionName（Java 侧给）。
- * @param {string} curVersion 本机 APK 的 versionName，如 "1.0.204"
+ *
+ * canInstall = 「这条结论后面应该出现下载按钮」。它单独存在是因为 v52 之前
+ * 只有 state==="new" 才给按钮：本机版本一旦读不出来（壳里 PackageManager 抽风、
+ * 改装过的包、versionName 被写过），用户就同时失去两条路 —— App 里点不动，
+ * 私有仓的 release 页面在浏览器里又要登录。判断不了新旧是一回事，把人堵死是另一回事：
+ * 包地址明明拿到了，覆盖装一个同签名的包不会丢数据，最坏只是白下一次。
+ *
+ * @param {string} curVersion 本机 APK 的 versionName，如 "1.0.204"；读不出传空串
  * @param {ReturnType<typeof readRelease>|null} info
- * @returns {{state:"new"|"latest"|"unknown", text:string, version:string, size:number}}
+ * @returns {{state:"new"|"latest"|"unknown", text:string, version:string, size:number, canInstall:boolean}}
  */
 export function updateVerdict(curVersion, info) {
   if (!info || !info.ok) {
     return {
-      state: "unknown", version: "", size: 0,
+      state: "unknown", version: "", size: 0, canInstall: false,
       text: "没取到更新信息：" + ((info && info.error) || "未知原因") + "。"
     };
   }
+  const mb = info.size ? " · " + (Math.round(info.size / 1048576 * 10) / 10) + " MB" : "";
   const c = cmpVer(curVersion, info.version);
   if (Number.isNaN(c)) {
-    /* 本机版本号都读不出来（改装过的包、或 versionName 被人写过）：
-       宁可说「判断不了」，也不能让他以为已经是最新 */
+    /* 宁可说「判断不了」，也绝不让他以为已经是最新 —— 但按钮照给 */
     return {
-      state: "unknown", version: info.version, size: info.size,
-      text: "读不出版本口径（本机 " + (curVersion || "空") + " / 云端 " + info.version + "），不替你决定。"
+      state: "unknown", version: info.version, size: info.size, canInstall: true,
+      text: "读不出本机版本（壳里给的是「" + (curVersion || "空") + "」），比不了新旧。"
+        + "云端最新 " + info.version + mb + "。不确定也可以直接装："
+        + "同签名覆盖安装，台账数据不会丢。"
     };
   }
   if (c < 0) {
-    const mb = info.size ? " · " + (Math.round(info.size / 1048576 * 10) / 10) + " MB" : "";
     return {
-      state: "new", version: info.version, size: info.size,
+      state: "new", version: info.version, size: info.size, canInstall: true,
       text: "有新包 " + info.version + "（本机 " + curVersion + "）" + mb
         + (info.published ? " · " + info.published : "") + "。"
     };
   }
   return {
-    state: "latest", version: info.version, size: info.size,
+    state: "latest", version: info.version, size: info.size, canInstall: false,
     text: "已经是最新（" + curVersion + "）。"
   };
 }

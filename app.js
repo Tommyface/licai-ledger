@@ -43,7 +43,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v52";
+const APP_VER = "v53";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -3262,7 +3262,7 @@ function flushDirty() {
 const LS_UPD = "licai.upd";
 /* 只缓存「上次查到的结论」，让设置页离线也能显示一行；包地址不进 localStorage
    （API 直链每次都要带 Token 现取，存了反而容易拿过期链接去下） */
-let UPD = { at: 0, state: "", version: "", size: 0, text: "" };
+let UPD = { at: 0, state: "", version: "", size: 0, text: "", canInstall: false };
 let _updInfo = null, _updChecking = false, _updBusy = false;
 const _updDone = {};
 try { const s = localStorage.getItem(LS_UPD); if (s) UPD = Object.assign(UPD, JSON.parse(s)); } catch (e) { }
@@ -3272,10 +3272,13 @@ function nativeUpdateAvailable() {
   try { return !!(window.NativeUpdate && typeof window.NativeUpdate.version === "function"); }
   catch (e) { return false; }
 }
-/* 本机 APK 的 versionName（如 "1.0.205"）；拿不到就返回空串，让判断走 unknown 分支 */
+/* 本机 APK 的 versionName（如 "1.0.205"）。拿不到就交空串或 "err:原因" 给判断层 ——
+   两种都要原样显示出来：v52 那次「检查更新失败」查不下去，就是因为这里把异常吞成了
+   空串，界面上只剩一句「本机 空」，谁也分不清是没桥、桥抛异常、还是包本身没版本号。 */
 function localApkVersion() {
   if (!nativeUpdateAvailable()) return "";
-  try { return String(window.NativeUpdate.version() || ""); } catch (e) { return ""; }
+  try { return String(window.NativeUpdate.version() || ""); }
+  catch (e) { return "err:" + String((e && e.message) || e).slice(0, 60); }
 }
 window.__updDone = function (id, res) {
   const f = _updDone[id]; if (!f) return;
@@ -3338,7 +3341,8 @@ async function checkApkUpdate(manual) {
   }
   _updChecking = false;
   _updInfo = info && info.ok ? info : null;
-  UPD = { at: Date.now(), state: verdict.state, version: verdict.version, size: verdict.size, text: verdict.text };
+  UPD = { at: Date.now(), state: verdict.state, version: verdict.version, size: verdict.size,
+    text: verdict.text, canInstall: !!verdict.canInstall };
   saveUpd();
   renderUpdBox();
   if (manual || verdict.state === "new") {
@@ -3384,7 +3388,7 @@ function renderUpdBox(msg) {
   if (st === "new") line = `<div class="note r">${esc(UPD.text)}<br><span class="muted">更新是在本机覆盖安装，台账数据不会被动。</span></div>`;
   else if (st === "sent") line = `<div class="note g">已把 ${esc(UPD.version || "新包")} 交给系统安装器。</div>`;
   else if (st === "latest") line = `<div class="note g">${esc(UPD.text)}</div>`;
-  else if (st === "unknown") line = `<div class="note">${esc(UPD.text || "还没检查过更新")}</div>`;
+  else if (st === "unknown") line = `<div class="note b">${esc(UPD.text || "还没检查过更新")}</div>`;
   else line = `<div class="note">还没检查过更新${cur ? "（本机 " + esc(cur) + "）" : ""}。包只发在你自己的私有仓，需要 Token 才能取。</div>`;
   const when = UPD.at ? `<div class="muted" style="margin-top:6px;font-size:12px">上次检查：${esc(stampOf(UPD.at))}</div>` : "";
   const perm = (st === "new" && !nativeCanInstall())
@@ -3392,7 +3396,7 @@ function renderUpdBox(msg) {
   box.innerHTML = `${line}${when}${perm}
     <div class="row-btn" style="margin-top:10px">
       <button class="btn gh" style="flex:1" onclick="checkApkUpdate(true)">检查更新</button>
-      ${st === "new" ? `<button class="btn pri" style="flex:1" onclick="applyApkUpdate()">下载并安装</button>` : ""}
+      ${(st === "new" || UPD.canInstall) ? `<button class="btn pri" style="flex:1" onclick="applyApkUpdate()">下载并安装${UPD.version ? " " + esc(UPD.version) : ""}</button>` : ""}
     </div>`;
 }
 /* 静默自动检查：每台设备 12 小时最多一次，且只在 App 内。

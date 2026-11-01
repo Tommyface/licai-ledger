@@ -93,3 +93,34 @@ test("安全口径：取不到信息时不许说「已是最新」", () => {
   assert.equal(nil.state, "unknown");
   assert.doesNotMatch(nil.text, /已是最新/);
 });
+
+/* ---------- v53：判断不了 ≠ 把人堵死 ---------- */
+test("本机版本读不出来：仍然交出包地址该有的字段，并标 canInstall", () => {
+  const info = readRelease(rel());
+  for (const cur of ["", "err:NameNotFoundException", "abc", "1.0.205-rc1"]) {
+    const v = updateVerdict(cur, info);
+    assert.equal(v.state, "unknown", `curVersion=${JSON.stringify(cur)} 应该判不了`);
+    assert.doesNotMatch(v.text, /已是最新|已经是最新/);
+    assert.equal(v.canInstall, true, "云端包是拿到的，必须给下载按钮：App 里点不动 + 私有仓网页要登录 = 用户没有任何一条升级路");
+    assert.equal(v.version, "1.0.205", "按钮上要知道自己将要装哪一版");
+    assert.equal(v.size, info.size, "进度条按这个算总长，丢了它就只会显示「已下 x MB」");
+  }
+});
+
+test("文案要把「壳里读版本失败」这件事说出来，而不是只报一个空", () => {
+  const v = updateVerdict("", readRelease(rel()));
+  assert.match(v.text, /读不出本机版本/);
+  assert.match(v.text, /空/, "本机给的是空串，就得让他看见是空，不是猜一个");
+  assert.match(v.text, /1\.0\.205/, "同时要说清云端是哪一版");
+  assert.match(v.text, /覆盖安装|不会丢/, "得说清直接装的风险边界，否则等于让人赌");
+
+  const e = updateVerdict("err:SecurityException", readRelease(rel()));
+  assert.match(e.text, /SecurityException/, "壳抛的异常要原样带出来 —— v52 那次查不下去，就是因为异常被吞成空串");
+});
+
+test("canInstall 只在「有包可装」时为真", () => {
+  assert.equal(updateVerdict("1.0.204", readRelease(rel())).canInstall, true);
+  assert.equal(updateVerdict("1.0.205", readRelease(rel())).canInstall, false, "已经最新，别再给一个下载按钮");
+  assert.equal(updateVerdict("1.0.204", null).canInstall, false, "连包都没取到，装什么");
+  assert.equal(updateVerdict("1.0.204", readRelease(rel({ assets: [] }))).canInstall, false);
+});

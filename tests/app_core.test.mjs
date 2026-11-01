@@ -545,6 +545,24 @@ test("产品收益表：320 屏也得一屏看完 7 列（v52 铺满之后新拿
   }
 });
 
+/* ---------- v53：更新判断的出口在界面上真的存在 ---------- */
+test("设置页：判断不了版本时也要有「下载并安装」的出口", () => {
+  /* updateVerdict 把 canInstall 交出来了，可按钮是 renderUpdBox 拼的 ——
+     只改判断层不改这里，用户看到的还是一句「不替你决定」加一个点不动的界面。
+     v52 那次就是这个组合：App 里没按钮，私有仓的 release 页在浏览器里又要登录。 */
+  const box = fnBody("renderUpdBox");
+  assert.ok(/UPD\.canInstall/.test(box),
+    "renderUpdBox 没读 UPD.canInstall：判断层说的「可以给按钮」到不了界面");
+  assert.ok(/st === "new"\s*\|\|\s*UPD\.canInstall/.test(box),
+    "下载按钮还是只在 state 为 new 时出现：unknown 且云端有包时必须留一条路");
+  const chk = fnBody("checkApkUpdate");
+  assert.ok(/canInstall:\s*!!verdict\.canInstall/.test(chk),
+    "checkApkUpdate 没把 canInstall 存进 UPD：重开设置页按钮就没了");
+  const lv = fnBody("localApkVersion");
+  assert.ok(/catch\s*\(\s*e\s*\)\s*\{?\s*return\s+"err:/.test(lv.replace(/\n\s*/g, " ")),
+    "localApkVersion 不能把异常吞成空串：v52 那次查不下去，就是因为只剩「本机 空」这一条线索");
+});
+
 /* 从 `const NAME = {` 切到配对的 `\n};`：只用于本仓这两个平铺的查表常量 */
 function mapBody(name) {
   const i = APP_SRC.indexOf(`const ${name} = {`);
