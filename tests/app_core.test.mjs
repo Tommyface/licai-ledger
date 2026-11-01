@@ -483,6 +483,15 @@ test("产品收益表：渐影跟着「滑到底」消失，默认门槛不高�
   assert.ok(+m[1] <= 360, `默认门槛 ${m[1]} > 360：主流屏又退回 5 列，上面那份宽度预算白做`);
 });
 
+test("顶栏必须给状态栏留那一格：--sb 优先、env() 兜底", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const m = html.match(/\.topbar\{[^}]*padding:([^;]*);/);
+  assert.ok(m, "找不到 .topbar 的 padding 规则");
+  assert.ok(/var\(--sb,\s*env\(safe-area-inset-top,\s*0px\)\)/.test(m[1]),
+    "顶栏上内边距必须优先读壳注入的 --sb、再落回 env()：Android WebView 里 env() 常常恒为 0，"
+    + "只靠它标题会直接印在状态栏上（壳开 edge-to-edge 之后那一格是页面的）");
+});
+
 /* 从 `const NAME = {` 切到配对的 `\n};`：只用于本仓这两个平铺的查表常量 */
 function mapBody(name) {
   const i = APP_SRC.indexOf(`const ${name} = {`);

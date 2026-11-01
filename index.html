@@ -46,8 +46,12 @@ body{
 .topbar{
   position:sticky;top:0;z-index:40;margin:0 -14px 12px;
   /* 状态栏那一格由壳开 edge-to-edge 后让给页面：同一道渐变顶到屏幕最上沿，
-     不再有一条白带子压在标题上面。壳没开（旧包）时 env() 取 0，就是原来的 12px。 */
-  padding:calc(12px + env(safe-area-inset-top,0px)) 16px 12px;
+     不再有一条白带子压在标题上面。宽度来源两条路，按可靠性排序：
+       --sb  —— 壳量到的真实 inset，由原生 evaluateJavascript 写进 :root（v50 起）；
+       env() —— 浏览器 / PWA 里由系统给，Android WebView 多半读不到（恒为 0）。
+     为什么不能只靠 env()：WebView 里它经常静默返回 0，那样标题就直接印在时钟上，
+     比留一条白带子更糟。旧壳里没有 --sb 也不开 edge-to-edge，落回 env()→0 正好。 */
+  padding:calc(12px + var(--sb, env(safe-area-inset-top,0px))) 16px 12px;
   background:linear-gradient(135deg,rgba(91,91,214,.74),rgba(125,108,240,.7) 60%,rgba(143,124,245,.68));
   -webkit-backdrop-filter:blur(22px) saturate(180%); backdrop-filter:blur(22px) saturate(180%);
   color:#fff;display:flex;align-items:center;gap:10px;
