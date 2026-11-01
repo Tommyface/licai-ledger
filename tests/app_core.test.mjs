@@ -392,10 +392,19 @@ test("产品收益表：每个列 key 都有类名、单元格渲染与 CSS 宽�
 /* index.html 里「全部 / 精简」两套列宽 + min-width 是量出来的预算表，不是估的：
    360 视口下 boardWrap 的 clientWidth = 330px（Playwright 实测），7 列必须排得进去。
    超出哪怕 2px 就变成横滑，而 v49 要解决的正是「一屏看完 7 列」。
-   v51 把 .board-edge 往外顶到卡片内边距（margin:0 -16px），可用宽度从 298 涨到 330 ——
+   v52 把 .board-edge 往外顶到卡片内边距（margin:0 -16px），带子从 298 涨到 330 ——
    这里必须跟着实测值改，不然预算表悄悄松了 32px，谁都不会发现。
+   带子里侧还有 .board-plate 左右各 6px（字不能真贴着带子边），表格实得 318px。
    改任何一条宽度都得同时改 min-width，否则这里立刻红。 */
 const AVAIL_360 = 330;
+const AVAIL_320 = 290;
+
+/* plate 的左右内边距：带子铺到卡片边缘，字往里缩这一点，预算得跟着扣 */
+function platePadX(html) {
+  const m = html.match(/\.board-plate\{[^}]*?padding:0 (\d+)px/);
+  assert.ok(m, "找不到 .board-plate 的左右内边距：预算跟它绑在一起，改了 CSS 这里要一起改");
+  return +m[1];
+}
 
 /* 把 .boardtbl .c-xxx{width:NNpx} 这类规则读成 {类名: 宽度}；mode 决定读哪一档 */
 function cssWidths(html, mode) {
@@ -439,7 +448,8 @@ test("产品收益表：「全部」7 列的宽度预算必须塞得进 360 屏"
     }, 0);
     const min = cssMinWidth(html, mode);
     assert.equal(total, min, `${mode} 列宽合计 ${total} ≠ min-width ${min}：改了宽度要一起改 min-width`);
-    assert.ok(total <= AVAIL_360, `${mode} 合计 ${total}px > 360 屏可用 ${AVAIL_360}px，这张表又要横滑了`);
+    const room = AVAIL_360 - 2 * platePadX(html);
+    assert.ok(total <= room, `${mode} 合计 ${total}px > 360 屏表格实得 ${room}px（带子 ${AVAIL_360} − plate 左右 ${2 * platePadX(html)}），这张表又要横滑了`);
   }
 });
 
@@ -494,7 +504,7 @@ test("顶栏必须给状态栏留那一格：--sb 优先、env() 兜底", () => 
     + "只靠它标题会直接印在状态栏上（壳开 edge-to-edge 之后那一格是页面的）");
 });
 
-/* ---------- v51：表格铺满到卡片内边距 ---------- */
+/* ---------- v52：表格铺满到卡片内边距 ---------- */
 test("产品收益表：往外顶满靠负 margin，而且必须正好等于卡片内边距", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const card = html.match(/\.card\{([^}]*)\}/);
@@ -512,25 +522,26 @@ test("产品收益表：往外顶满靠负 margin，而且必须正好等于卡�
 test("产品收益表：首列基准宽不能再涨回去（用户要的就是名字窄、数字宽）", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const w = cssWidths(html, "full");
-  assert.ok(w["c-nm"] <= 56, `全部模式首列基准 ${w["c-nm"]}px > 56px：v51 把表铺满之后名字列已经白拿 9~18px 松弛，`
+  assert.ok(w["c-nm"] <= 56, `全部模式首列基准 ${w["c-nm"]}px > 56px：v52 把表铺满之后名字列已经白拿 9~18px 松弛，`
     + "基准再涨就是在抢数字列的地盘，用户这两轮反馈说的就是这个");
   assert.ok(w["c-nm"] >= 40, `全部模式首列基准 ${w["c-nm"]}px < 40px：再窄一行放不下两个汉字，`
     + "名字就成省略号串了 —— 用户要的是「名字窄一点」，不是「名字没了」");
 });
 
-test("产品收益表：320 屏也得一屏看完 7 列（v51 铺满之后新拿下的预算）", () => {
+test("产品收益表：320 屏也得一屏看完 7 列（v52 铺满之后新拿下的预算）", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   /* 320 视口下 boardWrap 的 clientWidth 实测 290px：320 − .wrap 左右内边距 28 − 卡片
      左右内边距 32 − 卡片描边 2 + .board-edge 顶回去的 32。这一档以前要横滑 38px，
-     铺满之后不用了，所以把它跟 360 那条一起钉住。 */
-  const AVAIL_320 = 290;
+     铺满之后不用了，所以把它跟 360 那条一起钉住。
+     注意这里是「刚好」：278 + plate 左右 12 = 290，一个像素的余量都没有。 */
   const cls = clsKeyMap();
   for (const mode of ["full", "lean"]) {
     const w = cssWidths(html, mode);
     const keys = mode === "full" ? BOARD_COLS.map(c => c[0]) : BOARD_LEAN;
     const total = keys.reduce((s, k) => s + w[cls[k]], 0);
-    assert.ok(total <= AVAIL_320,
-      `${mode} 合计 ${total}px > 320 屏可用 ${AVAIL_320}px：极窄屏又退回横滑，上面那条预算的前提就没了`);
+    const room = AVAIL_320 - 2 * platePadX(html);
+    assert.ok(total <= room,
+      `${mode} 合计 ${total}px > 320 屏表格实得 ${room}px：极窄屏又退回横滑，上面那条预算的前提就没了`);
   }
 });
 

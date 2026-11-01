@@ -170,17 +170,22 @@ details.adv[open]>summary::before{content:"▾ ";}
    而这一列本来就用颜色标了涨跌，正号是多余信息 —— 去掉之后（负数仍带「-」），
    数字列按「表头 / 最坏内容」里较宽的那个定宽（年化 46 / 万收 47 / 持有 25 / 挂0 20 = 230px），
    360 屏可用 298px，剩下的 66px 给产品名，七列合计 296px，不用再横滑。
-   320px 这种极窄屏当时仍需滑约 38px —— v51 把表格往外顶满之后，320 屏也放得下了。 */
+   320px 这种极窄屏当时仍需滑约 38px —— v52 把表格往外顶满之后，320 屏也放得下了。 */
 /* 外层只管给渐影定位，内层只管滚动：两件事挤在同一个元素上不成立，
    overflow 容器会把自己的 ::after 一起裁掉，渐影就永远看不见。
-   v51 再把这一层往外顶到卡片的内边距（卡片 padding 是 16px）：表格是这页最宽的
+   v52 再把这一层往外顶到卡片的内边距（卡片 padding 是 16px）：表格是这页最宽的
    东西，左右各留 16px 等于白扔 32px —— 那些像素拿回来给数字列。 */
 .board-edge{position:relative;margin:0 -16px}
 .board-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 /* 表格底下垫一张实底「纸」：卡片是半透的，而 sticky 首列必须盖得住滚过去的数字，
    所以这一层用不透明的 --plate。铺满之后它就成了卡片里的一条整幅带子，
-   左右描边与圆角一起去掉（贴着卡片内边距再画一道圆角，看着像没对齐）。 */
-.board-plate{background:var(--plate);border-top:1px solid rgba(91,91,214,.10);border-bottom:1px solid rgba(91,91,214,.10)}
+   左右描边与圆角一起去掉（贴着卡片内边距再画一道圆角，看着像没对齐）。
+   左右各留 6px 内边距：带子铺到卡片边缘，但字不要真贴着边缘 —— 卡片里别的东西
+   （标题、筛选条、下面那行「数据截至」）都在 16px 处起头，字贴着带子边会歪出一截。
+   这 6px 加在 plate 上而不是加在滚动容器上：滚动容器的左右 padding 会让 sticky 的
+   left:0 算到 padding 区里，粘住的首列盖不住那 6px，滚过去的数字会露出来。 */
+.board-plate{background:var(--plate);padding:0 6px;
+  border-top:1px solid rgba(91,91,214,.10);border-bottom:1px solid rgba(91,91,214,.10)}
 /* 不能给滚动容器加左右 padding：sticky 的 left:0 是贴着滚动视口（含 padding 区）算的，
    一有 padding，粘住的列就盖不住左侧那几个像素，滚动时后面那列的字会露出一小截。 */
 .board-fade{display:none;position:absolute;top:0;right:0;bottom:0;width:26px;pointer-events:none;
@@ -195,11 +200,11 @@ details.adv[open]>summary::before{content:"▾ ";}
 .boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:278px}
 /* 「全部」7 列的宽度是量出来的，数字列每列取「两行表头」与「最坏内容」里较宽的那个：
    年化 46（表头「7日年化」）、万收 47（「-1.4000」）、持有 25（「341」）、挂0 20（表头），
-   合计 230px。表格铺满卡片内边距之后，360 屏可用 330px（298 + 左右各 16），
-   产品名给 48px 起 —— 多出来的宽度由 fixed 布局按比例分给各列（不是只给首列），
-   所以这里写的是「下限」不是「实得」：48 在 360 屏实得 57px、411 屏 66px，
-   两行 9~11 个汉字，数字列各多 7~16px。名字再宽就是抢数字的地盘了。
-   完整名字在详情里，长按标题也能看全。 */
+   合计 230px。表格铺满卡片内边距之后，360 屏带子有 330px（298 + 左右各 16），
+   扣掉 plate 那 6px×2，表格实得 318px；产品名给 48px 起 —— 多出来的宽度由 fixed
+   布局按比例分给各列（不是只给首列），所以这里写的是「下限」不是「实得」：
+   48 在 360 屏实得 55px、411 屏 64px，两行 8~10 个汉字，数字列各多 7~15px。
+   名字再宽就是抢数字的地盘了。完整名字在详情里，长按标题也能看全。 */
 .boardtbl .c-nm{width:48px}
 .boardtbl .c-hold{width:25px}
 .boardtbl .c-wan{width:47px}
