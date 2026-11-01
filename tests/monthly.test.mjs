@@ -166,7 +166,7 @@ test("月报：赎回按确认日归月，到账金额优先用用户填的 amou
   near(r2.sellAmt, 10000 * 0.999, 1e-9);
 });
 
-test("月报：收益构成按机构聚合，资产占比之和为 1", () => {
+test("月报：资产构成按机构聚合，资产占比之和为 1（v56 起收益构成改用 byProd 按产品）", () => {
   const { products, trades } = mk();
   const r = monthReport(products, trades, 2027, 10, "2027-11-05");
   assert.deepEqual(r.byInst.map(x => x.label), ["农银理财", "招银理财"], "按资产从大到小");
@@ -176,6 +176,61 @@ test("月报：收益构成按机构聚合，资产占比之和为 1", () => {
   near(r.byInst[1].profit, 200);
   near(r.byInst.reduce((s, x) => s + x.share, 0), 1, 1e-9);
   near(r.byInst.reduce((s, x) => s + x.profit, 0), r.profit, 1e-6);
+});
+
+test("月报：收益构成按产品列，标签就是产品名（用户要认出具体哪一只）", () => {
+  const { products, trades } = mk();
+  const r = monthReport(products, trades, 2027, 10, "2027-11-05");
+  /* 按 |收益| 从大到小：+200 的招益在前，−50 的农银在后 */
+  assert.deepEqual(r.byProd.map(x => x.label), ["招益180天", "农银现金管理"]);
+  assert.deepEqual(r.byProd.map(x => x.inst), ["招银理财", "农银理财"], "机构名留着当副标题");
+  assert.deepEqual(r.byProd.map(x => x.id), ["p1", "p2"]);
+  near(r.byProd[0].profit, 200, 1e-6);
+  near(r.byProd[0].asset, 10200, 1e-6);
+  near(r.byProd[1].profit, -50, 1e-6);
+  near(r.byProd.reduce((s, x) => s + x.profit, 0), r.profit, 1e-6, "明细之和必须等于月收益");
+  /* 界面那列百分比用的是 profitShares(byProd)，这里只保证 share 是「占期末资产」的比例 */
+  near(r.byProd.reduce((s, x) => s + x.share, 0), 1, 1e-9);
+  near(profitShares(r.byProd).reduce((s, x) => s + x, 0), 1, 1e-9);
+});
+
+test("月报：byProd 只列当月有变动的产品，清仓的仍要列出", () => {
+  /* P1 净值一路不动 → 这个月没有它可说的，不该占一条 0 宽的条子 */
+  const flat = { id: "pf", name: "打平的一号", inst: "平安理财",
+    navHistory: { "2027-10-10": 1.0, "2027-10-20": 1.0 } };
+  const tf = [{ prodId: "pf", type: "buy", confirmDate: "2027-10-06", amount: 1000, shares: 1000 }];
+  const r = monthReport([flat], tf, 2027, 10, "2027-11-05");
+  assert.deepEqual(r.byProd, [], "净值持平的产品不进收益构成");
+  assert.equal(r.byInst.length, 1, "但资产构成里它有市值");
+
+  /* 月中全部赎回：期末没市值，可这个月它确实赚过 —— 必须出现，否则月收益对不上明细 */
+  const sold = { id: "ps", name: "已清仓的一号", inst: "民生理财",
+    navHistory: { "2027-09-30": 1.0, "2027-10-10": 1.01, "2027-10-30": 1.02 } };
+  const ts = [
+    { prodId: "ps", type: "buy", confirmDate: "2027-10-06", amount: 10000, shares: 10000 },
+    { prodId: "ps", type: "sell", confirmDate: "2027-10-15", shares: 10000, confirmNav: 1.01,
+      amount: 10100 },
+  ];
+  const s = monthReport([sold], ts, 2027, 10, "2027-11-05");
+  assert.equal(s.byProd.length, 1);
+  assert.equal(s.byProd[0].label, "已清仓的一号");
+  near(s.byProd[0].profit, 100, 1e-6, "10-10 那 +0.01 是在赎回前拿到的");
+  near(s.byProd[0].asset, 0, 1e-9, "期末已清仓");
+  assert.equal(s.byProd[0].share, 0);
+});
+
+test("月报：产品名没填时收益构成那行写「未命名产品」，不给空标题", () => {
+  const p = { id: "pn", name: "", inst: "兴业理财",
+    navHistory: { "2027-10-10": 1.0, "2027-10-20": 1.002 } };
+  const t = [{ prodId: "pn", type: "buy", confirmDate: "2027-10-06", amount: 1000, shares: 1000 }];
+  const r = monthReport([p], t, 2027, 10, "2027-11-05");
+  assert.equal(r.byProd.length, 1);
+  assert.equal(r.byProd[0].label, "未命名产品");
+  assert.equal(r.byProd[0].inst, "兴业理财", "副标题仍说得出是谁家的");
+  /* 名字和机构都没填：两个占位都在，这一行不会变成一条没有名字的空白 */
+  const r2 = monthReport([{ ...p, inst: "" }], t, 2027, 10, "2027-11-05");
+  assert.equal(r2.byProd[0].label, "未命名产品");
+  assert.equal(r2.byProd[0].inst, "未填机构");
 });
 
 test("月报：机构为空的产品归到「未填机构」，不会丢行", () => {
@@ -195,6 +250,7 @@ test("月报：空月与清仓月全为 0，年化不除以 0", () => {
   assert.deepEqual(empty.daily, []);
   assert.deepEqual(empty.cum, []);
   assert.deepEqual(empty.byInst, []);
+  assert.deepEqual(empty.byProd, []);
   assert.equal(empty.annual, 0, "市值为 0 不给年化");
   assert.equal(empty.assetEnd, 0);
   assert.equal(empty.holdN, 0);

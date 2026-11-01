@@ -45,7 +45,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v55";
+const APP_VER = "v56";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1104,9 +1104,54 @@ function renderSet() {
 
 /* ============================================================
    弹层基础
+   ------------------------------------------------------------
+   v56：弹层（二级页面）要能被手机返回手势 / 返回键关掉。
+   做法是「打开时往历史里压一条哨兵条目」：
+     · 手势返回 → 壳走 goBack()（MainActivity.onBackPressed 一直是
+       「canGoBack 就 goBack，否则退出 App」）→ 触发这里的 popstate → 把弹层收掉；
+     · 点 ✕ / 点遮罩 → closeSheet() 自己把那条哨兵退掉（sheetPopPending 记着这次退栈）。
+   为什么只压一条、不做成栈：本 App 的弹层是互相替换的（在弹层里再开弹层
+   其实是把 innerHTML 换掉），本来就没有两层可退；压两条会让一次手势只关掉一半。
+   为什么要 sheetWantPush 这一层：history.back() 是异步的。同一拍里
+   「先关再开」（保存完重开表单、翻月份）如果立刻 pushState，那条迟到的 back
+   会落在新哨兵身上，把刚打开的弹层又自己关掉 —— 手机上表现成「点开就闪回首页」。
+   所以补压必须等 back 落地（popstate）之后做，而且只在弹层确实还开着时做。
+   pushState 在少数环境（隐私模式、file:// 直开）会抛，抛了就退回旧行为：
+   标记不置位，closeSheet 也绝不 history.back() —— 否则等于把整个页面退走。
    ============================================================ */
-function openSheet(html) { $("sheet").innerHTML = html; $("mask").classList.add("show"); }
-function closeSheet() { $("mask").classList.remove("show"); }
+let sheetSentinel = 0;      /* 当前压在历史里的那条哨兵序号；0 = 没压 */
+let sheetSeq = 0;
+let sheetPopPending = false; /* closeSheet 喊了 back，还没落地 */
+let sheetWantPush = false;   /* 退栈落地后要补压一条（这一拍里又开了弹层） */
+function sheetPush() {
+  const seq = ++sheetSeq;
+  try { history.pushState({ licaiSheet: seq }, ""); sheetSentinel = seq; }
+  catch (e) { sheetSentinel = 0; }        /* 压不上就彻底走旧行为，别留半套 */
+}
+function openSheet(html) {
+  $("sheet").innerHTML = html; $("mask").classList.add("show");
+  if (sheetSentinel) return;              /* 已经有一条了：弹层是替换式的，不叠加 */
+  if (sheetPopPending) { sheetWantPush = true; return; }
+  sheetPush();
+}
+function closeSheet() {
+  $("mask").classList.remove("show");
+  if (!sheetSentinel) return;
+  sheetSentinel = 0; sheetPopPending = true;
+  history.back();
+}
+window.addEventListener("popstate", () => {
+  sheetPopPending = false;
+  if (sheetSentinel) {                    /* 用户真按了返回：收下这一层弹层 */
+    sheetSentinel = 0;
+    $("mask").classList.remove("show");
+  }
+  /* 上面那次 back 是我们自己要的，且这一拍里又开了新弹层 → 现在才补压哨兵 */
+  if (sheetWantPush) {
+    sheetWantPush = false;
+    if ($("mask").classList.contains("show")) sheetPush();
+  }
+});
 function go(pid) {
   document.querySelectorAll(".page").forEach(e => e.classList.remove("on"));
   $(pid).classList.add("on");
@@ -2016,15 +2061,28 @@ function renderMonthly() {
   const list = monthList(DATA.products, nowY, nowM);
   const ym = `${y}-${m < 10 ? "0" + m : m}`;
 
-  /* 收益构成条：长度按 |profit| 归一（有亏有赚时贡献之和仍为 100%），正负用颜色区分（红涨绿跌与本 App 一致） */
-  const pShares = profitShares(r.byInst);
-  const maxAbs = r.byInst.reduce((mx, x) => Math.max(mx, Math.abs(x.profit)), 0);   /* 最长的那根当 100% */
-  const bars = r.byInst.map((x, i) => `
+  /* 收益构成条：v56 起按产品列（用户要看的是「具体哪只在赚/在亏」，机构名降成副标题）。
+     长度按 |profit| 归一，正负用颜色区分（红涨绿跌与本 App 一致）。
+     名字与条子分两行：产品名长短没有边界，单行截断会把「招睿日开三个月」和
+     「招睿日开三个月滚动持有1号固收类理财计划」截成同一个样子，反而认不出是谁。 */
+  const pShares = profitShares(r.byProd);
+  const maxAbs = r.byProd.reduce((mx, x) => Math.max(mx, Math.abs(x.profit)), 0);   /* 最长的那根当 100% */
+  const bars = r.byProd.map((x, i) => {
+    /* 副标题只补「名字里没说出来的部分」：产品名通常已经带机构名（招银理财招睿…），
+       再跟一遍就是噪声；期末没市值则必须标出来，否则看不出它为什么不在资产构成里。 */
+    const bits = [];
+    if (x.inst && x.label.indexOf(x.inst) < 0) bits.push(x.inst);
+    if (!x.asset) bits.push("期末已清仓");
+    const sub = bits.length ? `<i>${esc(bits.join(" · "))}</i>` : "";
+    return `
     <div class="mbar">
-      <div class="nm" title="${esc(x.label)}">${esc(x.label)}</div>
+      <div class="top">
+        <div class="nm" title="${esc(x.label)}">${esc(x.label)}${sub}</div>
+        <div class="vv"><span class="${tone(x.profit)}">${shown(signMoney(x.profit))}</span><i>${shown(pct(pShares[i]))}</i></div>
+      </div>
       <div class="tr"><div class="fl ${tone(x.profit)}" style="width:${maxAbs > 0 ? (Math.abs(x.profit) / maxAbs * 100).toFixed(1) : 0}%"></div></div>
-      <div class="vv"><span class="${tone(x.profit)}">${shown(signMoney(x.profit))}</span><i>${shown(pct(pShares[i]))}</i></div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   /* 资产构成环：只画有市值的机构，合计写在圆心 */
   const parts = r.byInst.filter(x => x.asset > 0)
@@ -2057,8 +2115,8 @@ function renderMonthly() {
     <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">累计收益走势</h2><span class="hint">单位：元</span></div>
     <div class="chart-wrap">${svgChart(cDates, cVals, null, v => shown(Math.round(v).toLocaleString("zh-CN")))}</div>
 
-    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">收益构成</h2><span class="hint">按发行机构</span></div>
-    ${r.byInst.some(x => x.profit) ? bars : `<div class="cap">这个月没有任何收益变动。</div>`}
+    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">收益构成</h2><span class="hint">按产品 · 当月有变动的 ${r.byProd.length} 只</span></div>
+    ${r.byProd.length ? bars : `<div class="cap">这个月没有任何收益变动。</div>`}
 
     <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">资产构成</h2><span class="hint">${r.holdN} 只持仓 / ${parts.length} 家机构</span></div>
     ${parts.length ? `<div class="donut">${svgDonut(parts, "期末资产", shown(money(r.assetEnd)))}<div class="dlegend">${legend}</div></div>`
@@ -2075,6 +2133,7 @@ function renderMonthly() {
       月年化 = 月收益 ÷ 期末市值 × 365 ÷ 当月天数，本金天数加权，为本工具折算口径、非机构披露；
       资产变动 = 期末市值 − 期初市值，它与「净投入 + 月收益」往往有小额出入：净投入按成交金额登记、
       份额只保留两位小数，市值按期末披露净值折算，申购与赎回各自还会带进确认日当天的净值差。
+      收益构成按产品列示（名字里没带机构时副标题补上机构，标「期末已清仓」的当月仍产生过收益），资产构成按机构汇总；
       持仓与收益均来自个人记账，以官方披露为准，不构成投资建议。
     </div>`);
 }

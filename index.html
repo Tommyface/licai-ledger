@@ -110,15 +110,24 @@ details.adv[open]>summary::before{content:"▾ ";}
 .entry .tx b{display:block;font-size:13px;font-weight:650}
 .entry .tx span{font-size:11px;color:var(--ink2)}
 .entry .go{background:var(--brand);color:#fff;border:0;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:650;font-family:inherit;cursor:pointer}
-/* ---------- 资产月报（v55）：报告弹层里新加的三块视图 ----------
+/* ---------- 资产月报（v55，v56 起收益构成改按产品）：报告弹层里新加的三块视图 ----------
    横向条形（收益构成）、环形（资产构成）、两行式小结（交易小结）。
-   宽度全部用 flex + 省略号：机构名是用户自己填的，长起来没有边界，
-   不能让它把右边的数字挤到下一行去。 */
-.mbar{display:flex;align-items:center;gap:8px;margin:8px 0}
-.mbar .nm{flex:0 0 62px;font-size:11.5px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.mbar .tr{flex:1;height:8px;border-radius:5px;background:var(--track);overflow:hidden}
+   收益构成一条两行：名字 + 金额在上、条在下。产品名是用户自己填的，长起来没有边界，
+   和数字挤在同一行就只能截断，而「招睿日开三个月…」和「招睿日开三个月滚动持有1号」
+   截完是同一个样子 —— 这一版要的就是认出具体哪只，所以给名字整行。 */
+.mbar{margin:9px 0}
+.mbar .top{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
+/* 产品名给两行：这一版的目的就是认出「具体哪一只」，单行省略会把两只长名字
+   截成同一个样子（收益表那边早就踩过，做法也是两行截断）。两行放不下才省略，
+   完整名字挂在 title 上长按可查。overflow-wrap 必须有：产品名里可能一整串没有空格。 */
+.mbar .nm{flex:1;min-width:0;font-size:12px;font-weight:600;line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  white-space:normal;overflow:hidden;overflow-wrap:anywhere}
+/* 副标题：机构名（+ 期末已清仓）。跟着省略号一起截，撑不破这一行 */
+.mbar .nm i{font-style:normal;font-weight:500;font-size:10px;color:var(--ink3);margin-left:6px}
+.mbar .tr{height:8px;border-radius:5px;background:var(--track);overflow:hidden}
 /* 条的颜色跟着 tone() 走：隐藏开关打开时 tone 返回 muted，
-   条就退回中性紫 —— 不然一片红绿等于把每家的盈亏方向直接写在屏幕上。 */
+   条就退回中性紫 —— 不然一片红绿等于把每只的盈亏方向直接写在屏幕上。 */
 .mbar .fl{height:100%;border-radius:5px;background:var(--brand)}
 .mbar .fl.up{background:var(--up)}
 .mbar .fl.down{background:var(--down)}
@@ -603,7 +612,8 @@ details.adv[open]>summary::before{content:"▾ ";}
         · 持仓年化 = 持仓盈亏 ÷ 成本 × 365 ÷ 持有天数（<b>本金天数加权</b>，不足 7 天不给年化）<br>
         · 成立以来年化 = (末值 ÷ 首值 − 1) ÷ 持有天数 × 365<br>
         · <b>资产月报</b>：月收益 = 逐日「当日已确认份额 × 净值差」之和（与首页本月收益同一个数）；<br>
-          月年化 = 月收益 ÷ 期末市值 × 365 ÷ 当月天数；买入/赎回按<b>确认日</b>归月，在途不计息、不计入净投入<br>
+          月年化 = 月收益 ÷ 期末市值 × 365 ÷ 当月天数；买入/赎回按<b>确认日</b>归月，在途不计息、不计入净投入；
+          收益构成<b>按产品</b>列示，资产构成按机构汇总<br>
         样本不足时显示「—」，<b>不估算、不补齐</b>。以上均为便于横向对比的折算口径，与官方年化可能存在差异。
       </div>
       <div class="note" style="margin-top:10px">

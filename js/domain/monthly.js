@@ -127,6 +127,7 @@ export function monthList(products, nowY, nowM) {
  *   buyN: number, buyAmt: number, sellN: number, sellShares: number, sellAmt: number,
  *   netInflow: number, realized: number, annual: number,
  *   byInst: {key: string, label: string, profit: number, asset: number, share: number}[],
+ *   byProd: {id: string, label: string, inst: string, profit: number, asset: number, share: number}[],
  *   holdN: number, best: {name: string, profit: number} | null
  * }}
  */
@@ -142,6 +143,10 @@ export function monthReport(products, trades, y, m, td) {
 
   /** @type {Map<string, {profit: number, asset: number}>} */
   const inst = new Map();
+  /* 收益构成的明细行，按产品（用户要的是「具体哪只在赚/在亏」，机构名当副标题）。
+     只收当月有变动的：持平的那只占一条 0 宽的条子，等于噪声。 */
+  /** @type {Map<string, {id: string, label: string, inst: string, profit: number, asset: number}>} */
+  const prod = new Map();
   /** @type {[string, number][]} */
   const daily = [];
   /* best = 当月「表现最好」的一只：全亏的月份它就是亏得最少的那只，
@@ -162,6 +167,9 @@ export function monthReport(products, trades, y, m, td) {
     if (!inst.has(k)) inst.set(k, { profit: 0, asset: 0 });
     const slot = inst.get(k);
     slot.profit += pp;
+    prod.set(String(p.id), {
+      id: String(p.id), label: String(p.name || ""), inst: instLabel(k), profit: pp, asset: 0,
+    });
     if (best === null || pp > best.profit) best = { name: String(p.name || ""), profit: pp };
   }
   for (const p of products) {
@@ -172,6 +180,8 @@ export function monthReport(products, trades, y, m, td) {
     const k = instKey(p.inst);
     if (!inst.has(k)) inst.set(k, { profit: 0, asset: 0 });
     inst.get(k).asset += asset;
+    const pr = prod.get(String(p.id));
+    if (pr) pr.asset = asset;
   }
   daily.sort((a, c) => a[0].localeCompare(c[0]));
   let run = 0;
@@ -205,11 +215,24 @@ export function monthReport(products, trades, y, m, td) {
     share: assetEnd > 0 ? v.asset / assetEnd : 0,
   })).sort((a, c) => c.asset - a.asset || c.profit - a.profit);
 
+  /* 收益构成：当月有变动的产品，赚得最多/亏得最多的排前面（按 |收益| 而不是代数和，
+     否则一个月里 +0.5 与 -80 会排成 +0.5 在前，用户真正要看的那条掉到最后）。
+     名字没填的产品标成「未命名产品」，副标题仍给机构（没填就是「未填机构」）——
+     空标题会让这一行看不出是谁，落回机构名又等于把「没填名字」这件事藏起来。 */
+  const byProd = [...prod.values()].filter(x => x.profit)
+    .map(x => ({
+      ...x,
+      label: x.label || "未命名产品",
+      share: assetEnd > 0 ? x.asset / assetEnd : 0,
+    }))
+    .sort((a, c) => Math.abs(c.profit) - Math.abs(a.profit) || a.label.localeCompare(c.label));
+
   return {
     y, m, first: b.first, last: b.last, end, days, isCurrent: cur,
     profit, daily, cum, assetStart, assetEnd, change: assetEnd - assetStart,
     buyN, buyAmt, sellN, sellShares, sellAmt, netInflow, realized, annual,
-    byInst, holdN: products.filter(p => sharesOn(p, trades, end) > 0).length,
+    byInst, byProd,
+    holdN: products.filter(p => sharesOn(p, trades, end) > 0).length,
     best: best && best.profit !== 0 ? best : null,
   };
 }

@@ -687,3 +687,70 @@ test("月收益只有一份实现：首页与月报共用 monthly.js", () => {
   assert.ok(!/navSeries\(p\)[\s\S]{0,200}?i === 0/.test(fnBody("monthProfit")),
     "monthProfit 里又出现了逐日循环");
 });
+
+test("月报：收益构成按产品列，资产构成仍按机构", () => {
+  /* 用户的要求是「显示具体哪个产品名称」。byProd 的口径（只列当月有变动的、
+     清仓的也在、按 |收益| 排序）由 tests/monthly.test.mjs 盯着，
+     这里只钉界面确实接的是那份数据 —— 接错回 byInst 就等于把要求改回去了。 */
+  const b = fnBody("renderMonthly");
+  assert.ok(/profitShares\(r\.byProd\)/.test(b), "占比用的不是 byProd");
+  assert.ok(/r\.byProd\.map/.test(b), "条形行不是按产品生成的");
+  assert.ok(!/r\.byInst\.map/.test(b), "收益构成又接回机构聚合了");
+  assert.ok(/r\.byInst\.filter\(x => x\.asset > 0\)/.test(b),
+    "资产构成环应该还是按机构聚合（对照用）");
+  assert.ok(/期末已清仓/.test(b), "期末没市值的产品要在条上标出来，否则看不出它为什么不在环里");
+  /* 副标题只补名字里没说出来的部分：机构名（产品名通常自带，再跟一遍是噪声）
+     与「期末已清仓」（必须标）。这两条写在模板里，钉住别改回无脑追机构名。 */
+  assert.ok(/x\.label\.indexOf\(x\.inst\) < 0/.test(b), "副标题没判重：名字带机构的产品会被再念一遍机构名");
+  assert.ok(/if \(!x\.asset\) bits\.push\("期末已清仓"\)/.test(b), "清仓标记丢了");
+  assert.ok(/<div class="nm" title="\$\{esc\(x\.label\)\}"/.test(b),
+    "两行放不下的长名字没有 title 可看全文");
+});
+
+test("弹层：返回手势能关掉二级页面（压一条历史哨兵）", () => {
+  /* 手机返回手势 / 返回键在壳里走 MainActivity.onBackPressed：canGoBack 就 goBack。
+     所以网页要让「弹层开着」这件事在历史里占一条，返回才有关的东西可退；
+     没有这条哨兵，一次返回就是直接退出 App（用户反馈过的手感问题）。 */
+  const open = fnBody("openSheet");
+  const close = fnBody("closeSheet");
+  const push = fnBody("sheetPush");
+  assert.ok(/sheetPush\(\)/.test(open) && /history\.pushState\(/.test(push),
+    "openSheet 没往历史压哨兵：返回手势会直接退出 App");
+  assert.ok(/classList\.add\("show"\)/.test(open), "openSheet 不显示遮罩了？");
+  assert.ok(/if \(sheetSentinel\) return/.test(open),
+    "重复压哨兵会让一次手势只关掉一半（弹层是互相替换的，只该有一条）");
+  assert.ok(/try \{/.test(push) && /catch \(/.test(push),
+    "pushState 在隐私模式 / file:// 会抛，不兜住就是整个弹层打不开");
+  assert.ok(/sheetSentinel = seq/.test(push), "pushState 成功才算压上（失败时绝不能去 history.back）");
+  assert.ok(/if \(!sheetSentinel\) return/.test(close), "没压上哨兵就不许退历史，否则整页被退走");
+  assert.ok(/sheetSentinel = 0; sheetPopPending = true;\s*\n\s*history\.back\(\)/.test(close),
+    "closeSheet 要把那条哨兵退掉，否则历史里留一条空记录，返回键会「按一下没反应」");
+  assert.ok(/addEventListener\("popstate"/.test(APP_SRC), "没有 popstate：返回手势关不掉弹层");
+  const pop = APP_SRC.slice(APP_SRC.indexOf('addEventListener("popstate"'));
+  assert.ok(/sheetPopPending = false/.test(pop),
+    "popstate 要认出「是 closeSheet 自己退的」，否则点 ✕ 会被当成用户按了返回二次处理");
+  assert.ok(!/history\.back\(\)/.test(pop.slice(0, 700)),
+    "popstate 里再 back 就是二次退栈：用户按一次返回会多退一层，页面直接走掉");
+  /* 同一拍里「先关再开」：back 是异步的，立刻 push 会被那条迟到的 back 打掉新弹层
+     （手机上就是「点开就闪回去」）。补压必须等 popstate 落地、且弹层确实还开着。 */
+  assert.ok(/if \(sheetPopPending\) \{ sheetWantPush = true; return; \}/.test(open),
+    "退栈还没落地就 push：新开的弹层会被上一次 closeSheet 的 back 关掉");
+  assert.ok(/if \(sheetWantPush\)[\s\S]{0,200}classList\.contains\("show"\)[\s\S]{0,60}sheetPush\(\)/.test(pop),
+    "popstate 里没做补压（或补压前没确认弹层还开着）");
+});
+
+test("弹层：同一拍里先关再开，新弹层不许被上一次退栈关掉", () => {
+  /* 这条是 v56 真正的坑：history.back() 是异步的。closeSheet() 之后紧跟着再开一个弹层
+     （保存完重开表单、翻月份）时，如果 openSheet 立刻 pushState，那条迟到的 back
+     会落在新哨兵身上 —— 弹层自己把自己关掉，手机上就是「点开就闪回去」。
+     所以补压要等 popstate 落地。这里同时钉住两种终态：
+       正常路径：back 落地后新弹层仍开着、并且重新占了一条哨兵；
+       降级路径（压不上 history）：不崩、也不会去 back 把整页退走。 */
+  const open = fnBody("openSheet");
+  assert.ok(/sheetPopPending/.test(open) && /sheetWantPush = true/.test(open),
+    "openSheet 没等上一次退栈落地就压哨兵");
+  const push = fnBody("sheetPush");
+  assert.ok(/catch \(e\) \{ sheetSentinel = 0; \}/.test(push),
+    "pushState 抛异常时要把标记清零：留着就会去 back 一个根本没压上的条目");
+  assert.ok(!/history\.back\(\)/.test(push), "压哨兵的地方不该退历史");
+});
