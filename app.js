@@ -45,7 +45,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v58";
+const APP_VER = "v59";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -3099,15 +3099,56 @@ function nativeFetchAvailable() {
   try { return !!(window.NativeNav && window.NativeNav.ready && window.NativeNav.ready()); }
   catch (e) { return false; }
 }
+/* 本机壳的 origin —— 和私有仓 MainActivity.HOST 是同一个值，那边改了这边要跟。
+   它是个结构性事实：壳只给 https://appassets.androidplatform.net/ 这个 origin 挂桥
+   （onPageStarted 里按 origin 判断），Pages 那个 origin 永远不可能有桥。
+   所以「在不在 App 里」优先信这个，不必等桥自己冒出来。 */
+const SHELL_HOST = "appassets.androidplatform.net";
+function inShellHost() {
+  try { return location.hostname === SHELL_HOST; } catch (e) { return false; }
+}
+/* 这一份文档里认出来过一次就不反悔：桥是挂上就不会掉的，
+   中途某一次 ready() 抖动就把两节收掉，用户看到的就是「刚才还在，现在没了」。 */
+let appOnlySeen = false;
+let appOnlyTimer = 0;
 /* 秒讯 / 净值账本这两节只在 App 里出现。
    理由是硬的：两个站都不给跨域许可 —— 实测 aixhub 的 /api/auth/send-code 连预检
    OPTIONS 都回 501，GET/POST 的响应里一个 Access-Control-Allow-Origin 都没有，
    ledgerme 同样。网页版发出去必然被浏览器拦死，那就别留一个点了只会回一句
    「仅 App 可用」的按钮：整节收掉，网页版根本不提这件事。
    类打在 <html> 上、藏人靠 CSS —— 卡片标题是 index.html 里的静态 HTML，
-   等 renderAixhub 跑起来再逐个藏会闪一下。 */
+   等 renderAixhub 跑起来再逐个藏会闪一下。
+   v59：判定不再只看「按下这一刻桥在不在」。桥是在壳里 onPageStarted 才挂的，
+   冷启动 / 进程被回收后恢复时它可能比第一次 renderSet 晚到一步，旧写法判空了就
+   整会话都看不见这两节（用户报的「有时候消失」就是这么来的）。现在三层兜：
+   本机壳 origin 直接算数 → 认出来过就不反悔 → 都没认出来时排队重试，
+   桥一到就补上并把设置页重画。网页版三个条件一个都不满足，照旧整节收掉。 */
 function syncAppOnly() {
-  document.documentElement.classList.toggle("inApp", nativeFetchAvailable());
+  const on = inShellHost() || nativeFetchAvailable();
+  if (on) {
+    appOnlySeen = true;
+    if (appOnlyTimer) { clearInterval(appOnlyTimer); appOnlyTimer = 0; }
+    document.documentElement.classList.add("inApp");
+    return;
+  }
+  if (appOnlySeen) return;
+  document.documentElement.classList.remove("inApp");
+  if (!appOnlyTimer) armAppOnlyRetry();
+}
+function armAppOnlyRetry() {
+  let n = 0;
+  appOnlyTimer = setInterval(() => {
+    /* 桥晚到会走到这里；约 5 秒内还没来就当它是网页版，别再空转 */
+    if (inShellHost() || nativeFetchAvailable()) {
+      clearInterval(appOnlyTimer); appOnlyTimer = 0;
+      syncAppOnly();
+      /* 这两节的内容是被守卫清空过的，光补类只剩两个空标题，得连渲染一起补 */
+      const set = $("pg-set");
+      if (set && set.classList.contains("on")) renderSet();
+      return;
+    }
+    if (++n >= 12) { clearInterval(appOnlyTimer); appOnlyTimer = 0; }
+  }, 400);
 }
 window.__navDone = function (id, res) {
   const f = _navDone[id]; if (!f) return;

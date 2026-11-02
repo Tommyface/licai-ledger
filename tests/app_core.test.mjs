@@ -763,8 +763,11 @@ test("弹层：同一拍里先关再开，新弹层不许被上一次退栈关�
 
 test("秒讯/净值账本：网页版整节收掉，靠 <html>.inApp + CSS，不靠逐个 display:none", () => {
   const sync = fnBody("syncAppOnly");
-  assert.ok(/classList\.toggle\("inApp", nativeFetchAvailable\(\)\)/.test(sync),
-    "syncAppOnly 不是按本机桥来打类的");
+  /* v59 起「在不在 App 里」是三层判定（本机壳 origin / 桥 / 认出来过就记住），
+     这条只钉住「类是由它决定的」这件事，具体三层见下面的 v59 测试 */
+  assert.ok(/classList\.add\("inApp"\)/.test(sync) && /classList\.remove\("inApp"\)/.test(sync),
+    "syncAppOnly 不再按 App / 网页来加减这个类了");
+  assert.ok(/nativeFetchAvailable\(\)/.test(sync), "这个类不再参考本机桥");
   /* 类要在渲染设置页时刷新：桥是 onPageStarted 注入的，脚本第一行时不一定已经在了，
      所以不能只在 init 里判一次 */
   assert.ok(/syncAppOnly\(\)/.test(fnBody("renderSet")), "renderSet 没同步这个类");
@@ -864,5 +867,58 @@ test("秒讯：会员到期不再本地跳过，抓不到才提示；也不再�
   for (const fn of strays) {
     assert.ok(["aixhubCheck", "aixhubLoginFlow", "renderAixhub"].includes(fn),
       `到期状态又跑到 ${fn}() 里参与决策了：抓取路径只看有没有 token`);
+  }
+});
+
+/* ---------- v59：设置里那两节「有时候消失」 ---------- */
+
+test("App-only 判定不再只看「按下这一刻桥在不在」：本机壳 origin + 认出来不反悔 + 排队重试", () => {
+  const b = fnBody("syncAppOnly");
+  /* 1) 结构性信号：壳只给自己的 origin 挂桥，Pages 那个 origin 永远不可能有桥 */
+  assert.ok(/inShellHost\(\) \|\| nativeFetchAvailable\(\)/.test(b),
+    "判定还是只信桥：桥晚到一步这两节就整会话不见了");
+  assert.ok(/const SHELL_HOST = "appassets\.androidplatform\.net";/.test(APP_SRC),
+    "SHELL_HOST 要和私有仓 MainActivity.HOST 同一个值，改那边要跟这里");
+  assert.ok(/function inShellHost\(\)/.test(APP_SRC), "inShellHost() 没了");
+  /* 2) 认出来过一次就不反悔：中途一次抖动不许把两节收掉 */
+  assert.ok(/appOnlySeen = true;/.test(b) && /if \(appOnlySeen\) return;/.test(b),
+    "「已经认出在 App 里」这件事没被记住");
+  /* 3) 没认出来时排队重试，桥一到就补上 */
+  assert.ok(/if \(!appOnlyTimer\) armAppOnlyRetry\(\);/.test(b), "少了排队重试");
+  const r = fnBody("armAppOnlyRetry");
+  assert.ok(/setInterval\(/.test(r), "重试不是定时的");
+  assert.ok(/>= 12/.test(r) && /clearInterval\(appOnlyTimer\)/.test(r),
+    "重试没有上限或不会自停：网页版会一直空转");
+  assert.ok(/renderSet\(\)/.test(r), "桥补上后只补了类、没重画 —— 那两节的内容是被守卫清空过的");
+  /* 旧写法（单时刻 toggle）不许回来 */
+  assert.ok(!/classList\.toggle\("inApp", nativeFetchAvailable\(\)\)/.test(APP_SRC),
+    "又回到一次性 toggle 了：这正是一次判空就整会话看不见的成因");
+});
+
+test("放宽只用于显示，不许用于真调用：登录 / 抓取 / 内容渲染仍然只信桥", () => {
+  /* inShellHost 是个「看得见这两节」的宽松信号，只许待在显示判定那条链上。
+     一旦它去 gate 真实调用，网页版就会走进一条必然被 CORS 拦死的路。 */
+  const topFnAt3 = i => {
+    const a = APP_SRC.lastIndexOf("\nfunction ", i), b2 = APP_SRC.lastIndexOf("\nasync function ", i);
+    const s = Math.max(a, b2);
+    assert.ok(s >= 0, `偏移 ${i} 落在某个函数外面`);
+    return APP_SRC.slice(s, s + 120).split("(")[0].replace(/^\n(?:async )?function /, "").trim();
+  };
+  const hits = [...APP_SRC.matchAll(/inShellHost\(\)/g)].map(m => topFnAt3(m.index));
+  assert.ok(hits.length >= 3, `只读到 ${hits.length} 处 inShellHost()，锚点变了要同步改这条`);
+  for (const fn of hits) {
+    assert.ok(["syncAppOnly", "armAppOnlyRetry", "inShellHost"].includes(fn),
+      `inShellHost() 跑到 ${fn}() 里参与决策了：显示可以宽松，调用必须判桥`);
+  }
+  /* 真调用那几处仍然判桥 */
+  assert.ok(/if \(nativeFetchAvailable\(\)\) return nativeFetchAll\(true\)/.test(fnBody("triggerFetch")),
+    "triggerFetch 改成了宽松判定");
+  assert.ok(/if \(!nativeFetchAvailable\(\)\) return;/.test(
+    APP_SRC.slice(APP_SRC.indexOf("window.__nativeAutoFetch = function"),
+      APP_SRC.indexOf("window.__nativeAutoFetch = function") + 400)),
+    "__nativeAutoFetch 少了那句「没桥直接返回」");
+  for (const name of ["renderAixhub", "renderLedgerme"]) {
+    assert.ok(/if \(!nativeFetchAvailable\(\)\) \{ box\.innerHTML = ""; return; \}/.test(fnBody(name)),
+      `${name} 的内容守卫改信宽松判定了`);
   }
 });
