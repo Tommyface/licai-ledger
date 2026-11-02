@@ -83,6 +83,9 @@ details.adv[open]>summary::before{content:"▾ ";}
   -webkit-backdrop-filter:blur(18px) saturate(175%); backdrop-filter:blur(18px) saturate(175%);
   padding:16px;margin-bottom:14px
 }
+/* 只有 App 内（有本机桥）才出现的小节：类由 app.js 的 syncAppOnly() 打在 <html> 上。
+   藏人放在 CSS 而不是逐个 display —— 卡片标题是静态 HTML，等渲染函数再藏会闪一下。 */
+html:not(.inApp) .app-only{display:none}
 .card-t{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
 .card-t h2{font-size:15px;margin:0;font-weight:650}
 .card-t .hint{font-size:11px;color:var(--ink3)}
@@ -577,11 +580,14 @@ details.adv[open]>summary::before{content:"▾ ";}
       <div id="setSyncBox"></div>
       <button class="btn gh full" style="margin-top:12px" onclick="openSync()">配置同步</button>
     </div>
-    <div class="card">
+    <!-- 秒讯 / 净值账本：两个站都不给跨域许可（实测响应里没有 Access-Control-Allow-Origin，
+         预检直接 501），只有 App 内的本机桥能发这个请求。网页版整节收掉 ——
+         留个点了只会回「仅 App 可用」的按钮，等于让用户白跑一趟。 -->
+    <div class="card app-only">
       <div class="card-t"><h2>秒讯净值（可选）</h2></div>
       <div id="aixhubBox"></div>
     </div>
-    <div class="card">
+    <div class="card app-only">
       <div class="card-t"><h2>净值账本（可选）</h2></div>
       <div id="ledgermeBox"></div>
     </div>

@@ -754,3 +754,71 @@ test("弹层：同一拍里先关再开，新弹层不许被上一次退栈关�
     "pushState 抛异常时要把标记清零：留着就会去 back 一个根本没压上的条目");
   assert.ok(!/history\.back\(\)/.test(push), "压哨兵的地方不该退历史");
 });
+
+/* ---------- v57：秒讯 / 净值账本只在 App 内出现 ----------
+   这两个站都不给跨域许可，网页版发出去必被浏览器拦死（实测：aixhub 的
+   /api/auth/send-code 预检 OPTIONS 回 501，带 Origin 的 GET/POST 响应里没有
+   Access-Control-Allow-Origin；ledgerme 一样）。产品决定是「网页端不做这个功能」，
+   那网页版就不该摆着两个点了只会回一句「仅 App 可用」的按钮。 */
+
+test("秒讯/净值账本：网页版整节收掉，靠 <html>.inApp + CSS，不靠逐个 display:none", () => {
+  const sync = fnBody("syncAppOnly");
+  assert.ok(/classList\.toggle\("inApp", nativeFetchAvailable\(\)\)/.test(sync),
+    "syncAppOnly 不是按本机桥来打类的");
+  /* 类要在渲染设置页时刷新：桥是 onPageStarted 注入的，脚本第一行时不一定已经在了，
+     所以不能只在 init 里判一次 */
+  assert.ok(/syncAppOnly\(\)/.test(fnBody("renderSet")), "renderSet 没同步这个类");
+  assert.ok(/syncAppOnly\(\)/.test(fnBody("renderAixhub")), "renderAixhub 没同步");
+  assert.ok(/syncAppOnly\(\)/.test(fnBody("renderLedgerme")), "renderLedgerme 没同步");
+  /* 卡片标题是 index.html 里的静态 HTML：藏必须发生在 CSS，等 JS 填内容再藏会闪 */
+  assert.ok(/html:not\(\.inApp\) \.app-only\{display:none\}/.test(HTML55),
+    "index.html 里没有 html:not(.inApp) .app-only 这条规则");
+  const cards = HTML55.match(/<div class="card app-only">[\s\S]{0,120}?id="(aixhubBox|ledgermeBox)"/g) || [];
+  assert.equal(cards.length, 2, "两个 App 专属卡片没都带上 app-only 类");
+});
+
+test("秒讯/净值账本：网页版不渲染内容，也不起那个 6 小时一次的自动检查", () => {
+  for (const [name, chk] of [["renderAixhub", "aixhubCheck(true)"], ["renderLedgerme", "ledgermeCheck(true)"]]) {
+    const b = fnBody(name);
+    const guard = b.indexOf('if (!nativeFetchAvailable()) { box.innerHTML = ""; return; }');
+    assert.ok(guard > 0, `${name} 没有「无桥就清空并返回」的守卫`);
+    const timer = b.indexOf(chk);
+    assert.ok(timer > guard,
+      `${name} 的自动检查定时器排在了守卫前面：网页版会一直空转并弹「仅 App 可用」`);
+  }
+  /* 兜底提示留着是对的：老缓存 / 别人把页面搬进别的容器时仍可能点到，但要说清原因 */
+  const guards = APP_SRC.match(/只在 Android App 内可用（[^）]*）/g) || [];
+  assert.ok(guards.length >= 2,
+    `兜底提示只剩 ${guards.length} 条：两个登录入口各该留一条（老缓存里仍可能点到）`);
+  for (const g of guards) {
+    assert.ok(/本机桥|跨域/.test(g), `兜底文案没解释为什么只能在 App 里用：${g}`);
+  }
+});
+
+test("网页版可见的文案里不许出现「去设置 → 秒讯登录」这种指路", () => {
+  /* 入口收掉之后，文案不能再把它指给用户（网页版点了只会得到一句「仅 App 可用」）。
+     标准：这句话所在的顶层函数必须自己就带本机桥守卫 —— 要么文案出在
+     nativeFetchAvailable() 为真的分支里（渲染函数），要么整条路径只在 App 内可达
+     （nativeFetchAll，判桥在调用方：triggerFetch 与 __nativeAutoFetch）。 */
+  const APP_ONLY = ["nativeFetchAll"];
+  const topFnAt = i => {
+    const a = APP_SRC.lastIndexOf("\nfunction ", i), b = APP_SRC.lastIndexOf("\nasync function ", i);
+    const s = Math.max(a, b);
+    assert.ok(s >= 0, `偏移 ${i} 落在某个函数外面，没法判断它什么时候会被执行`);
+    return APP_SRC.slice(s, s + 120).split("(")[0].replace(/^\n(?:async )?function /, "").trim();
+  };
+  const hits = [...APP_SRC.matchAll(/「设置 → 秒讯」/g)];
+  assert.ok(hits.length >= 3, `只读到 ${hits.length} 处「设置 → 秒讯」：锚点文案被删了要同步改这条`);
+  for (const h of hits) {
+    const name = topFnAt(h.index);
+    if (APP_ONLY.includes(name)) continue;
+    assert.ok(/nativeFetchAvailable\(\)/.test(fnBody(name)),
+      `「设置 → 秒讯」在 ${name}() 里没被本机桥判断挡住（偏移 ${h.index}）：网页版会看得见`);
+  }
+  /* App-only 那条路径的前提要一直成立：判桥的是调用方，不是它自己 */
+  assert.ok(/if \(nativeFetchAvailable\(\)\) return nativeFetchAll\(true\)/.test(fnBody("triggerFetch")),
+    "triggerFetch 不再先判桥就直接本机抓取了：网页版会走进 nativeFetchAll");
+  const auto = APP_SRC.slice(APP_SRC.indexOf("window.__nativeAutoFetch = function"));
+  assert.ok(/if \(!nativeFetchAvailable\(\)\) return;/.test(auto.slice(0, 400)),
+    "__nativeAutoFetch 少了那句「没桥直接返回」");
+});

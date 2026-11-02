@@ -45,7 +45,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v56";
+const APP_VER = "v57";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1097,6 +1097,7 @@ function renderSet() {
        </div>`
     : `<div class="note b">尚未连接云端：填好 Token 就能多设备共享同一份台账。仓库与数据文件已预填，改它们请在弹层「高级」里。</div>`;
   syncStateView();
+  syncAppOnly();
   renderAixhub();
   renderLedgerme();
   renderNotify();
@@ -2984,6 +2985,10 @@ function aixhubLogout() {
 }
 function renderAixhub() {
   const box = $("aixhubBox"); if (!box) return;
+  syncAppOnly();
+  /* 网页版：卡片已被 CSS 收掉，这里连内容都不渲染，那个 6 小时一次的自动检查
+     定时器更不能起 —— 起了也只是每六小时撞一次「仅 App 可用」。 */
+  if (!nativeFetchAvailable()) { box.innerHTML = ""; return; }
   const on = !!aixhubToken();
   const li = aixhubLicInfo();
   let status = "";
@@ -3065,6 +3070,8 @@ function ledgermeLogout() {
 }
 function renderLedgerme() {
   const box = $("ledgermeBox"); if (!box) return;
+  syncAppOnly();
+  if (!nativeFetchAvailable()) { box.innerHTML = ""; return; }
   const on = !!ledgermeCookie();
   const who = ledgermeName() || ledgermeUser();
   box.innerHTML = `
@@ -3088,6 +3095,16 @@ function renderLedgerme() {
 function nativeFetchAvailable() {
   try { return !!(window.NativeNav && window.NativeNav.ready && window.NativeNav.ready()); }
   catch (e) { return false; }
+}
+/* 秒讯 / 净值账本这两节只在 App 里出现。
+   理由是硬的：两个站都不给跨域许可 —— 实测 aixhub 的 /api/auth/send-code 连预检
+   OPTIONS 都回 501，GET/POST 的响应里一个 Access-Control-Allow-Origin 都没有，
+   ledgerme 同样。网页版发出去必然被浏览器拦死，那就别留一个点了只会回一句
+   「仅 App 可用」的按钮：整节收掉，网页版根本不提这件事。
+   类打在 <html> 上、藏人靠 CSS —— 卡片标题是 index.html 里的静态 HTML，
+   等 renderAixhub 跑起来再逐个藏会闪一下。 */
+function syncAppOnly() {
+  document.documentElement.classList.toggle("inApp", nativeFetchAvailable());
 }
 window.__navDone = function (id, res) {
   const f = _navDone[id]; if (!f) return;
