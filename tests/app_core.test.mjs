@@ -822,3 +822,47 @@ test("网页版可见的文案里不许出现「去设置 → 秒讯登录」这
   assert.ok(/if \(!nativeFetchAvailable\(\)\) return;/.test(auto.slice(0, 400)),
     "__nativeAutoFetch 少了那句「没桥直接返回」");
 });
+
+/* ---------- v58：历史净值表的万份收益列 + 秒讯到期不再本地跳过 ---------- */
+
+test("产品详情：历史净值表加一列万份收益，取的是 st.wan，不在表里另算一遍", () => {
+  const body = fnBody("renderProdDetail");
+  const heads = [...body.matchAll(/<th>([^<]+)<\/th>/g)].map(m => m[1]);
+  assert.deepEqual(heads, ["日期", "单位净值", "日涨跌", "万份收益", "7日年化"],
+    `表头漂了：${heads.join(" / ")}`);
+  const tds = (body.match(/<tr>\s*\n\s*<td>/g) || []).length;
+  assert.equal(tds, 1, "历史净值表的行模板被改散了（应是一段 <tr> 起头）");
+  const cells = (body.slice(body.indexOf("const rows = []"), body.indexOf("const chartHtml"))
+    .match(/<td/g) || []).length;
+  assert.equal(cells, heads.length, `行里有 ${cells} 个 td，表头 ${heads.length} 个 th，对不上`);
+  /* 口径只许存在一处：卡片上的「万份收益（最新）」就是 st.wan 的末位 */
+  assert.ok(/const w = st\.wan\[i\]/.test(body), "万份收益列不是取 st.wan[i]");
+  assert.ok(/wan2\(w\)/.test(body), "列里没走 wan2（和产品收益表那个两位小数口径漂开）");
+  assert.ok(!/\*\s*10000/.test(body), "详情里又算了一遍万份收益：口径要在 navStats 一处");
+  assert.ok(/万份收益为折算口径/.test(body), "表头 hint 要说明这是折算口径，官方并不披露这一项");
+});
+
+test("秒讯：会员到期不再本地跳过，抓不到才提示；也不再每次打开弹状态 toast", () => {
+  const body = fnBody("nativeFetchAll");
+  assert.ok(/const aixOn = !!aixhubToken\(\);/.test(body),
+    "本机抓取还在按本机缓存的到期状态决定要不要问秒讯");
+  assert.ok(!/aixLi\.expired/.test(body), "到期判断又回到抓取路径里了");
+  assert.ok(!/toast\(\s*["'`][^"'`]*跳过秒讯/.test(APP_SRC),
+    "「这次跳过秒讯」那句提示又回来了：本机抓取是自动跑的，这等于每次打开都弹一次");
+  /* 失败仍然要报，而且要分得清是会员问题还是登录失效 */
+  assert.ok(/if \(aixErr && withAixhub\)/.test(body), "抓取失败不再提示了");
+  assert.ok(/\/403\|会员\|权限\//.test(body), "会员/权限那条判断丢了");
+  assert.ok(/lsDel\(AIX_LS\.token\)/.test(body), "401（真·登录失效）仍要清掉本地 token");
+  /* 到期状态只在界面上说（提示文案、卡片配色），不再替用户决定抓不抓 */
+  const topFnAt2 = i => {
+    const s = Math.max(APP_SRC.lastIndexOf("\nfunction ", i), APP_SRC.lastIndexOf("\nasync function ", i));
+    assert.ok(s >= 0, `偏移 ${i} 落在函数外面`);
+    return APP_SRC.slice(s, s + 120).split("(")[0].replace(/^\n(?:async )?function /, "").trim();
+  };
+  const strays = [...APP_SRC.matchAll(/li\.expired/g)].map(m => topFnAt2(m.index));
+  assert.ok(strays.length >= 4, `只读到 ${strays.length} 处到期判断，锚点变了要同步改这条`);
+  for (const fn of strays) {
+    assert.ok(["aixhubCheck", "aixhubLoginFlow", "renderAixhub"].includes(fn),
+      `到期状态又跑到 ${fn}() 里参与决策了：抓取路径只看有没有 token`);
+  }
+});

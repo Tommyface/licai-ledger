@@ -45,7 +45,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v57";
+const APP_VER = "v58";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1870,14 +1870,17 @@ function renderProdDetail() {
   const navFmt = v => (v === null ? "—" : Number(v).toFixed(4));
   const pctFmt = v => (v === null ? "—" : `${v >= 0 ? "+" : ""}${pct(v)}`);
 
-  /* 历史净值表：末 20 行 */
+  /* 历史净值表：末 20 行。万份收益直接取 st.wan[i] —— 和上面那张卡片的「万份收益（最新）」
+     是同一个数组的末位，不在这儿另算一遍（跨周末按自然日均摊那条口径只允许存在一处）。 */
   const rows = [];
   for (let i = n - 1; i >= 0 && rows.length < 20; i--) {
     const chg = i > 0 ? (st.vals[i] - st.vals[i - 1]) / st.vals[i - 1] : null;
+    const w = st.wan[i];
     rows.push(`<tr>
       <td>${esc(st.dates[i].slice(5))}</td>
       <td><b>${navFmt(st.vals[i])}</b></td>
       <td class="${cls(chg === null ? 0 : chg)}">${chg === null ? "—" : pct(chg)}</td>
+      <td class="${cls(w === null ? 0 : w)}">${wan2(w)}</td>
       <td class="${cls(st.a7[i] === null ? 0 : st.a7[i])}">${st.a7[i] === null ? "—" : pct(st.a7[i])}</td>
     </tr>`);
   }
@@ -1952,9 +1955,9 @@ function renderProdDetail() {
       ${chartHtml}
     </div>
 
-    <div class="card-t" style="margin:14px 0 8px"><h2 style="font-size:14px">历史净值</h2><span class="hint">最近 ${Math.min(20, n)} 条 / 共 ${n} 条</span></div>
+    <div class="card-t" style="margin:14px 0 8px"><h2 style="font-size:14px">历史净值</h2><span class="hint">最近 ${Math.min(20, n)} 条 / 共 ${n} 条 · 万份收益为折算口径</span></div>
     ${rows.length ? `<table class="navtbl">
-      <thead><tr><th>日期</th><th>单位净值</th><th>日涨跌</th><th>7日年化</th></tr></thead>
+      <thead><tr><th>日期</th><th>单位净值</th><th>日涨跌</th><th>万份收益</th><th>7日年化</th></tr></thead>
       <tbody>${rows.join("")}</tbody>
     </table>` : `<div class="empty">暂无净值</div>`}
 
@@ -3140,11 +3143,15 @@ async function nativeFetchAll(forceExtra) {
   if (forceExtra && aixhubToken()) await aixhubCheck(true);
   /* 秒讯 / 净值账本只在你手动点「⚡ 立即抓取」时查（各 3 分钟内不重复）：
      它们的接口要登录态，后台定时轮询既没必要、也容易被风控；官网那条线照旧自动跑。 */
-  const aixLi = aixhubLicInfo();
-  const aixOn = !!aixhubToken() && !aixLi.expired;
-  if (aixhubToken() && aixLi.expired) {
-    toast("秒讯会员已到期/状态异常，这次跳过秒讯（不影响官网抓取）", 4600);
-  }
+  /* 秒讯：会员到期也照样去问一次。
+     以前是本地看 license.state/expires_at 就先跳过，等于替它做了决定 —— 而那个字段
+     是本机缓存的旧快照（到期日按天算，跨过去的那一刻起就一直在「已到期」），
+     实际站方续费、宽限、改口径都不会同步过来。用户要的是「照抓，抓不到再说」，
+     所以这里只看有没有 token；到期与否由服务器回什么话来决定（403/会员 → 提示，
+     401 → 才算登录失效并清掉本地 token）。
+     顺带去掉那句每次打开都会弹一次的状态提示：本机抓取是自动跑的，
+     一个「这次跳过秒讯」的 toast 每天要按十几次，纯噪音。真取不到下面会报。 */
+  const aixOn = !!aixhubToken();
   let lastAix = 0;
   try { lastAix = Number(localStorage.getItem(AIX_LS.at) || 0); } catch (e) { }
   const withAixhub = aixOn && !!forceExtra && Date.now() - lastAix > 3 * 60000;
