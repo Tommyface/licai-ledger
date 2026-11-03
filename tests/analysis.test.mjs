@@ -3,12 +3,14 @@
    覆盖三条口径（js/domain/analysis.js 头部）：
      1. 判定档位齐全、每一项都要有中文档位词；
      2. 结论文本里不许出现金额（会进本机缓存，而「隐藏金额」是显示态）；
-     3. 缺输入只输出「信息不足（缺 X）」，不猜、不填默认值。
+     3. 缺输入只输出「信息不足（缺 X）」，不猜、不填默认值；
+   外加渲染拆分 anaRowParts() —— v61 上线后截图里「信息不足 信息不足（缺…）」的结巴，
+   就是这一层没拆干净造成的，它必须有自己的用例。
    指纹与缓存认账本也在这里测 —— 页面层（app.js）只按状态显，不另算一遍。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runChecks, portfolioChecks, anaFingerprint, anaFpSource, normAnaCache, anaCacheState,
-  ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CHECK_TITLES, ANA_CACHE_V, ANA_CACHE_MAX } from "../js/domain/analysis.js";
+  anaRowParts, ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CHECK_TITLES, ANA_CACHE_V, ANA_CACHE_MAX } from "../js/domain/analysis.js";
 
 /* 2026-11-03 是周二，10-30 是周五：中间只有 11-02(一) 11-03(二) 两个交易日。 */
 const TD = "2026-11-03";
@@ -319,4 +321,51 @@ test("三态：没记录 = none，指纹一致 = fresh，不一致 = stale", () 
   const stale = anaCacheState({ fp: "00000000", at: 1, checks }, "a1b2c3d4");
   assert.equal(stale.state, "stale");
   assert.equal(stale.checks.length, checks.length, "stale 也要把旧结论交回页面，由页面说它过期了");
+});
+
+/* ---- 渲染拆分 anaRowParts ----
+   第 3 条口径要求 na 的文本自带「信息不足」四个字（缓存里单取一条也得是完整的话），
+   页面又固定打一个档位词，两边一叠加就是「信息不足 信息不足（缺…）」。
+   v61 的 live 截图里 11 行有 4 行是这个样子 —— 重复在渲染层消，不靠改短文本。 */
+test("拆分：na 的档位词不重复印，正文接上去是一句完整的话", () => {
+  const na = run(good({ disc: { lockDays: null } }), [BUY]).find(c => c.key === "lock");
+  assert.equal(na.level, "na");
+  const rp = anaRowParts(na);
+  assert.equal(rp.level, "信息不足");
+  assert.equal(rp.body, "（缺最短持有 / 封闭天数）：判不了现在能不能赎");
+  assert.equal(rp.level + rp.body, na.text, "拼回去必须正好等于原文 —— 消重复不能靠吞字");
+});
+
+test("拆分：正常 / 要注意这类正文不以档位词开头，原样保留", () => {
+  const ok = run(good(), [BUY]).find(c => c.key === "nav");
+  assert.equal(anaRowParts(ok).level, "正常");
+  assert.equal(anaRowParts(ok).body, ok.text, "不开头的正文一个字都不能少");
+});
+
+test("拆分：每一条检查项渲染出来都不许出现结巴", () => {
+  const cases = [
+    run(good(), [BUY]),
+    run(good({ disc: { lockDays: null, feeRedeem: [] } }), [BUY]),
+    run(good({ product: { navHistory: {} } }), []),
+    portfolioChecks([], 3),
+  ];
+  for (const checks of cases) {
+    for (const c of checks) {
+      const rp = anaRowParts(c);
+      assert.ok(rp.level, c.key + " 必须有档位词");
+      assert.ok(!rp.body.startsWith(rp.level), c.key + " 的正文重复了档位词：" + rp.body);
+      /* 正文只能是原文的后缀：要么一字不改（文本不以档位词开头），
+         要么恰好削掉开头那一个档位词。改成别的样子就是吞字或改写结论。 */
+      assert.ok(c.text.endsWith(rp.body), c.key + " 正文不是原文的后缀：" + rp.body);
+      assert.ok(rp.body === c.text || rp.body === c.text.slice(rp.level.length),
+        c.key + " 削掉的不是开头那一个档位词：" + rp.body);
+    }
+  }
+});
+
+test("拆分：脏输入不炸 —— 认不出的 level 就用原文，没 text 就是空", () => {
+  assert.deepEqual(anaRowParts({ level: "weird", text: "weird正文" }), { level: "weird", body: "正文" });
+  assert.deepEqual(anaRowParts({ level: "ok", text: "" }), { level: "正常", body: "" });
+  assert.deepEqual(anaRowParts(undefined), { level: "", body: "" });
+  assert.deepEqual(anaRowParts(null), { level: "", body: "" });
 });

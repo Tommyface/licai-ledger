@@ -32,7 +32,7 @@ import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
   DISC_TIER_LABEL, DISC_GAP_LABEL } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
-  ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
+  anaRowParts, ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -53,7 +53,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v61";
+const APP_VER = "v62";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1683,8 +1683,8 @@ function clearAnaCache() {
 /* 体检的表格复用 .navtbl（底层配置卡用的那一张），只加一条「左边色带 + 档位词」的样式。
    档位词必须写成文字：只靠颜色传达判定，在灰度截图 / 色觉障碍 / 对比度不足时等于没传达。 */
 function anaRow(c) {
-  const lv = ANA_LEVEL_TEXT[c.level] || c.level;
-  return `<tr class="ana ${c.level}"><td>${esc(c.title)}</td><td><b>${esc(lv)}</b>${esc(c.text)}</td></tr>`;
+  const rp = anaRowParts(c);
+  return `<tr class="ana ${c.level}"><td>${esc(c.title)}</td><td><b>${esc(rp.level)}</b>${esc(rp.body)}</td></tr>`;
 }
 function anaTable(checks) {
   return `<table class="navtbl ana"><tbody>${checks.map(anaRow).join("")}</tbody></table>`;

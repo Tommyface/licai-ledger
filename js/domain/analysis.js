@@ -310,6 +310,20 @@ export function normAnaCache(raw, max = ANA_CACHE_MAX) {
 }
 
 /**
+ * 渲染拆分：档位词 + 正文。
+ * na 的正文按第 3 条口径必须自带「信息不足」四个字（缓存里单独取出那一条也得是完整的话），
+ * 页面再印一遍档位词就成了「信息不足 信息不足（缺…）」的结巴 —— 重复在这里消掉，
+ * 而不是把文本改成不完整的话。
+ * @param {{ level?: string, text?: string }} c
+ * @returns {{ level: string, body: string }}
+ */
+export function anaRowParts(c) {
+  const lv = ANA_LEVEL_TEXT[(c && c.level) || ""] || String((c && c.level) || "");
+  const text = String((c && c.text) || "");
+  return { level: lv, body: text.indexOf(lv) === 0 ? text.slice(lv.length) : text };
+}
+
+/**
  * 缓存项 → 页面状态。三态在这里判，app.js 只负责显。
  * @param {{ fp: string, at: number, checks: object[] } | undefined | null} entry
  * @param {string} fp 当前输入算出来的指纹
