@@ -1359,3 +1359,19 @@ test("v67 屏上仍然写着真实端点没实测（铁律 #10 —— 拿到真�
   assert.ok(!/已实测|实测过了|验证过的端点/.test(block), "文案说成了实测过");
   assert.match(block, /认不得就明说认不得/, "降级那句不在了");
 });
+
+test("v69 __llmDone 只经由 llmMetaOf 读元信息，那句兜底话不许当文案发出去", () => {
+  const { src } = t3Slice();
+  const sig = "window.__llmDone = function (id, metaJson) {";
+  const i = src.indexOf(sig);
+  assert.ok(i > 0, "__llmDone 的签名变了：两侧回调的契约门禁（verify-web 第 2f 项）要跟着改");
+  const body = src.slice(i + sig.length, src.indexOf("\n};", i));
+  const uses = (body.match(/metaJson/g) || []).length;
+  assert.equal(uses, 1, "handler 里又出现一次 metaJson（共 " + uses + " 次）：元信息的读法只许 llmMetaOf 一处，"
+    + "1.0.220 那次「名字对得上、类型对不上」就是两处各读各的读法");
+  assert.match(body, /llmMetaOf\(metaJson\)/, "handler 没把元信息交给 llmMetaOf");
+  assert.match(body, /llmMetaErr\(meta, rd\.why, body\.length\)/, "失败那一行的话不是由 llmMetaErr 说的");
+  assert.ok(!/["`]原生侧没回元信息["`]/.test(src),
+    "「原生侧没回元信息」又被当成文案：真没回是 120 秒超时那条路径说的，"
+    + "这句盖住了「壳回的是对象」那一档（v69 拆开的正是它）");
+});

@@ -17,7 +17,8 @@ import assert from "node:assert/strict";
 import { llmReq, llmSource, llmGradeSources, llmParse, llmChunkFeed, llmChunkJoin,
   llmCanRetry, llmDegrade, LLM_BRIDGE, LLM_BRIDGE_METHODS, LLM_TIMEOUT_MS, LLM_CHUNK_MAX_PARTS,
   llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS, LLM_TRANSCRIPT_MAX_CHARS,
-  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, LLM_SNAPSHOT_MAX_CHARS, LLM_SNAPSHOT_MASKED } from "../js/domain/llm.js";
+  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, LLM_SNAPSHOT_MAX_CHARS, LLM_SNAPSHOT_MASKED,
+  llmMetaOf, llmMetaErr } from "../js/domain/llm.js";
 
 /* ---- 口径 1：JS 不经手密钥 ---- */
 test("请求体只有问题与指令，没有任何凭据字段", () => {
@@ -450,4 +451,56 @@ test("协议形制不由页面拼：发给桥的请求体里不许出现 apiStyl
   const s = JSON.stringify(llmReq({ input: "q", instructions: "i" })).toLowerCase();
   for (const w of ["apistyle", "messages", "tools", "choices", "chat/completions", "responses"])
     assert.ok(!s.includes(w), "页面请求体里出现了 " + w + "：同一个形状两处各写一遍迟早对不上");
+});
+
+/* ---- v69：壳回来的元信息是「对象」而不是「JSON 字符串」时，必须自己说清楚 ----
+   1.0.220 每轮问答都显示「原生侧没回元信息」，而真情况是 LlmBridge 把元信息拼成了
+   JS 对象字面量：String(obj) 得 "[object Object]"，JSON.parse 必抛。
+   这一组是**实喂**（把两种形状真的喂进去），不是拿正则数文案 —— 参数类型这种东西
+   只有真跑一次才看得见。 */
+
+test("对象形状的元信息：读不成，但原因要说「类型不一致」而不是「没回」", () => {
+  const rd = llmMetaOf({ ok: true, status: 200, bytes: 44, error: "" });
+  assert.equal(rd.meta, null);
+  assert.match(rd.why, /对象/);
+  assert.match(rd.why, /参数类型不一致/);
+  assert.ok(!/没回/.test(rd.why), "把「类型不一致」说成「没回」就是这次误导排查方向的那句话：" + rd.why);
+  const msg = llmMetaErr(rd.meta, rd.why, 44);
+  assert.match(msg, /参数类型不一致/);
+  assert.match(msg, /响应正文已收到 44 字/, "端点已经跑完的那一轮，得让用户看见正文到了：" + msg);
+});
+
+test("字符串形状的元信息：正常读到，why 为空", () => {
+  const rd = llmMetaOf('{"ok":true,"status":200,"bytes":44,"error":""}');
+  assert.equal(rd.why, "");
+  assert.equal(rd.meta.ok, true);
+  assert.equal(rd.meta.bytes, 44);
+});
+
+test("坏 JSON、空回、ok 不为真、标量：四档各是各的一句话", () => {
+  assert.match(llmMetaOf('{"ok":tru').why, /不是合法 JSON/);
+  const empt = llmMetaOf("");                      // 桥真的回了一句空参数
+  assert.deepEqual(empt.meta, {});
+  assert.match(llmMetaErr(empt.meta, empt.why, 0), /空元信息/);
+  assert.match(llmMetaErr(empt.meta, empt.why, 0), /没有收到任何响应正文/);
+  const noOk = llmMetaOf('{"status":500,"bytes":0}');
+  assert.match(llmMetaErr(noOk.meta, noOk.why, 0), /ok 不为真/);
+  const scal = llmMetaOf("5");                     // JSON.parse 认得的标量
+  assert.match(scal.why, /不是对象/);
+  assert.match(scal.why, /开头是「5」/);
+});
+
+test("壳给了错误原因就用它原样说，不套正文那一串（也不许冒出没回那句）", () => {
+  const rd = llmMetaOf('{"ok":false,"status":500,"error":"端点回 HTTP 500"}');
+  const msg = llmMetaErr(rd.meta, rd.why, 0);
+  assert.equal(msg, "端点回 HTTP 500");
+});
+
+test("这一组读法里任何一条都不许产出「原生侧没回元信息」", () => {
+  const cases = [{ ok: true }, "", "[]", "{}", "null", "{坏", 5, undefined, null];
+  for (const c of cases) {
+    const rd = llmMetaOf(c);
+    const msg = (rd.meta && rd.meta.error) ? String(rd.meta.error) : llmMetaErr(rd.meta, rd.why, 0);
+    assert.ok(!/原生侧没回元信息/.test(msg), JSON.stringify(c) + " 读出来还是那句兜底话：" + msg);
+  }
 });

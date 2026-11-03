@@ -40,6 +40,13 @@
      「Caller-provided IV not permitted」的根，密钥根本存不进加密区）② 三个桥改为只在
      loadUrl 之前挂一次、把 origin 检查搬到调用时刻（切后台被回收后重加载文档不再丢桥）。
      页面这一侧只多一句实话：本机壳的 origin 在而桥不在时，llmDegrade 不再说「这是网页版」。
+   ★ v69 修的是**参数类型**，配套出 1.0.221：__llmDone 的元信息，壳那边一直在拼 JS 对象
+     字面量，而这里按 JSON 字符串读（JSON.parse(String(metaJson))）—— String(obj) 得到
+     "[object Object]"，parse 必抛。后果不是「偶尔失败」，是建桥以来**每一轮**都显示
+     「原生侧没回元信息」，哪怕端点回了 200、正文一字节不少（1.0.220 真机报障 +
+     对线上 v68 那份 app.js 分别喂对象/喂字符串的 A/B 实测）。
+     两侧回调名字对得上，比名字的门禁（verify-web 第 2f 项）一直绿，所以这次把类型也钉进
+     check_bridge_guard.py 第 6 项。页面这一侧改的是文案：类型不一致与「真没回」不再共用一句话。
 */
 
 /** 桥名。Java 侧 addJavascriptInterface(..., "NativeLlm") 必须同名，verify-web.sh 比对两侧方法。 */
@@ -390,6 +397,48 @@ export function llmChunkJoin(st) {
 export function llmCanRetry(st) {
   const ph = (st && st.phase) || "";
   return ph === "done" || ph === "error" || ph === "timeout";
+}
+
+/**
+ * 读壳回来的元信息（v69）。返回 { meta, why }：why 非空就是「元信息用不了」，
+ * 而**为什么**用不了必须分开说 —— 1.0.220 之前这里只有一句「原生侧没回元信息」，
+ * 而真实情况是壳回的是 JS 对象、不是 JSON 字符串：String(obj) 得到 "[object Object]"，
+ * JSON.parse 必抛。名字对得上、类型对不上，比名字的门禁全绿，报错却把人往「没回」
+ * 与「端点不对劲」上带。这一层单独成函数，是因为参数类型这种东西只有真喂一次才看得见，
+ * 留在 app.js 里就只能靠正则断言文案。
+ * @param {unknown} metaJson 桥传来的第二个实参
+ * @returns {{ meta: {ok?: boolean, status?: number, bytes?: number, error?: string}|null, why: string }}
+ */
+export function llmMetaOf(metaJson) {
+  if (metaJson && typeof metaJson === "object") {
+    return { meta: null, why: "原生回的是对象、不是 JSON 字符串（壳与页面的参数类型不一致）" };
+  }
+  let meta = null;
+  /* 空参数（"" 或 null）就是「回了但什么也没带」，读成 {} 走「空元信息」那一档；
+     直接 JSON.parse("") 抛的话就归到「不是合法 JSON」，那是把壳的沉默说成壳发疯。 */
+  if (String(metaJson == null ? "" : metaJson).trim() === "") return { meta: {}, why: "" };
+  try { meta = JSON.parse(String(metaJson == null ? "{}" : metaJson)); }
+  catch (e) { return { meta: null, why: "原生回的元信息不是合法 JSON（壳与页面的参数类型不一致）" }; }
+  if (!meta || typeof meta !== "object") {
+    const head = String(metaJson == null ? "" : metaJson).slice(0, 40);
+    return { meta: null, why: "原生回的元信息不是对象（读到的开头是「" + head + "」）" };
+  }
+  return { meta: /** @type {{ok?: boolean, status?: number, bytes?: number, error?: string}} */ (meta), why: "" };
+}
+
+/** 元信息用不了时给用户的那一句（v69）：每种错形各有名字，空回与坏 JSON 不混。
+ *  @param {{ok?: boolean, status?: number, bytes?: number, error?: string}|null} meta
+ *  @param {string} why llmMetaOf 量出来的「用不了」原因
+ *  @param {number} bodyChars 已经收到的正文字数 */
+export function llmMetaErr(meta, why, bodyChars) {
+  if (meta && meta.error) return String(meta.error);
+  const base = why
+    || (Object.keys(meta || {}).length
+        ? "原生回的元信息里 ok 不为真，也没给错误原因"
+        : "原生回了空元信息（没有 ok、没有状态码、没有错误原因）");
+  /* 正文到没到手是量出来的，得一并说：这一轮到端点那一头已经跑完了。 */
+  return base + (bodyChars ? "；响应正文已收到 " + bodyChars + " 字"
+                            : "；这一轮没有收到任何响应正文");
 }
 
 /**

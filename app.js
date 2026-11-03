@@ -36,7 +36,7 @@ import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
-  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS } from "./js/domain/llm.js";
+  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr } from "./js/domain/llm.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -57,7 +57,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v68";
+const APP_VER = "v69";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2159,13 +2159,18 @@ window.__llmDone = function (id, metaJson) {
   if (!id || String(id) !== LLM.id) return;
   if (LLM.timer) { clearTimeout(LLM.timer); LLM.timer = 0; }
   if (LLM.phase !== "running") return;                 /* 已经按超时落定：迟到的答案不再翻案 */
-  let meta = null;
-  try { meta = JSON.parse(String(metaJson || "{}")); } catch (e) { meta = null; }
+  /* 「元信息用不了」有三样，v69 起分开说（读法与文案都挪到 js/domain/llm.js，有单测）。
+     上一版一句话兜底：壳回的是对象而不是 JSON 字符串（1.0.220 及之前每轮都这样），
+     屏上却写「原生侧没回元信息」—— 把「参数类型不一致」说成「没回」，排查方向直接被带歪，
+     还会让人以为是自己端点或密钥配错了。两侧回调名字对得上（verify-web 第 2f 项一直绿），
+     对不上的是类型，所以这一次连类型也钉进 check_bridge_guard.py 第 6 项。 */
+  const rd = llmMetaOf(metaJson);
+  const meta = rd.meta;
   const body = LLM.buf ? llmChunkJoin(LLM.buf) : "";
   LLM.meta = meta;
   if (!meta || !meta.ok) {
     LLM.phase = "error";
-    LLM.err = (meta && meta.error) ? String(meta.error) : "原生侧没回元信息";
+    LLM.err = llmMetaErr(meta, rd.why, body.length);
     if (meta && meta.status) LLM.err += "（HTTP " + meta.status + "）";
     LLM.buf = null;
     if (LLM.turn) LLM.turn.err = LLM.err;              /* 失败也进上文：下一轮得知道上一轮没答上 */
