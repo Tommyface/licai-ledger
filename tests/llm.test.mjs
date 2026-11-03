@@ -185,6 +185,27 @@ test("降级：网页版 / 没配密钥 / 都齐，三种说法各不相同", ()
   assert.match(llmDegrade(null), /只在本机 App 内可用/);
 });
 
+/* ---- v68：在壳里但桥没挂上，是第三种情况，不是「网页版」 ---- */
+test("降级多一档：壳的 origin 在、桥不在 —— 说「桥没挂上、退出重进」，不许再说「这是网页版」", () => {
+  const web = llmDegrade({ inApp: false, hasKey: false });
+  const shell = llmDegrade({ inApp: false, hasKey: false, shell: true });
+  assert.match(shell, /桥在这一页没挂上/);
+  assert.match(shell, /这不是网页版/);
+  assert.doesNotMatch(shell, /只在本机 App 内可用/,
+    "用户已经在 App 里了，还指着「只在 App 内可用」那句就是假话");
+  /* 这一档必须把「这次什么都没发生」说清楚：没发出去、不计费（铁律 #5 + #10） */
+  assert.match(shell, /没有发出去|没有调用原生能力/);
+  assert.match(shell, /不计费|不双计费|退出|再进来一次/);
+  /* shell 只是附加的一档，缺省时行为必须与 v67 逐字一致 */
+  assert.equal(llmDegrade({ inApp: false, hasKey: false, shell: undefined }), web);
+  assert.equal(llmDegrade({ inApp: false, hasKey: false, shell: false }), web);
+  assert.equal(llmDegrade(null), web);
+  /* inApp 为真时 shell 不参与：那一屏讲的是「桥在，缺密钥」 */
+  assert.match(llmDegrade({ inApp: true, hasKey: false, shell: true }), /还没有配置模型密钥/);
+  /* 两句都不许承诺自动重来 —— 重发由用户点，费用才不重复 */
+  for (const s of [web, shell]) assert.doesNotMatch(s, /自动(重发|重试|再来)/);
+});
+
 test("桥名与超时上限是常量，Java 侧与页面侧都读它们", () => {
   assert.equal(LLM_BRIDGE, "NativeLlm");
   assert.ok(LLM_TIMEOUT_MS >= 30000 && LLM_TIMEOUT_MS <= 300000, "超时不该短到把正常回答判成失败");

@@ -57,7 +57,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v67";
+const APP_VER = "v68";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -811,9 +811,10 @@ function renderDetailBody() {
   const rows = list.map(r => {
     const s0 = navSeries(r.p);
     const idx = s0.findIndex(x => x[0] === date);
+    const sh = idx > 0 ? sharesOn(r.p, date) : 0;
     return {
-      r, pos: r.pos,
-      dayP: idx > 0 ? sharesOn(r.p, date) * (Number(s0[idx][1]) - Number(s0[idx - 1][1])) : 0,
+      r, pos: r.pos, shares: sh,
+      dayP: idx > 0 ? sh * (Number(s0[idx][1]) - Number(s0[idx - 1][1])) : 0,
       dayNavChange: idx > 0 ? (Number(s0[idx][1]) - Number(s0[idx - 1][1])) : 0,
     };
   });
@@ -829,13 +830,20 @@ function renderDetailBody() {
   for (const k of Object.keys(groups)) {
     const arr = groups[k];
     const sum = arr.reduce((s, x) => s + x.dayP, 0);
+    /* v68：分组行那个「万收」原来是 盈亏 ÷ 市值 × 10000 —— 分母是钱（万元市值），
+       与详情页的 净值差 × 10000（分母是万份）永远差一个净值系数（诚享7天29号 2026-11-02：
+       这里 −11.53、那里 −3.8967，谁都对不上谁）。统一成 盈亏 ÷ 已确认份额 × 10000：
+       单只时它就等于 Δ×10000（−11.69），多只时是份额加权，乘回份额就是左边那个金额。 */
+    const shSum = arr.reduce((s, x) => s + x.shares, 0);
+    const wanG = shSum > 0 ? sum / shSum * 10000 : 0;
     /* v45：这一屏原来是隐藏开关的死角 —— 分组行、每只产品的当日盈亏 / 持仓盈亏 /
        持有金额全部明文。改成一律走 shown() + tone()，颜色口径与首页一致。 */
     html += `<div class="grp">
       <div class="grp-h">
         <div class="av">${esc(k.slice(0, 1))}</div>
         <div class="nm">${esc(k)}<span class="wr"> ${arr.length} 只</span></div>
-        <div class="amt ${tone(sum)}">${shown(signMoney(sum))} <span class="wr">万收(${shown(sum !== 0 ? (sum / Math.max(arr.reduce((s, x) => s + x.pos.market, 0), 1) * 10000).toFixed(2) : "0.00")})</span></div>
+        <div class="amt ${tone(sum)}" title="万收 = 当日盈亏 ÷ 已确认份额 × 10000（元/万份）· 与产品详情同一口径：整段累计、不按自然日摊平；跨周末或长假就是那几天合计">
+          ${shown(signMoney(sum))} <span class="wr">万收(${shown(wanG.toFixed(2))})</span></div>
       </div>`;
     for (const x of arr) {
       const annualTxt = x.pos.annualValid
@@ -1903,7 +1911,7 @@ function llmCanStyle() {
   return !!(c && Object.prototype.hasOwnProperty.call(c, "apiStyle"));
 }
 function llmStatusLine() {
-  if (!llmBridge()) return `<div class="note b">${esc(llmDegrade({ inApp: false, hasKey: false }))}</div>`;
+  if (!llmBridge()) return `<div class="note b">${esc(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }))}</div>`;
   const c = LLM.cfg || {};
   const key = LLM.hasKey
     ? `<b>密钥已配置</b>（存在本机加密区，页面读不到明文）`
@@ -1927,7 +1935,7 @@ function renderLlm() {
 }
 function llmSetKey() {
   const b = llmBridge();
-  if (!b) return toast(llmDegrade({ inApp: false, hasKey: false }), 4200);
+  if (!b) return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4200);
   /* 输入框是原生的：键入的字符从 IME 直接进 Keystore，不经过 JS 上下文 */
   try { b.promptKey(); } catch (e) { toast("原生输入框没弹出来：" + e, 4200); }
 }
@@ -2007,7 +2015,7 @@ function llmHistoryHtml() {
 }
 function openLlm() {
   closeSheet();
-  if (!llmBridge()) { renderLlm(); return toast(llmDegrade({ inApp: false, hasKey: false }), 4200); }
+  if (!llmBridge()) { renderLlm(); return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4200); }
   llmReadCfg();
   const c = LLM.cfg || {};
   /* 额度在打开时算一次就够：这一屏里每发一轮都会重开一次 openLlm()。 */
@@ -2077,7 +2085,7 @@ function openLlm() {
     顺序是「先闸门后动手」：额度到数就连一个字符都不该发出去，不是等请求做完才提示。 */
 function llmSend(text) {
   const b = llmBridge();
-  if (!b) return toast(llmDegrade({ inApp: false, hasKey: false }), 4200);
+  if (!b) return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4200);
   if (LLM.phase === "running") return toast("上一句还在等，不重复发（重复发就是重复计费）", 3600);
   /* 额度先于空文本：到数的时候，用户点下去要听见的是「为什么不能再发」，
      而不是「先写一句要问的话」——那句在这屏上是假话，框里写什么都一样。 */
@@ -2404,8 +2412,9 @@ function saveFromLink() {
    产品详情：单位净值曲线 + 叠加指标（7日年化 / 万份收益）
    ------------------------------------------------------------
    口径（与设置页「口径说明」一致，勿私下改）：
-     · 万份收益(元) = (今日净值 − 昨日披露净值) × 10000 ÷ 相隔自然日数
-       （周末/节假日净值为「几天累计」，按自然日均摊回每日）
+     · 万份收益(元) = (今日净值 − 上一披露日净值) × 10000
+       （v68 起整段累计、不按自然日摊平：这样万收 × 份额 ÷ 10000 就等于当日盈亏。
+         跨周末/长假那一格含整段涨跌，间隔天数由 st.gap 带出去，屏上要写明）
      · N 日年化     = (nav[t] ÷ N 个自然日前最近净值 − 1) ÷ N × 365
      · 成立以来年化 = (末值 / 首值 − 1) / 持有天数 × 365
    全部即时计算、不落盘。图表为内联 SVG 自绘，不引任何库/CDN。
@@ -2437,13 +2446,14 @@ function navStats(p) {
   const s = navSeries(p);
   const dates = s.map(x => x[0]);
   const vals = s.map(x => Number(x[1]));
-  /* 万份收益：首日无前值；跨周末按自然日均摊（周一不再显示 3 天累计派息） */
-  const wan = vals.map((v, i) => {
-    if (i === 0) return null;
-    const days = Math.max(dayDiff(dates[i - 1], dates[i]), 1);
-    return (v - Number(vals[i - 1])) * 10000 / days;
-  });
-  return { dates, vals, wan, a7: annualNArr(dates, vals, 7), a14: annualNArr(dates, vals, 14), a30: annualNArr(dates, vals, 30) };
+  /* v68 口径变更（用户定）：万份收益 = (今 − 上一披露日) × 10000，整段累计，不按自然日摊平。
+     理由是可对账：万收 × 份额 ÷ 10000 恒等于当日盈亏，详情页、收益明细、盈亏三处一把尺子；
+     旧口径摊平之后谁都对不上谁（诚享7天29号 2026-11-02：摊平 −3.8967 / 明细 −11.53 / 盈亏 −80.92）。
+     ★ 代价照实写：跨周末或长假的那一格含整段涨跌，周一的万收是几天累计 —— 这是选择，不是遗漏。
+     gap 把间隔自然日数一起带出去，屏上必须写明本段几天，不许让人以为是一天的数。 */
+  const wan = vals.map((v, i) => (i === 0 ? null : (v - Number(vals[i - 1])) * 10000));
+  const gap = dates.map((d, i) => (i === 0 ? null : Math.max(dayDiff(dates[i - 1], d), 1)));
+  return { dates, vals, wan, gap, a7: annualNArr(dates, vals, 7), a14: annualNArr(dates, vals, 14), a30: annualNArr(dates, vals, 30) };
 }
 /* 成立以来年化（单一数值） */
 function sinceAnnual(stats) {
@@ -2566,6 +2576,7 @@ function renderProdDetail() {
   const latest = n ? st.vals[n - 1] : null;
   const latestDate = n ? st.dates[n - 1] : "";
   const wan = lastNum(st.wan), a7 = lastNum(st.a7), a14 = lastNum(st.a14), a30 = lastNum(st.a30);
+  const gap = lastNum(st.gap);               /* 最新这一格跨了几个自然日（v68：万收整段累计，屏上要写明） */
   const since = sinceAnnual(st);
   const src = navSrcInfo(p);                 /* 上次抓取的双源比对结果（官网 vs 中国理财网） */
   const stale = navStaleInfo(p);             /* 按交易日算的滞后（≥2 个交易日才提示） */
@@ -2573,7 +2584,8 @@ function renderProdDetail() {
   const pctFmt = v => (v === null ? "—" : `${v >= 0 ? "+" : ""}${pct(v)}`);
 
   /* 历史净值表：末 20 行。万份收益直接取 st.wan[i] —— 和上面那张卡片的「万份收益（最新）」
-     是同一个数组的末位，不在这儿另算一遍（跨周末按自然日均摊那条口径只允许存在一处）。 */
+     是同一个数组的末位，不在这儿另算一遍（v68 那条「整段累计、不摊平」的口径只允许存在一处：navStats）。
+     间隔 >1 个自然日的那一行在后面标出跨几天，免得被读成当日收益。 */
   const rows = [];
   for (let i = n - 1; i >= 0 && rows.length < 20; i--) {
     const chg = i > 0 ? (st.vals[i] - st.vals[i - 1]) / st.vals[i - 1] : null;
@@ -2582,7 +2594,7 @@ function renderProdDetail() {
       <td>${esc(st.dates[i].slice(5))}</td>
       <td><b>${navFmt(st.vals[i])}</b></td>
       <td class="${cls(chg === null ? 0 : chg)}">${chg === null ? "—" : pct(chg)}</td>
-      <td class="${cls(w === null ? 0 : w)}">${wan2(w)}</td>
+      <td class="${cls(w === null ? 0 : w)}">${wan2(w)}${st.gap[i] > 1 ? `<span class="cap">·${st.gap[i]}日</span>` : ""}</td>
       <td class="${cls(st.a7[i] === null ? 0 : st.a7[i])}">${st.a7[i] === null ? "—" : pct(st.a7[i])}</td>
     </tr>`);
   }
@@ -2617,7 +2629,7 @@ function renderProdDetail() {
 
     <div class="grid2" style="margin-top:12px">
       <div class="stat"><div class="l">最新净值${latestDate ? "（" + esc(latestDate.slice(5)) + "）" : ""}</div><div class="v" style="color:var(--brand)">${navFmt(latest)}</div><div class="cap">官方披露的份额净值</div></div>
-      <div class="stat"><div class="l">万份收益（最新）</div><div class="v ${cls(wan === null ? 0 : wan)}">${wan4(wan)}</div><div class="cap">(今 − 昨) × 10000 · 元/万份</div></div>
+      <div class="stat"><div class="l">万份收益（最新）</div><div class="v ${cls(wan === null ? 0 : wan)}">${wan4(wan)}</div><div class="cap">(今 − 上一披露日) × 10000 · 元/万份${gap > 1 ? ` · 本段 ${gap} 个自然日累计，未摊平` : ""}</div></div>
       <div class="stat"><div class="l">近7日年化</div><div class="v ${cls(a7 === null ? 0 : a7)}">${pctFmt(a7)}</div><div class="cap">7 日净值变动折算年化</div></div>
       <div class="stat"><div class="l">近14日年化</div><div class="v ${cls(a14 === null ? 0 : a14)}">${pctFmt(a14)}</div><div class="cap">14 日折算</div></div>
       <div class="stat"><div class="l">近1月年化</div><div class="v ${cls(a30 === null ? 0 : a30)}">${pctFmt(a30)}</div><div class="cap">30 日折算</div></div>
@@ -2967,14 +2979,14 @@ window.__ocrDone = function (id, res) {
   delete _ocrDone[id]; f(res);
 };
 function ocrPick(pid) {
-  if (!window.NativeNav || !window.NativeNav.ocr) return toast("截图识别只在 App 内可用；网页版请直接粘贴", 4200);
+  if (!window.NativeNav || !window.NativeNav.ocr) return toast(bridgeMissingMsg("截图识别只在 App 内可用；网页版请直接粘贴"), 4200);
   const el = $("ocrFile"); if (!el) return;
   try { el.value = ""; } catch (e) { }
   el.click();
 }
 function ocrBridge(b64) {
   return new Promise(resolve => {
-    if (!window.NativeNav || !window.NativeNav.ocr) return resolve({ ok: false, message: "仅 App 内可用" });
+    if (!window.NativeNav || !window.NativeNav.ocr) return resolve({ ok: false, message: bridgeMissingMsg("仅 App 内可用") });
     const id = "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     const timer = setTimeout(() => { delete _ocrDone[id]; resolve({ ok: false, message: "识别超时" }); }, 35000);
     _ocrDone[id] = r => { clearTimeout(timer); resolve(r || { ok: false }); };
@@ -3046,7 +3058,7 @@ window.__qrDone = function (id, res) {
 };
 function qrBridge(b64) {
   return new Promise(resolve => {
-    if (!window.NativeNav || !window.NativeNav.qr) return resolve({ ok: false, message: "仅 App 内可用" });
+    if (!window.NativeNav || !window.NativeNav.qr) return resolve({ ok: false, message: bridgeMissingMsg("仅 App 内可用") });
     const id = "q" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
     const timer = setTimeout(() => { delete _qrDone[id]; resolve({ ok: false, message: "识别超时" }); }, 40000);
     _qrDone[id] = r => { clearTimeout(timer); resolve(r || { ok: false }); };
@@ -3055,7 +3067,7 @@ function qrBridge(b64) {
   });
 }
 function qrPick() {
-  if (!window.NativeNav || !window.NativeNav.qr) return toast("扫码添加只在 App 内可用；网页版请直接粘贴产品代码", 4200);
+  if (!window.NativeNav || !window.NativeNav.qr) return toast(bridgeMissingMsg("扫码添加只在 App 内可用；网页版请直接粘贴产品代码"), 4200);
   const el = $("qrFile"); if (!el) return;
   try { el.value = ""; } catch (e) { }
   el.click();
@@ -3808,12 +3820,20 @@ function nativeFetchAvailable() {
   catch (e) { return false; }
 }
 /* 本机壳的 origin —— 和私有仓 MainActivity.HOST 是同一个值，那边改了这边要跟。
-   它是个结构性事实：壳只给 https://appassets.androidplatform.net/ 这个 origin 挂桥
-   （onPageStarted 里按 origin 判断），Pages 那个 origin 永远不可能有桥。
-   所以「在不在 App 里」优先信这个，不必等桥自己冒出来。 */
+   它是个结构性事实：这个 origin 只有本机壳会提供，Pages 那个 origin 永远不可能有桥。
+   v68 起挂桥的时机也改了：三个桥只在 loadUrl 之前挂一次，origin 检查搬到每次调用时做
+   （旧写法在 onPageStarted 里 add/remove，而那一刻这一份文档的 JS context 已经建好了 ——
+     切后台被回收后重加载文档就再也看不到桥，用户报的「切回来变成网页版」是这么来的）。
+   所以「在不在 App 里」信 origin，「这一刻能不能用」还得看桥在不在，两件事分开判。 */
 const SHELL_HOST = "appassets.androidplatform.net";
 function inShellHost() {
   try { return location.hostname === SHELL_HOST; } catch (e) { return false; }
+}
+/** 壳里桥没挂上时该说的话。不许再退回「只在 App 内可用」—— 用户已经在 App 里了。 */
+const SHELL_NO_BRIDGE = "本机壳的桥在这一页没挂上（App 切后台被系统回收后偶发）：退回桌面再进来一次就恢复。"
+  + "这不是网页版 —— 数据与密钥都在本机，这一次没有调用原生能力。";
+function bridgeMissingMsg(webMsg) {
+  return inShellHost() ? SHELL_NO_BRIDGE : webMsg;
 }
 /* 这一份文档里认出来过一次就不反悔：桥是挂上就不会掉的，
    中途某一次 ready() 抖动就把两节收掉，用户看到的就是「刚才还在，现在没了」。 */

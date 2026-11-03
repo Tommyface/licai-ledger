@@ -36,6 +36,10 @@
      所以 v65 这份页面在**下一次打包之前不会到手机上**；这里能验的只有本地浏览器 + 假桥。
    ★ v67（R1）桥面方法表仍未动，改的是原生侧的**行为**，所以这一版配套出 1.0.219：
      旧壳上「协议」这一行不画（getConfig 里没有那个键），发的还是 Responses —— 与 v66 行为一致。
+   ★ v68 改的两件都配套出 1.0.220：原生侧 ① SecretStore 加密时不再自带 IV（那是
+     「Caller-provided IV not permitted」的根，密钥根本存不进加密区）② 三个桥改为只在
+     loadUrl 之前挂一次、把 origin 检查搬到调用时刻（切后台被回收后重加载文档不再丢桥）。
+     页面这一侧只多一句实话：本机壳的 origin 在而桥不在时，llmDegrade 不再说「这是网页版」。
 */
 
 /** 桥名。Java 侧 addJavascriptInterface(..., "NativeLlm") 必须同名，verify-web.sh 比对两侧方法。 */
@@ -390,11 +394,19 @@ export function llmCanRetry(st) {
 
 /**
  * 无桥 / 无凭据时的诚实降级文案。宁可不给答案，也不装作算过了。
- * @param {{ inApp: boolean, hasKey: boolean }} env
+ * @param {{ inApp: boolean, hasKey: boolean, shell?: boolean }} env
+ *        shell = 本机壳的 origin 在（页面传 inShellHost() 的结果）。
  */
 export function llmDegrade(env) {
   const e = env || { inApp: false, hasKey: false };
-  if (!e.inApp) return "模型问答只在本机 App 内可用：网页版没有原生桥，而且密钥不能存在浏览器里。";
+  if (!e.inApp) {
+    /* v68：壳的 origin 在、桥却不在 —— 那是切后台被回收后重加载文档时桥没挂回来
+       （私有仓 MainActivity 的 attach 时机），不是「你在用网页版」。
+       这时候把人往「退出重进」指是对的，往「这是网页版」指是错的：端点和密钥都在本机。 */
+    if (e.shell) return "本机壳的桥在这一页没挂上（App 切后台被系统回收后偶发）：退回桌面再进来一次就恢复。"
+      + "这不是网页版 —— 端点与密钥都在本机，这一次请求没有发出去，也不会计费。";
+    return "模型问答只在本机 App 内可用：网页版没有原生桥，而且密钥不能存在浏览器里。";
+  }
   if (!e.hasKey) return "还没有配置模型密钥：设置 → 模型接入 → 配置密钥（密钥只存在本机加密区，页面读不到）。";
   return "";
 }

@@ -845,6 +845,71 @@ test("产品详情：历史净值表加一列万份收益，取的是 st.wan，�
   assert.ok(/万份收益为折算口径/.test(body), "表头 hint 要说明这是折算口径，官方并不披露这一项");
 });
 
+/* ---------- v68：万份收益口径统一（用户定：整段累计，不按自然日摊平） ---------- */
+
+test("v68 口径：万份收益 = (今 − 上一披露日) × 10000，整段累计；间隔天数由 st.gap 一起交出去", () => {
+  const body = fnBody("navStats");
+  assert.ok(/const wan = vals\.map\(\(v, i\) => \(i === 0 \? null : \(v - Number\(vals\[i - 1\]\)\) \* 10000\)\);/.test(body),
+    "万收公式漂了：只能是 (今 − 上一披露日) × 10000，一分都不能摊");
+  assert.ok(/const gap = dates\.map\(\(d, i\) => \(i === 0 \? null : Math\.max\(dayDiff\(dates\[i - 1\]\, d\), 1\)\)\);/.test(body),
+    "st.gap 没按自然日量出来（Math.max(…, 1) 也不能少：同一天两条披露不能写成 0 日）");
+  assert.ok(/return \{[^}]*\bwan\b[^}]*\bgap\b/.test(body), "wan 与 gap 都得从 navStats 交出去，屏上才有的可写");
+  /* 摊平那种写法不许回来 —— 它正是「详情页 −3.8967 / 明细 −11.53 / 盈亏 −80.92 三处对不上」的成因 */
+  assert.ok(!/wan[\w.\[\]]*\s*\/\s*(?:gap|days|d\b|dayDiff)/.test(body),
+    "万收又被除以天数了：乘回份额就不再等于当日盈亏");
+  assert.ok(!/\/\s*dayDiff\(/.test(body), "同上：口径里出现 ÷ 自然日数");
+});
+
+test("v68 产品详情：跨几日的万收要在屏上写明，不许让人以为是一天的数", () => {
+  const body = fnBody("renderProdDetail");
+  assert.ok(/上一披露日/.test(body), "卡片 caption 没写比较对象：「今 − ? × 10000」");
+  assert.ok(/未摊平/.test(body), "本段跨多日时没说明这一格是几天合计");
+  assert.ok(/const gap = lastNum\(st\.gap\)/.test(body), "卡片没取最新那一格的间隔天数");
+  assert.ok(/st\.gap\[i\] > 1/.test(body), "历史净值表行里的 ·N日 标记丢了：不写就是让人猜");
+  /* 口径只允许存在一处：屏上任何「万收」都不许自己再乘一次 10000 */
+  assert.ok((APP_SRC.match(/navStats\(/g) || []).length >= 2,
+    "navStats 的调用点变少了 —— 各屏自己算一遍就是回到三把尺子");
+});
+
+test("v68 收益明细：分组行万收的分母是已确认份额，不是市值 —— 与详情同一把尺子", () => {
+  const body = fnBody("renderDetailBody");
+  assert.ok(/const shSum = arr\.reduce\(\(s, x\) => s \+ x\.shares, 0\);/.test(body),
+    "分组行的分母不是份额了");
+  assert.ok(/const wanG = shSum > 0 \? sum \/ shSum \* 10000 : 0;/.test(body),
+    "万收 = 当日盈亏 ÷ 已确认份额 × 10000 这一句漂了");
+  assert.ok(!/sum \/ \(?mkt|\/ pos\.value|\/ x\.pos\.value/.test(body),
+    "分母又回到市值（钱）：那与净值差 × 10000（万份）永远差一个净值系数");
+  /* 份额必须按「截至该日已确认」取，不能用今天的份额算过去 */
+  assert.ok(/const sh = idx > 0 \? sharesOn\(r\.p, date\) : 0;/.test(body),
+    "明细行的份额不是 sharesOn(p, date)");
+  assert.ok(/万收 = 当日盈亏 ÷ 已确认份额 × 10000/.test(body),
+    "title 里的口径说明没了：这一屏的数字必须带着自己的算法");
+});
+
+test("v68 措辞对账：看板列名与设置里的「口径说明」不许再提摊平", () => {
+  /* 「摊平」这三个字现在只许出现在「不按自然日摊平」这一句里 ——
+     单独禁掉整个词会把否定句也判死，那等于没在测口径。 */
+  const flatOnlyNegated = (txt, where) => {
+    assert.equal((txt.match(/摊平/g) || []).length, (txt.match(/不按自然日摊平/g) || []).length,
+      `${where} 里出现了把摊平当算法说的句子：${txt}`);
+  };
+  /* BOARD_COLS 一行是 [key, 完整表头, 口径说明(title), 短表头1, 短表头2] */
+  const row = BOARD_COLS.find(c => c[0] === "wan");
+  assert.ok(row, "看板里没有 wan 这一列了 —— 这条对账要跟着改");
+  const txt = row.slice(1).join(" ");
+  assert.ok(!/间隔自然日数/.test(txt), `看板那一列还在提「间隔自然日数」：${txt}`);
+  assert.ok(!/(?:÷|\/)\s*(?:间隔|天数|自然日)/.test(txt), "看板列的公式里出现了 ÷ 天数");
+  assert.ok(/整段累计/.test(txt), "看板列名要与新口径一致（乘回份额 = 当日盈亏）");
+  flatOnlyNegated(txt, "board.js 的 wan 列");
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const at = html.indexOf("口径说明");
+  assert.ok(at >= 0, "设置页的「口径说明」那一节没了");
+  const sec = html.slice(at, at + 6000);
+  assert.ok(!/÷\s*间隔自然日数|除以间隔/.test(sec), "设置页的口径说明还在教旧算法");
+  assert.ok(/整段累计/.test(sec), "设置页要写「今 − 上一披露日 × 10000 · 整段累计」");
+  flatOnlyNegated(sec, "index.html 的口径说明");
+});
+
 test("秒讯：会员到期不再本地跳过，抓不到才提示；也不再每次打开弹状态 toast", () => {
   const body = fnBody("nativeFetchAll");
   assert.ok(/const aixOn = !!aixhubToken\(\);/.test(body),
@@ -895,21 +960,42 @@ test("App-only 判定不再只看「按下这一刻桥在不在」：本机壳 o
     "又回到一次性 toggle 了：这正是一次判空就整会话看不见的成因");
 });
 
-test("放宽只用于显示，不许用于真调用：登录 / 抓取 / 内容渲染仍然只信桥", () => {
-  /* inShellHost 是个「看得见这两节」的宽松信号，只许待在显示判定那条链上。
-     一旦它去 gate 真实调用，网页版就会走进一条必然被 CORS 拦死的路。 */
+test("放宽只用于显示与文案，不许用于真调用：登录 / 抓取 / 内容渲染 / 问答仍然只信桥", () => {
+  /* inShellHost 是个「看得见这两节、也知道自己是不是在壳里」的宽松信号。
+     v68 起它多一个用途：桥没挂上时该说「在壳里、但这一页的桥没挂上」，而不是
+     「只在本机 App 内可用」—— 用户已经在 App 里了。这句取舍同样只许挑一句要显示的话：
+     它一旦去 gate 真实调用，网页版就会走进一条必然被 CORS 拦死的路（v59 那条教训）。
+     所以两头都钉死：允许出现的函数名单 + 每一处都必须待在「文案」那个位置上。 */
   const topFnAt3 = i => {
     const a = APP_SRC.lastIndexOf("\nfunction ", i), b2 = APP_SRC.lastIndexOf("\nasync function ", i);
     const s = Math.max(a, b2);
     assert.ok(s >= 0, `偏移 ${i} 落在某个函数外面`);
     return APP_SRC.slice(s, s + 120).split("(")[0].replace(/^\n(?:async )?function /, "").trim();
   };
-  const hits = [...APP_SRC.matchAll(/inShellHost\(\)/g)].map(m => topFnAt3(m.index));
-  assert.ok(hits.length >= 3, `只读到 ${hits.length} 处 inShellHost()，锚点变了要同步改这条`);
-  for (const fn of hits) {
-    assert.ok(["syncAppOnly", "armAppOnlyRetry", "inShellHost"].includes(fn),
+  const lineAt = i => {
+    const s = APP_SRC.lastIndexOf("\n", i) + 1;
+    const e = APP_SRC.indexOf("\n", i);
+    return APP_SRC.slice(s, e < 0 ? APP_SRC.length : e);
+  };
+  const DISPLAY = ["syncAppOnly", "armAppOnlyRetry", "inShellHost"];
+  const MSG = ["bridgeMissingMsg", "ocrPick", "ocrBridge", "qrBridge", "qrPick",
+               "llmStatusLine", "llmSetKey", "openLlm", "llmSend"];
+  const hits = [...APP_SRC.matchAll(/inShellHost\(\)/g)];
+  assert.ok(hits.length >= 8, `只读到 ${hits.length} 处 inShellHost()，锚点变了要同步改这条`);
+  for (const m of hits) {
+    const fn = topFnAt3(m.index);
+    if (DISPLAY.includes(fn)) continue;
+    assert.ok(MSG.includes(fn),
       `inShellHost() 跑到 ${fn}() 里参与决策了：显示可以宽松，调用必须判桥`);
+    const line = lineAt(m.index);
+    assert.ok(/llmDegrade\(|bridgeMissingMsg\(|\? SHELL_NO_BRIDGE :/.test(line),
+      `${fn}() 里的 inShellHost() 不在「挑一句文案」的位置上：${line.trim()}`);
   }
+  /* 宽松信号不许出现在真调用的条件上 */
+  assert.ok(!/if \(inShellHost\(\)\)/.test(APP_SRC),
+    "出现了 if (inShellHost()) 直接决定走不走真调用 —— 网页版会撞 CORS");
+  assert.ok(!/inShellHost\(\) &&/.test(APP_SRC),
+    "inShellHost() 被 && 接到别的条件上：那就不只是显示判定了");
   /* 真调用那几处仍然判桥 */
   assert.ok(/if \(nativeFetchAvailable\(\)\) return nativeFetchAll\(true\)/.test(fnBody("triggerFetch")),
     "triggerFetch 改成了宽松判定");
@@ -920,6 +1006,19 @@ test("放宽只用于显示，不许用于真调用：登录 / 抓取 / 内容�
   for (const name of ["renderAixhub", "renderLedgerme"]) {
     assert.ok(/if \(!nativeFetchAvailable\(\)\) \{ box\.innerHTML = ""; return; \}/.test(fnBody(name)),
       `${name} 的内容守卫改信宽松判定了`);
+  }
+  /* v68 那四处「桥没挂上」的文案点：先判桥，再说话 —— 顺序反了就是「以为能调、结果调不到」 */
+  for (const name of ["llmStatusLine", "openLlm"]) {
+    assert.ok(/if \(!llmBridge\(\)\)/.test(fnBody(name)),
+      `${name} 少了那句 if (!llmBridge())：文案再怎么宽松，说话的人得先确认桥真不在`);
+  }
+  for (const name of ["llmSetKey", "llmSend"]) {
+    assert.ok(/const b = llmBridge\(\);\s*\n\s*if \(!b\)/.test(fnBody(name)),
+      `${name} 里桥的取用与判空分开了 —— 真调用前必须先 !b 返回`);
+  }
+  for (const name of ["ocrPick", "ocrBridge", "qrPick", "qrBridge"]) {
+    assert.ok(/if \(!window\.NativeNav \|\| !window\.NativeNav\.\w+\)/.test(fnBody(name)),
+      `${name} 少了那句判桥：宽松文案只是补一句人话，不许替掉守卫`);
   }
 });
 
