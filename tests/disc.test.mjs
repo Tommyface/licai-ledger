@@ -181,8 +181,12 @@ test("录入状态只有三档，任何来源都产生不出第四种值", () =>
 
 test("详情页有这张卡，且两个入口都挂回了 window", () => {
   const app = read("app.js");
-  assert.ok(app.includes("import { DISC_TIERS, normDisc, parseDiscForm, discGaps, feeRateFor } from \"./js/core/disc.js\";"),
-    "app.js 没接上 disc.js");
+  /* 导入行允许换行，但必须从 disc.js 拿到这一层的全部口径出口 */
+  const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
+  assert.ok(imp, "app.js 没接上 disc.js");
+  ["DISC_TIERS", "normDisc", "parseDiscForm", "discGaps", "discHasContent", "feeRateFor",
+    "DISC_TIER_LABEL", "DISC_GAP_LABEL"].forEach(n =>
+    assert.ok(imp[1].split(",").map(x => x.trim()).filter(Boolean).indexOf(n) >= 0, `disc.js 的 ${n} 没被 app.js 导入`));
   assert.ok(app.includes("${discCard(p, pos)}"), "产品详情里没渲染底层配置卡");
   assert.ok(app.includes('if (!d.source) return "缺出处";'),
     "有内容却追不到出处时，状态必须显示「缺出处」——说成未录入是撒谎，说成已录入等于盖了可信的章");
@@ -196,8 +200,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v60"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v60"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v61"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v61"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {

@@ -198,6 +198,25 @@ html:not(.inApp) .app-only{display:none}
 .navtbl th:first-child,.navtbl td:first-child{text-align:left}
 .navtbl td{padding:7px 4px;border-bottom:1px dashed var(--line);text-align:right}
 .navtbl tbody tr:last-child td{border-bottom:0}
+/* ---------- 持仓体检（v61）----------
+   结论表复用 .navtbl，只加左边一条色带 + 档位词：两重编码。
+   只靠颜色传达判定是不可接受的 —— 灰度截图、色觉障碍、深色模式低对比时全废。
+   色带刻意不用 --up / --down：那两个变量在本账本里是「红涨绿跌」，
+   体检的「正常」若借用绿色，用户会读成跌。 */
+.navtbl tr.ana td{text-align:left;line-height:1.5;padding-left:9px}
+.navtbl tr.ana td:first-child{white-space:nowrap;font-weight:600;color:var(--ink2);border-left:3px solid var(--line)}
+.navtbl tr.ana td b{font-weight:700;margin-right:5px}
+.navtbl tr.ana.ok td:first-child{border-left-color:#1a9e6a}
+.navtbl tr.ana.ok td b{color:#0d7a52}
+.navtbl tr.ana.warn td:first-child{border-left-color:var(--gold)}
+.navtbl tr.ana.warn td b{color:#8a6300}
+.navtbl tr.ana.bad td:first-child{border-left-color:var(--up)}
+.navtbl tr.ana.bad td b{color:#8a1f1f}
+.navtbl tr.ana.na td:first-child{border-left-color:#b8bdd4}
+.navtbl tr.ana.na td b,.navtbl tr.ana.skip td b{color:var(--ink3)}
+.navtbl tr.ana.skip td:first-child{border-left-color:var(--line)}
+/* 持仓列表里的「体检」入口：挂在产品名后面，不新增表格列（列宽是按 360 屏量出来的） */
+.prow .pn .link.ana-go{font-size:10.5px;font-weight:600;margin-left:6px;opacity:.72}
 /* ---------- 产品页收益表（v45 机构筛选 + 列排序；v48 两行表头 + 精简/全部两种列模式；
    v49 数字列压到实测必需值；v54 去掉持有天数 + 万收两位小数）----------
    7 列在手机上放不宽。v47 之前是直接把表撑到 600px 让用户横滑，实测没人意识到能滑，

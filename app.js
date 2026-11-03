@@ -29,7 +29,10 @@ import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
   boardCols, monthZeroDays, boardSort } from "./js/domain/board.js";
 import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
-import { DISC_TIERS, normDisc, parseDiscForm, discGaps, feeRateFor } from "./js/core/disc.js";
+import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
+  DISC_TIER_LABEL, DISC_GAP_LABEL } from "./js/core/disc.js";
+import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
+  ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -43,10 +46,14 @@ const LS_ALERT = "licai_ledger_alert_v1";
 /* 产品收益表的列模式（"full" / "lean"）只存本机：一台手机一块屏，
    列数合不合得下是各设备自己的事，同步过去反而会把窄屏设备顶成横滑。 */
 const LS_BD = "licai.bdCols";
+/* 持仓体检（T2）的结论缓存也只存本机：它记的是「这台设备上一次看的时候数据是什么样」。
+   进 licai-data.json 的话，另一台设备一同步就拿到别人机器上的「结论生成时间」，
+   那句话当场就是假的。 */
+const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v60";
+const APP_VER = "v61";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -831,7 +838,8 @@ function renderDetailBody() {
         ? `<b class="${tone(x.pos.holdAnnual)}">${shown(pct(x.pos.holdAnnual))}</b>`
         : `<b class="muted">持有不足7天</b>`;
       html += `<div class="prow">
-        <div class="pn"><button class="link" onclick="openProdDetail('${x.r.p.id}')">${esc(prodLabel(x.r.p))}</button></div>
+        <div class="pn"><button class="link" onclick="openProdDetail('${x.r.p.id}')">${esc(prodLabel(x.r.p))}</button>
+          <button class="link ana-go" onclick="openAna('${x.r.p.id}')">体检</button></div>
         <div class="pv ${tone(x.dayP)}">${shown(signMoney(x.dayP))}</div>
         <div class="pk">
           <i>持有金额 <b>${shown(money(x.pos.market))}</b></i>
@@ -1500,24 +1508,12 @@ function saveProduct(pid) {
    和这个表单，不另开通路 —— 否则「手工录的」和「回填的」会有两套空值语义，
    而 T7 的规则引擎只认一处。
    ============================================================ */
-const DISC_TIER_LABEL = {
-  official: "发行机构官网 / 理财网信披原文",
-  disclosure: "代销渠道转发页",
-  media: "媒体报道",
-  unknown: "出处不明"
-};
-const DISC_GAP_LABEL = {
-  lockDays: "最短持有 / 封闭天数", openRule: "开放赎回安排", feeRedeem: "赎回费分档",
-  assets: "底层资产配置", investScope: "投资范围", source: "出处链接"
-};
 const DISC_STATUS_TEXT = { none: "未录入", manual: "手工录入", auto: "检索回填" };
 /* 有内容却没出处 = 脏数据指示器，不是「未录入」：
    前端写入路径（parseDiscForm）本来就不允许这种组合存进去，会出现只可能是
    手工改过的数据或别的设备推上来的快照。说成「未录入」是撒谎（屏幕上明明有值），
-   说成「手工录入」更糟 —— 那等于给一条追不到处的规则盖了可信的章。 */
-function discHasContent(d) {
-  return d.lockDays !== null || !!d.openRule || !!d.investScope || d.feeRedeem.length > 0 || d.assets.length > 0;
-}
+   说成「手工录入」更糟 —— 那等于给一条追不到处的规则盖了可信的章。
+   「有没有内容」的判据本身在 js/core/disc.js 的 discHasContent()，体检页共用它。 */
 function discStatusText(p) {
   const d = normDisc(p && p.disc);
   if (!discHasContent(d)) return DISC_STATUS_TEXT.none;
@@ -1642,6 +1638,143 @@ function saveDisc(pid) {
   toast(disc.status === "none" ? "已清空该项配置（按未披露处理）" : "底层配置已保存", 2000);
   renderProdDetail();
   autoPush();
+}
+
+/* ============================================================
+   T2 · 持仓体检
+   ------------------------------------------------------------
+   判定与缓存的认账本全在 js/domain/analysis.js（纯函数、可单测），
+   app.js 这一层只做四件事：取当前输入、算指纹、按三态决定重算还是复用、把结论排成 HTML。
+
+   为什么要有缓存、又为什么缓存里不能有金额：
+     体检每次都把份额/净值/档位重走一遍（算法在别的模块里），成本不算高，
+     但结论必须能回答「这条是什么时候的、数据变了没有」—— 所以配了结果指纹与本机缓存。
+     而「隐藏金额」是显示态：一旦把带金额的结论文本缓存下来，
+     下次开着遮罩进来要么读到上一次的明文（遮罩漏了），要么整个缓存作废
+     （每切一次开关都重算）。analysis.js 的第 2 条口径因此是「文本里不写钱」，
+     钱留在页面上用 shown()/tone() 现算现显。
+   ============================================================ */
+/* 缓存读写：JSON 坏了 / 版本不符 / 形状不对一律当空账本重开（判定在 normAnaCache 里）。 */
+function anaCache() {
+  const raw = lsGet(LS_ANA);
+  if (!raw) return { v: ANA_CACHE_V, byId: {} };
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
+  return normAnaCache(parsed);
+}
+function anaCachePut(pid, fp, checks) {
+  const c = anaCache();
+  c.byId[String(pid)] = { fp, at: Date.now(), checks };
+  /* 写回的是认过账的那一份：超上限时 normAnaCache 按 at 淘汰最旧的几条 */
+  lsSet(LS_ANA, JSON.stringify(normAnaCache(c)));
+}
+function anaCacheDel(pid) {
+  const c = anaCache();
+  if (c.byId[String(pid)] === undefined) return;
+  delete c.byId[String(pid)];
+  lsSet(LS_ANA, JSON.stringify(normAnaCache(c)));
+}
+function clearAnaCache() {
+  lsDel(LS_ANA);
+  renderAna(false);
+  toast("体检缓存已清空，结论全部重算", 2400);
+}
+
+/* 体检的表格复用 .navtbl（底层配置卡用的那一张），只加一条「左边色带 + 档位词」的样式。
+   档位词必须写成文字：只靠颜色传达判定，在灰度截图 / 色觉障碍 / 对比度不足时等于没传达。 */
+function anaRow(c) {
+  const lv = ANA_LEVEL_TEXT[c.level] || c.level;
+  return `<tr class="ana ${c.level}"><td>${esc(c.title)}</td><td><b>${esc(lv)}</b>${esc(c.text)}</td></tr>`;
+}
+function anaTable(checks) {
+  return `<table class="navtbl ana"><tbody>${checks.map(anaRow).join("")}</tbody></table>`;
+}
+function anaSumLine(checks) {
+  const counts = {};
+  checks.forEach(c => { counts[c.level] = (counts[c.level] || 0) + 1; });
+  return ANA_LEVELS.map(l => (counts[l] ? `${ANA_LEVEL_TEXT[l]} ${counts[l]}` : "")).filter(Boolean).join(" · ");
+}
+/* 页尾那一行组合摘要：只算比值与覆盖度，同样不写钱 */
+function anaPortfolioLine() {
+  const pf = portfolio();
+  const cs = portfolioChecks(pf.rows.map(r => ({ id: r.p.id, name: prodLabel(r.p), market: r.pos.market })),
+    DATA.products.length);
+  return `<div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">组合这一层</h2><span class="hint">占比是比值，不含金额</span></div>
+    ${anaTable(cs)}`;
+}
+/* 顶部金额块：与详情页共用 position()，遮罩走 shown()/tone() */
+function anaMoney(p) {
+  const pos = position(p);
+  if (!(pos.shares > 0)) return "";
+  return `<div class="grid2" style="margin-bottom:12px">
+    <div class="stat"><div class="l">持有金额</div><div class="v">${shown(money(pos.market))}</div><div class="cap">已确认份额 × 最新净值</div></div>
+    <div class="stat"><div class="l">持仓收益</div><div class="v ${tone(pos.profit)}">${shown(signMoney(pos.profit))}</div><div class="cap">市值 − 持仓成本</div></div>
+  </div>`;
+}
+function anaTimeText(ms) {
+  const d = new Date(Number(ms));
+  if (!isFinite(d.getTime())) return "—";
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * 渲染体检页。force = true 时忽略缓存重算（「强制重算」按钮走这条）。
+ * 金额一律现算现显，不进缓存。
+ */
+function renderAna(force) {
+  const p = DATA.products.find(x => x.id === UI.viewProd);
+  if (!p) return;
+  const td = today();
+  const fp = anaFingerprint({ p, trades: DATA.trades, td });
+  const entry = anaCache().byId[String(p.id)];
+  const st = anaCacheState(force ? null : entry, fp);
+  let checks, note;
+  if (st.state === "fresh") {
+    checks = st.checks;                          /* 数据没变：结论直接复用，不重算 */
+    note = `结论生成于 ${anaTimeText(st.at)} · 数据未变，结论复用`;
+  } else {
+    checks = runChecks({ p, trades: DATA.trades, td, pos: position(p), st: navStats(p) });
+    anaCachePut(p.id, fp, checks);
+    note = st.state === "stale"
+      ? `上次体检在 ${anaTimeText(st.at)}，数据已变，${anaTimeText(Date.now())} 重算`
+      : force ? `按「强制重算」于 ${anaTimeText(Date.now())} 重算`
+        : `本次体检在 ${anaTimeText(Date.now())} 现算（这只产品还没有体检记录）`;
+  }
+  openSheet(`<div class="sheet-t"><h3>持仓体检</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    <div class="note b" style="margin-bottom:12px">
+      给 <b>${esc(prodLabel(p))}</b> 做一遍体检。<br>
+      判据全部来自本账本已有的数据与已录的披露规则（净值 / 份额 / 持有天数 / 赎回费档），
+      <b>没有一项是模型猜的</b>；缺字段那几项只会写「信息不足（缺 X）」，不会替它补一个看着合理的数。
+    </div>
+    ${anaMoney(p)}
+    <div class="chips" style="margin-bottom:8px"><span class="muted" style="font-size:11.5px">${esc(anaSumLine(checks))}</span></div>
+    ${anaTable(checks)}
+    ${anaPortfolioLine()}
+    <div class="cap" style="padding:10px 0 0">
+      ${esc(note)}（输入指纹 ${esc(fp)}）。指纹只由「产品、今天、净值日期与数值、已录披露、相关交易」算出 ——
+      切换「隐藏金额」不会让它作废。结论缓存在本机，不进 licai-data.json，也不推云端。
+    </div>
+    <div class="row-btn" style="margin-top:12px">
+      <button class="btn gh" style="flex:1" onclick="refreshAna('${p.id}')">强制重算</button>
+      <button class="btn gh" style="flex:1" onclick="clearAnaCache()">清空缓存</button>
+    </div>`);
+}
+/* 入口写成 openAna(...) 的第一个调用、函数体第一句 closeSheet()：
+   handlers.test.mjs 的桥接扫描只认 on*="fn(...)" 里的第一个函数名（同 openDisc 的 precedent）。 */
+function openAna(pid) {
+  closeSheet();
+  const p = DATA.products.find(x => x.id === pid);
+  if (!p) return toast("产品不存在，请刷新后重试");
+  UI.viewProd = pid;
+  renderAna(false);
+}
+function refreshAna(pid) {
+  closeSheet();
+  const p = DATA.products.find(x => x.id === pid);
+  if (!p) return toast("产品不存在，请刷新后重试");
+  anaCacheDel(p.id);
+  UI.viewProd = pid;
+  renderAna(true);
 }
 
 /* 粘贴内容 → 产品键：纯函数已拆到 js/core/paste.js（可被 node --test 直接测）。
@@ -2123,6 +2256,7 @@ function renderProdDetail() {
     </div>
     <div class="row-btn" style="margin-top:8px">
       <button class="btn pri" style="flex:1" onclick="closeSheet();openNav('${p.id}')">录入净值</button>
+      <button class="btn gh" style="flex:1" onclick="openAna('${p.id}')">持仓体检</button>
     </div>`);
 }
 /* 区间起点日期 */
@@ -4063,10 +4197,10 @@ function clearAll() {
    tests/handlers.test.mjs 会扫描 index.html / app.js 里的内联调用做双向校验。 */
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
-  clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openDisc, openLinkAdd, openMonthly,
+  clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openAna, openDisc, openLinkAdd, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
-  queryProduct, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
+  queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,
   setProdRange, setRange, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });

@@ -922,3 +922,15 @@ test("放宽只用于显示，不许用于真调用：登录 / 抓取 / 内容�
       `${name} 的内容守卫改信宽松判定了`);
   }
 });
+
+/* ---- 测试清单本身也要有门禁（v61）----
+   曾经出过「测试文件只加进了 package.json，CI 的显式 node --test 清单没同步」，
+   结果是本地绿、线上那个文件从没跑过 —— 这种错不会让任何测试变红，只能靠对账。 */
+test("npm test 与 CI 的 node --test 清单是同一批文件", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const listed = s => (s.match(/tests\/[A-Za-z0-9_.-]+\.mjs/g) || []);
+  const a = listed(pkg.scripts.test), b = listed(ci);
+  assert.ok(a.length >= 11, `测试文件只有 ${a.length} 个，短到不对劲`);
+  assert.deepEqual(b, a, "CI 与 npm test 跑的不是同一批（顺序也要对齐，方便对账）");
+});

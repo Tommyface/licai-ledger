@@ -24,9 +24,33 @@
    unknown   = 说不清出处 —— 界面必须把它显示成警示色，不能和普通字段一样呈现 */
 export const DISC_TIERS = ["official", "disclosure", "media", "unknown"];
 
+/* 分级的中文名。出处分级要出现在录入表单、披露卡片和体检页三处，
+   写在这里而不是各渲染文件里：同一档在三个地方叫不同名字，用户就没法对照了。 */
+export const DISC_TIER_LABEL = {
+  official: "发行机构官网 / 理财网信披原文",
+  disclosure: "代销渠道转发页",
+  media: "媒体报道",
+  unknown: "出处不明"
+};
+/* discGaps() 返回的字段名 → 给用户看的缺项名。同一条理由只留一份。 */
+export const DISC_GAP_LABEL = {
+  lockDays: "最短持有 / 封闭天数", openRule: "开放赎回安排", feeRedeem: "赎回费分档",
+  assets: "底层资产配置", investScope: "投资范围", source: "出处链接"
+};
+
 /** 全 null 骨架：老数据、新产品的初始态都从这里出发。 */
 function emptyDisc() {
   return { status: "none", lockDays: null, openRule: "", feeRedeem: [], assets: [], investScope: "", source: null };
+}
+
+/* 除出处外至少录了一项。录入页的「未录入 / 缺出处 / 手工录入」与体检页的
+   「信息不足」都判这一条，两处必须同进同退：一处算有内容、另一处算没内容，
+   同一条数据在两个页面上就会一个显示成绿的一个显示成灰的。 */
+/** @param {any} d normDisc() 的输出 @returns {boolean} */
+export function discHasContent(d) {
+  if (!d || typeof d !== "object") return false;
+  return d.lockDays !== null || !!d.openRule || !!d.investScope
+    || (d.feeRedeem || []).length > 0 || (d.assets || []).length > 0;
 }
 
 const isNum = v => typeof v === "number" && isFinite(v);
@@ -142,7 +166,7 @@ export function parseDiscForm(vals) {
   if (url && !/^https?:\/\//i.test(url)) errors.push("出处链接要 http/https 完整地址");
   const tier = str(v.sourceTier) || "unknown";
   if (DISC_TIERS.indexOf(tier) < 0) errors.push("来源分级只能是 " + DISC_TIERS.join(" / "));
-  const hasContent = d.lockDays !== null || d.openRule || d.investScope || d.feeRedeem.length || d.assets.length;
+  const hasContent = discHasContent(d);
   if (hasContent && !url) errors.push("填了内容就要填出处链接（披露页原文地址）；找不到就别填，留成「未披露」");
   if (hasContent && (tier === "unknown" || tier === "media")) {
     errors.push("来源分级为「" + tier + "」时不许存入：底层配置与申赎规则只认官方披露或代销转发页");
@@ -183,7 +207,7 @@ export function normDisc(raw) {
     ? { url: str(s.url), title: str(s.title), publishedAt: str(s.publishedAt),
         tier: DISC_TIERS.indexOf(str(s.tier)) >= 0 ? str(s.tier) : "unknown" }
     : null;
-  const hasContent = d.lockDays !== null || d.openRule || d.investScope || d.feeRedeem.length || d.assets.length;
+  const hasContent = discHasContent(d);
   if (!hasContent) d.source = null;          // 与 parseDiscForm 同一条规则：无内容即无出处
   d.status = !hasContent ? "none" : (d.source ? (raw.status === "auto" ? "auto" : "manual") : "none");
   return d;
