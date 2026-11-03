@@ -218,8 +218,6 @@ html:not(.inApp) .app-only{display:none}
    所以这一行的加粗词后面不留缝 —— 留了缝就成了「信息不足 （缺 X）」的断句。 */
 .navtbl tr.ana.na td b{margin-right:0}
 .navtbl tr.ana.skip td:first-child{border-left-color:var(--line)}
-/* 持仓列表里的「体检」入口：挂在产品名后面，不新增表格列（列宽是按 360 屏量出来的） */
-.prow .pn .link.ana-go{font-size:10.5px;font-weight:600;margin-left:6px;opacity:.72}
 /* ---------- 产品页收益表（v45 机构筛选 + 列排序；v48 两行表头 + 精简/全部两种列模式；
    v49 数字列压到实测必需值；v54 去掉持有天数 + 万收两位小数）----------
    7 列在手机上放不宽。v47 之前是直接把表撑到 600px 让用户横滑，实测没人意识到能滑，
@@ -458,6 +456,13 @@ html:not(.inApp) .app-only{display:none}
         <div class="tx"><b>交易中心</b><span id="tradeHint">按时间查看买入、赎回与收益</span></div>
         <button class="go" onclick="event.stopPropagation();openTrade()">进入</button>
       </div>
+      <!-- v63：体检的台账页入口。放整行而不是产品名后面挂个小链接 ——
+           它是「组合级」的动作（选一只来查），跟资产月报、交易中心是同一层。 -->
+      <div class="entry" onclick="openAnaIndex()">
+        <div class="ic">检</div>
+        <div class="tx"><b>持仓体检</b><span>逐只核对净值、披露与费率口径</span></div>
+        <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
+      </div>
     </div>
 
     <!-- 今日收益 -->
@@ -540,6 +545,13 @@ html:not(.inApp) .app-only{display:none}
         </div>
       </div>
       <div id="prodList"></div>
+      <!-- v63：交易中心的体检入口，跟台账页那行是同一个落点（openAnaIndex）。
+           放在「我的产品」这张卡里：体检判的就是产品列表 + 净值 + 披露三处数据齐不齐。 -->
+      <div class="entry" onclick="openAnaIndex()">
+        <div class="ic">检</div>
+        <div class="tx"><b>持仓体检</b><span>净值、披露、费率口径逐项核对，缺什么当场说</span></div>
+        <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
+      </div>
     </div>
     <div class="card">
       <div class="card-t"><h2>净值数据</h2><span class="hint">点产品名查看/补录净值</span></div>

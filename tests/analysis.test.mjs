@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runChecks, portfolioChecks, anaFingerprint, anaFpSource, normAnaCache, anaCacheState,
-  anaRowParts, ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CHECK_TITLES, ANA_CACHE_V, ANA_CACHE_MAX } from "../js/domain/analysis.js";
+  anaRowParts, anaEntryTarget, anaEntryStatus, ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CHECK_TITLES, ANA_CACHE_V, ANA_CACHE_MAX } from "../js/domain/analysis.js";
 
 /* 2026-11-03 是周二，10-30 是周五：中间只有 11-02(一) 11-03(二) 两个交易日。 */
 const TD = "2026-11-03";
@@ -368,4 +368,38 @@ test("拆分：脏输入不炸 —— 认不出的 level 就用原文，没 text
   assert.deepEqual(anaRowParts({ level: "ok", text: "" }), { level: "正常", body: "" });
   assert.deepEqual(anaRowParts(undefined), { level: "", body: "" });
   assert.deepEqual(anaRowParts(null), { level: "", body: "" });
+});
+
+/* ---- 组合级入口（台账页 / 交易中心那两行）的去向与措辞 ----
+   入口是「组合级」的，体检是「逐只」的，中间这一步最容易做错成
+   「没持仓就不让进」——那是把还没录说成不能查。 */
+test("入口去向：没产品 = none，只有一只 = 直接进，多只 = 选择页", () => {
+  assert.equal(anaEntryTarget([]).kind, "none");
+  assert.equal(anaEntryTarget(null).kind, "none", "undefined / null 也要当没产品，不能抛");
+  assert.equal(anaEntryTarget(undefined).kind, "none");
+  assert.deepEqual(anaEntryTarget([{ id: "p1" }]), { kind: "direct", list: [{ id: "p1" }], id: "p1" });
+  assert.equal(anaEntryTarget([{ id: "p1" }, { id: "p2" }]).kind, "pick");
+});
+
+test("入口去向：不看持仓，缺 id 的脏条目不计入", () => {
+  const r = anaEntryTarget([{ id: "p1" }, { name: "没 id" }, null, { id: 0 }]);
+  assert.deepEqual(r.list.map(p => p.id), ["p1", 0], "id=0 是合法标识，不能被当成空");
+  assert.equal(anaEntryTarget([{ shares: 0 }, {}]).kind, "none");
+});
+
+test("入口小字：持仓状态 × 体检状态，六种组合都成话", () => {
+  const H = { shares: 100, hasPending: false, inTransit: false };
+  const T = { shares: 0, hasPending: false, inTransit: true };
+  const P = { shares: 0, hasPending: true, inTransit: false };
+  const Z = { shares: 0, hasPending: false, inTransit: false };
+  assert.equal(anaEntryStatus(H, { state: "fresh" }), "已确认持仓 · 今天查过");
+  assert.equal(anaEntryStatus(T, { state: "stale" }), "在途未确认 · 结论已过期");
+  assert.equal(anaEntryStatus(P, { state: "none" }), "有在途买入 · 还没查过");
+  assert.equal(anaEntryStatus(Z, { state: "none" }), "无已确认持仓 · 还没查过");
+  assert.equal(anaEntryStatus(undefined, undefined), "无已确认持仓 · 还没查过", "脏输入也要成话，不能 undefined");
+});
+
+test("入口小字里不许有钱（第 2 条口径同样管这一行）", () => {
+  const s = anaEntryStatus({ shares: 1234567.89, hasPending: true, inTransit: true }, { state: "fresh" });
+  assert.ok(!/[元￥¥]|\d,\d/.test(s), "选择页那行出现了钱：" + s);
 });

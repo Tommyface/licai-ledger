@@ -934,3 +934,17 @@ test("npm test 与 CI 的 node --test 清单是同一批文件", () => {
   assert.ok(a.length >= 11, `测试文件只有 ${a.length} 个，短到不对劲`);
   assert.deepEqual(b, a, "CI 与 npm test 跑的不是同一批（顺序也要对齐，方便对账）");
 });
+
+/* ---- 持仓体检的入口位置（v63 定稿）----
+   拍的是「台账页 + 交易中心各一行整行入口」，不是产品名后面挂个小链接。
+   入口被误删不会报错，只是少一行 —— 这种只能靠对账钉住。 */
+test("体检入口：台账页一行、交易中心一行，行内小链接已撤", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const home = html.slice(html.indexOf('id="pg-home"'), html.indexOf('id="pg-trade"'));
+  const trade = html.slice(html.indexOf('id="pg-trade"'), html.indexOf('id="pg-prod"'));
+  assert.ok(home.includes('onclick="openAnaIndex()"'), "台账页的体检入口行不见了");
+  assert.ok(trade.includes('onclick="openAnaIndex()"'), "交易中心的体检入口行不见了");
+  assert.ok(!src.includes("ana-go"), "明细列表那颗行内「体检」小链接应已撤掉（入口改成整行）");
+  assert.ok(src.includes("function openAnaIndex()"), "openAnaIndex 没实现");
+});

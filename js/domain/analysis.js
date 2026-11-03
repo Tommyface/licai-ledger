@@ -2,10 +2,12 @@
 /* ---------- 持仓体检（T2）----------
    从 app.js 拆出来的纯函数：拆出来才能被 node --test 直接测到（同 disc.js / board.js 的做法）。
 
-   这一层只有三件事：
+   这一层只有四件事：
      1. runChecks()  —— 把「这只产品现在的状态对不对」拆成一组**可判定**的检查项；
      2. anaFingerprint() —— 算结果指纹，让页面能说清「这条结论还是不是新的」；
-     3. normAnaCache() —— 本机缓存的认账本，脏了就不认。
+     3. normAnaCache() —— 本机缓存的认账本，脏了就不认；
+     4. anaRowParts() / anaEntryTarget() / anaEntryStatus() —— 页面要印的字，
+        措辞规则也放这一层，才能在 node --test 里逐条钉住。
 
    ★ 三条口径（改任何一条都要同步改 tests/analysis.test.mjs）：
      1. **不重算任何算钱的口径。** 份额、成本、市值、净值、持有天数、费率档位、
@@ -333,4 +335,43 @@ export function anaCacheState(entry, fp) {
   if (!entry || typeof entry !== "object") return { state: "none", checks: [], at: 0 };
   if (entry.fp === fp) return { state: "fresh", checks: entry.checks, at: entry.at };
   return { state: "stale", checks: entry.checks, at: entry.at };
+}
+
+/**
+ * 组合级入口（台账页 / 交易中心那两行）该去哪儿。
+ * 体检是「一只一只」判的，所以入口必须先确定「哪只」：
+ *   none  —— 一只产品都没有：明说，不弹一个空壳让用户以为坏了；
+ *   direct —— 只有一只：直接进它的体检页，不逼用户多点一下；
+ *   pick  —— 多只：进选择页。
+ * 判据只看产品数，不看持仓：没有已确认持仓照样能体检（结论会是「不适用」那一类），
+ * 用持仓决定让不让进就是把「还没录」说成「不能查」。
+ * @param {Array<{ id?: string | number }>|null|undefined} products
+ * @returns {{ kind: "none" | "direct" | "pick", list: object[], id?: string|number }}
+ */
+export function anaEntryTarget(products) {
+  const list = (Array.isArray(products) ? products : []).filter(p => p && (p.id || p.id === 0));
+  if (!list.length) return { kind: "none", list };
+  if (list.length === 1) return { kind: "direct", list, id: list[0].id };
+  return { kind: "pick", list };
+}
+
+/**
+ * 选择页每只产品后面那行小字：持仓状态 + 上次体检状态。
+ * 两个入参都是别的模块算好的结果，这里只做措辞 —— 不重算持仓（第 1 条口径），
+ * 也不写金额（第 2 条口径）：这行字会跟着缓存走，而「隐藏金额」是显示态。
+ * @param {{ shares?: number, hasPending?: boolean, inTransit?: boolean }} pos computePosition 的结果
+ * @param {{ state: string }} st anaCacheState 的结果
+ * @returns {string}
+ */
+export function anaEntryStatus(pos, st) {
+  const p = pos || {};
+  const hold = (p.shares || 0) > 0 ? "已确认持仓"
+    : p.inTransit ? "在途未确认"
+      : p.hasPending ? "有在途买入"
+        : "无已确认持仓";
+  /* fresh 一定是「今天」：指纹里含 td，跨了天指纹就变，只能判成 stale。 */
+  const seen = st && st.state === "fresh" ? "今天查过"
+    : st && st.state === "stale" ? "结论已过期"
+      : "还没查过";
+  return `${hold} · ${seen}`;
 }

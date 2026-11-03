@@ -32,7 +32,8 @@ import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
   DISC_TIER_LABEL, DISC_GAP_LABEL } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
-  anaRowParts, ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
+  anaRowParts, anaEntryTarget, anaEntryStatus,
+  ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -53,7 +54,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v62";
+const APP_VER = "v63";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -838,8 +839,7 @@ function renderDetailBody() {
         ? `<b class="${tone(x.pos.holdAnnual)}">${shown(pct(x.pos.holdAnnual))}</b>`
         : `<b class="muted">持有不足7天</b>`;
       html += `<div class="prow">
-        <div class="pn"><button class="link" onclick="openProdDetail('${x.r.p.id}')">${esc(prodLabel(x.r.p))}</button>
-          <button class="link ana-go" onclick="openAna('${x.r.p.id}')">体检</button></div>
+        <div class="pn"><button class="link" onclick="openProdDetail('${x.r.p.id}')">${esc(prodLabel(x.r.p))}</button></div>
         <div class="pv ${tone(x.dayP)}">${shown(signMoney(x.dayP))}</div>
         <div class="pk">
           <i>持有金额 <b>${shown(money(x.pos.market))}</b></i>
@@ -1775,6 +1775,36 @@ function refreshAna(pid) {
   anaCacheDel(p.id);
   UI.viewProd = pid;
   renderAna(true);
+}
+/**
+ * 台账页与交易中心那两行入口的落点。去向由 analysis.js 的 anaEntryTarget 判（有测试）。
+ * 选择页里点某一只 → openAna 在同一拍里 closeSheet + openSheet，等于替换当前层，
+ * 返回键因此还是「先回选择页」而不是「直接关掉整张弹层」。
+ */
+function openAnaIndex() {
+  const t = anaEntryTarget(DATA.products);
+  if (t.kind === "none") return toast("还没有录入产品，先去交易中心添加产品", 3200);
+  if (t.kind === "direct") return openAna(t.id);
+  const td = today();
+  const cache = anaCache();
+  const rows = t.list.map(p => {
+    const pos = position(p);
+    const st = anaCacheState(cache.byId[String(p.id)], anaFingerprint({ p, trades: DATA.trades, td }));
+    return `<div class="prow">
+      <div class="pn"><button class="link" onclick="openAna('${p.id}')">${esc(prodLabel(p))}</button></div>
+      <div class="pv muted">${esc(anaEntryStatus(pos, st))}</div>
+      ${st.state === "fresh" ? `<div class="pk"><i>${esc(anaSumLine(st.checks))} · ${esc(anaTimeText(st.at))}</i></div>` : ""}
+    </div>`;
+  }).join("");
+  openSheet(`<div class="sheet-t"><h3>持仓体检</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    <div class="note b" style="margin-bottom:12px">
+      体检是<b>一只一只</b>判的，选一只看它自己的 9 项。
+      判据全部来自本账本已有的数据与已录的披露规则（净值 / 份额 / 持有天数 / 赎回费档），
+      <b>没有一项是模型猜的</b>；缺字段那几项只会写「信息不足（缺 X）」。
+    </div>
+    ${rows}
+    ${anaPortfolioLine()}
+    <div class="cap" style="padding:10px 0 0">结论缓存在本机，不进 licai-data.json，也不推云端。</div>`);
 }
 
 /* 粘贴内容 → 产品键：纯函数已拆到 js/core/paste.js（可被 node --test 直接测）。
@@ -4198,7 +4228,7 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openAna, openDisc, openLinkAdd, openMonthly,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openAna, openAnaIndex, openDisc, openLinkAdd, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,
