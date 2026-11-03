@@ -1,18 +1,21 @@
 /* 模型接入（T3）的纯逻辑测试：
      node --test tests/llm.test.mjs
-   钉的是 js/domain/llm.js 头部那五条口径：
+   钉的是 js/domain/llm.js 头部那六条口径：
      1. JS 不经手密钥 —— 请求体里连字段名都不许出现；
      2. 不猜端点形状 —— 认得就收，认不得明说 unknown；
      3. 来源要 URL + 发布时间两样齐才入账，缺哪样写哪样；
      4. 失败不自动重试 —— 只有落定之后才允许出现重试这条路；
-     5. 会话只活在本机内存里 —— 上文压成文本带上，轮次到 LLM_MAX_ROUNDS 就停。
+     5. 会话只活在本机内存里 —— 上文压成文本带上，轮次到 LLM_MAX_ROUNDS 就停；
+     6. 台账快照勾了才给 —— 出机器只有白名单十个字段，凭据形状的键一个字都不许跟着走，
+        「隐藏金额」开着时份额与成本一起藏。
    ★ 真端点没测过（没有凭据），所以这里的用例是「形状契约」而不是「线上实况」：
      拿到真响应后必须回来补一条按实况形状的用例，别把这份 fixture 当成事实。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { llmReq, llmSource, llmGradeSources, llmParse, llmChunkFeed, llmChunkJoin,
   llmCanRetry, llmDegrade, LLM_BRIDGE, LLM_BRIDGE_METHODS, LLM_TIMEOUT_MS, LLM_CHUNK_MAX_PARTS,
-  llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS, LLM_TRANSCRIPT_MAX_CHARS } from "../js/domain/llm.js";
+  llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS, LLM_TRANSCRIPT_MAX_CHARS,
+  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, LLM_SNAPSHOT_MAX_CHARS, LLM_SNAPSHOT_MASKED } from "../js/domain/llm.js";
 
 /* ---- 口径 1：JS 不经手密钥 ---- */
 test("请求体只有问题与指令，没有任何凭据字段", () => {
@@ -265,4 +268,102 @@ test("闸门只看轮数不看成败：失败与超时的那轮照样占额度�
   const rows = [{ q: "A", a: "" }, { q: "B", err: "HTTP 500" }];
   assert.equal(llmTranscript(rows).split("问：").length - 1, 2, "失败的那轮也要进上文");
   assert.equal(llmBudget(rows.length).ok, rows.length < LLM_MAX_ROUNDS);
+});
+
+/* ---- 口径 6：台账快照（v66）---- */
+const SNAP_ITEM = { name: "稳健增利 90 天", inst: "某理财子", code: "Z1002023000123",
+  risk: "R3", nav: 1.0873, navDate: "2026-10-31", shares: 12000.5, cost: 13000.25,
+  holdDays: 45, state: "持仓中" };
+
+test("快照：白名单只出那十个字段，混进来的凭据与仓库信息一个字都不跟着走", () => {
+  const dirty = Object.assign({}, SNAP_ITEM, {
+    token: "sk-LEAKCHECK-abcdef", apiKey: "KEY-LEAKCHECK", Authorization: "Bearer LEAKCHECK",
+    repo: "glorywork/licai-data", path: "/data/licai/sync/licai-data.json",
+    password: "hunter2", baseUrl: "https://LEAKCHECK.test/v1",
+  });
+  const s = llmSnapshot([dirty], { today: "2026-11-03" });
+  for (const w of ["LEAKCHECK", "sk-", "Bearer", "token", "licai-data", "hunter2", "/data/", "baseUrl"])
+    assert.ok(!s.toLowerCase().includes(w.toLowerCase()), "快照漏出了 " + w + "：" + s);
+  assert.match(s, /稳健增利/);
+  assert.match(s, /Z1002023000123/);
+});
+
+test("快照：头部写明几只、截至哪天；日期不合法就写「日期不明」而不是猜今天", () => {
+  const s = llmSnapshot([SNAP_ITEM, SNAP_ITEM], { today: "2026-11-03" });
+  assert.match(s, /^【本机台账快照 · 2 只 · 截至 2026-11-03】/);
+  assert.match(llmSnapshot([SNAP_ITEM], { today: "不是日期" }), /截至 日期不明】/);
+  assert.match(llmSnapshot([SNAP_ITEM], {}), /截至 日期不明】/);
+});
+
+test("快照：空台账也出一段说明，不是空串 —— 模型不能把「没带」读成「没持仓」以外的意思", () => {
+  const s = llmSnapshot([], { today: "2026-11-03" });
+  assert.match(s, /0 只/);
+  assert.match(s, /这一份快照没带任何持仓/);
+  assert.match(llmSnapshot(null, {}), /没有产品/);
+});
+
+test("快照：缺的字段照实写缺，不补一个数进去（猜出来的数会被当成本机真数引用）", () => {
+  const s = llmSnapshot([{ name: "只写了名字" }], { today: "2026-11-03" });
+  assert.match(s, /机构未填/);
+  assert.match(s, /代码 未填/);
+  assert.match(s, /风险 未填/);
+  assert.match(s, /净值 无净值（日期不明）/);
+  assert.match(s, /持有 不足 1 天或未起算/);
+});
+
+test("快照：本机开着「隐藏金额」时份额与成本一起藏，公开的那几样照旧带着", () => {
+  const s = llmSnapshot([SNAP_ITEM], { hide: true, today: "2026-11-03" });
+  assert.ok(!s.includes("12000.50") && !s.includes("13000.25"), "金额没藏住：" + s);
+  assert.ok(s.includes(LLM_SNAPSHOT_MASKED), "没写明是「已隐藏」，模型会当成缺数：" + s);
+  assert.match(s, /份额 /);
+  assert.match(s, /成本 /);
+  assert.match(s, /金额按本机设置隐去/);
+  assert.match(s, /1\.0873/, "单位净值是公开披露信息，跟着藏就没法答了");
+  assert.match(s, /Z1002023000123/);
+  assert.match(s, /R3/);
+  const open = llmSnapshot([SNAP_ITEM], { today: "2026-11-03" });
+  assert.ok(open.includes("12000.50") && open.includes("13000.25"), "没开隐藏时金额该带着");
+});
+
+test("快照：超过条数上限时写明还有几只没列，不是静默截", () => {
+  const many = Array.from({ length: LLM_SNAPSHOT_MAX_ITEMS + 5 }, (_, i) =>
+    Object.assign({}, SNAP_ITEM, { name: "产品" + i }));
+  const s = llmSnapshot(many, { today: "2026-11-03" });
+  assert.match(s, /^【本机台账快照 · 35 只/);
+  assert.match(s, /另有 5 只未列出：超过条数上限 30 只/);
+  assert.equal(s.split("\n").length, LLM_SNAPSHOT_MAX_ITEMS + 2, "列出的条数要和上限对得上");
+});
+
+test("快照：条数没超但字数超了，同样写明还有几只没带上（两种截法说的是不同的原因）", () => {
+  const long = Array.from({ length: LLM_SNAPSHOT_MAX_ITEMS }, () => Object.assign({}, SNAP_ITEM, {
+    name: "长".repeat(80), inst: "机构".repeat(30), code: "C".repeat(50),
+  }));
+  const s = llmSnapshot(long, { today: "2026-11-03" });
+  assert.match(s, /超过字数上限 4000 字/);
+  assert.ok(!/超过条数上限/.test(s), "条数没超就别报条数");
+  assert.ok(s.length < LLM_SNAPSHOT_MAX_CHARS + 200, "截完还超字数就是没截：" + s.length);
+  const listed = s.split("\n").filter(l => /^\d+\./.test(l)).length;
+  const cut = Number((s.match(/另有 (\d+) 只未列出/) || [])[1]);
+  assert.equal(listed + cut, LLM_SNAPSHOT_MAX_ITEMS, "列出的 + 没列出的要等于本轮的只数");
+});
+
+test("快照：字段自己超长就截一行加省略号，换行被压平 —— 不撑破结构也不留多行", () => {
+  const s = llmSnapshot([{ name: "甲".repeat(100) + "\n换行", inst: "乙".repeat(60) }],
+    { today: "2026-11-03" });
+  const line = s.split("\n")[1];
+  assert.ok(!line.includes("换行"), "字段里的换行会多出一行，把「一条一只」的结构打散");
+  assert.match(line, /甲…/);
+  assert.ok(!line.includes("乙".repeat(60)));
+});
+
+test("三段式 input：上文在前、快照在中、这一次要问的在最后；两参调用还是老形状", () => {
+  const snap = llmSnapshot([SNAP_ITEM], { today: "2026-11-03" });
+  const three = llmRoundInput([{ q: "上一句", a: "上一答" }], "这一句", snap);
+  const i1 = three.indexOf("【以前几轮的问答");
+  const i2 = three.indexOf("【本机台账快照");
+  const i3 = three.indexOf("【这一次要问的】");
+  assert.ok(i1 >= 0 && i2 > i1 && i3 > i2, `顺序应是 上文→快照→新问：${i1}/${i2}/${i3}`);
+  assert.equal(llmRoundInput([{ q: "上一句", a: "上一答" }], "这一句").indexOf("台账快照"), -1,
+    "没勾就别把快照塞进去 —— 「勾了才给」是这一条的全部意义");
+  assert.equal(llmRoundInput([], "这一句", ""), "这一句");
 });

@@ -35,7 +35,8 @@ import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
-  llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS } from "./js/domain/llm.js";
+  llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
+  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS } from "./js/domain/llm.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -56,7 +57,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v65";
+const APP_VER = "v66";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1826,16 +1827,51 @@ function openAnaIndex() {
 
    v65 在这一节里加的是「接着问」：会话历史（turns / turn）只在内存，
    每轮把上文压成一段文本随 input 上送（原生那条路只认字符串），发满 LLM_MAX_ROUNDS 轮停手。
-   ★ 桥面七个方法一个字没动，所以这一版不需要新 APK；代价是壳读的是 APK 里那份 assets/www，
-     v65 要等下一次打包才到手机上 —— 现在能验的只有本地浏览器 + 假桥。
+   v66 加的是「带上我的台账」：勾了才把本机台账压成一段文本一起发（白名单十个字段，
+   金额位跟随本机「隐藏金额」）。v64 那句 instructions 写着「只根据给出的台账数据回答」，
+   可当时什么都没给 —— 那是一句假话，这一版把它改成实话。
+   ★ 桥面七个方法一个字没动，所以这两版都不需要新 APK；代价是壳读的是 APK 里那份 assets/www，
+     v65/v66 要等下一次打包才到手机上 —— 现在能验的只有本地浏览器 + 假桥。
    ============================================================ */
 /* 一轮问答的全部状态。不落 localStorage：换设备 / 刷新就该重问，不留半成品。
    v65 起多了两个字段（turns / turn）—— 会话内容里多半夹着产品名与持仓，
    把它写进浏览器存储等于把台账多一份没人管的副本，所以只留在内存。 */
 const LLM = { phase: "idle", id: "", buf: null, meta: null, res: null, q: "", err: "",
-  timer: 0, cfg: null, hasKey: false, costWarn: false, turns: [], turn: null };
+  timer: 0, cfg: null, hasKey: false, costWarn: false, turns: [], turn: null, withData: false };
 /** 这个会话已经发出去几个请求（含失败与超时的那些 —— 它们多半已经计费了，占额度）。 */
 function llmUsed() { return LLM.turns.length + (LLM.turn ? 1 : 0); }
+/** 台账快照的入参数组：只挑 llmSnapshot 认的那十个字段。
+    这里刻意不碰 SYNC、不碰任何凭据与仓库信息 —— 少一个入口少一处能漏的地方。 */
+function llmSnapItems() {
+  return DATA.products.map(p => {
+    const pos = position(p);
+    return {
+      name: p.name, inst: p.inst, code: p.prodCode || p.code || p.regCode || "",
+      risk: p.riskLevel, nav: pos.lastNav, navDate: pos.lastDate,
+      shares: pos.shares, cost: pos.cost, holdDays: pos.holdDays,
+      state: pos.inTransit ? "在途（份额未确认）"
+        : (pos.shares > 0 ? "持仓中" : (hasAnyTradeIn(p, DATA.trades) ? "已清仓" : "从未建仓")),
+    };
+  });
+}
+/** 按本机设置把快照压成文本；金额位跟「隐藏金额」走。 */
+function llmSnapText() {
+  return llmSnapshot(llmSnapItems(), { hide: !!DATA.settings.hideAmount, today: today() });
+}
+/** 发之前就能看见要发什么 —— 这一行的存在就是为了「勾上了不是稀里糊涂出去的」。 */
+function llmSnapLine() {
+  const n = DATA.products.length;
+  if (!LLM.withData) return `<div class="cap" style="padding-top:2px">现在没带台账数据：模型只听得到你敲进框里那一句。</div>`;
+  const s = llmSnapText();
+  return `<div class="cap" style="padding-top:2px">本轮会带上：${Math.min(n, LLM_SNAPSHOT_MAX_ITEMS)} / ${n} 只 · ${s.length} 字`
+    + (n > LLM_SNAPSHOT_MAX_ITEMS ? `（超过 ${LLM_SNAPSHOT_MAX_ITEMS} 只的写在末尾，不静默截）` : "")
+    + (DATA.settings.hideAmount ? " · 金额按本机「隐藏金额」隐去" : "") + "</div>";
+}
+function llmDataToggle() {
+  const el = $("llmData");
+  LLM.withData = !!(el && el.checked);
+  openLlm();
+}
 
 function llmBridge() {
   try {
@@ -1980,6 +2016,9 @@ function openLlm() {
     </div>
     <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">接着问</h2>
       <span class="hint">答案不自动入账 · 已发 ${used}/${LLM_MAX_ROUNDS} 轮</span></div>
+    <div class="chk-row"><label><input type="checkbox" id="llmData" ${LLM.withData ? "checked" : ""}
+      onchange="llmDataToggle()"> 这一轮带上我的台账</label></div>
+    ${llmSnapLine()}
     ${llmHistoryHtml()}
     <div class="field" style="margin-top:10px"><textarea id="llmQ" rows="3" placeholder="接着上一轮问，或换个新问题">${esc(LLM.q)}</textarea></div>
     <div class="row-btn" style="margin-top:8px">
@@ -1993,6 +2032,8 @@ function openLlm() {
     <div class="cap" style="padding:12px 0 0">
       原生侧只负责发请求与回原文，解析与来源分级全在页面里（js/domain/llm.js，有测试）。
       上文只在<b>这台机器的内存</b>里：不写本机存储、不推云端，刷新就没了。
+      勾上「带上我的台账」才把数据发出机器：只带那十个字段（名称 / 机构 / 代码 / 风险级 / 净值与它的日期 /
+      份额 / 成本 / 持有天数 / 状态），本机开着「隐藏金额」时份额与成本也跟着藏；不勾就是一句光的问题。
       发满 ${LLM_MAX_ROUNDS} 轮就停手（失败与超时的那几轮也算），要接着问得先清空 —— 闸门拦的是连着点、连着计费。
       发出去与收回来的形状都按 Responses 形制（含 web_search_preview）写，
       <b>真实端点还没实测过</b>：认不得就明说认不得，不补字段、不自动重发。
@@ -2023,9 +2064,12 @@ function llmSend(text) {
   const dead = setTimeout(() => llmTimeout(LLM.id), LLM_TIMEOUT_MS);
   LLM.timer = dead;
   try {
+    /* 快照在勾了的时候才拼 —— 没勾，发出去的就是光的一句问题。 */
+    const snap = LLM.withData ? llmSnapText() : "";
     b.ask(LLM.id, JSON.stringify(llmReq({
-      input: llmRoundInput(LLM.turns, q),
-      instructions: "只根据给出的台账数据与上文回答；缺什么就说缺什么，不要编。",
+      input: llmRoundInput(LLM.turns, q, snap),
+      instructions: "回答只依据这条消息里给出的台账快照与上文；没给到的信息就说没给到，不要编；"
+        + "没有可核实出处的结论要直说是推测。",
     })));
   } catch (e) {
     clearTimeout(dead); LLM.timer = 0; LLM.phase = "error"; LLM.err = "桥调用失败：" + e;
@@ -4535,7 +4579,7 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmClearChat, llmClearKey, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,

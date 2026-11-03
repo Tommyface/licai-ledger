@@ -200,8 +200,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v65"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v65"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v66"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v66"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {

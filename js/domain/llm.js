@@ -2,7 +2,7 @@
 /* ---------- 模型接入（T3）：请求构造 / 响应解析 / 来源分级 / 分块组装 ----------
    从 app.js 拆出来的纯函数（同 analysis.js / board.js 的做法）：拆出来才能被 node --test 钉住。
 
-   ★ 这一层的四条口径（改任何一条都要同步改 tests/llm.test.mjs）：
+   ★ 这一层的六条口径（改任何一条都要同步改 tests/llm.test.mjs）：
      1. **JS 永不经手 key。** 请求里没有 key 字段、没有 Authorization 头，
         llmReq() 的输出会被原样丢给 window.NativeLlm.ask()，由原生侧补鉴权。
         所以这里连「key」这个字都不许出现成字段名 —— 出现了就等于承诺 JS 能填。
@@ -20,6 +20,10 @@
         落在页面的 LLM.turns / LLM.turn 两个变量上 —— 不写 localStorage、不进 licai-data.json，
         刷新或换设备就从第一轮重新问。轮次到 LLM_MAX_ROUNDS 就停手，失败与超时的那轮也占额度。
         这道闸拦的是「连着点、连着计费」，不是拦「问得多」。
+     6. **台账快照「勾了才给」。**（v66）默认关，开着时每一屏都写明本轮会带几只、多少字。
+        出这台机器的字段是白名单那十个（名称/机构/代码/风险级/净值/净值日期/份额/成本/持有天数/状态），
+        入参里混进别的键也不会出来；本机开着「隐藏金额」时份额与成本跟着一起藏 ——
+        屏幕上被你藏掉的数，不许从这条路上漏出去。
 
    ★ v65 只改页面这一侧：桥面七个方法一字未动，所以不发包（壳里那份桥还是 v64 编进去的）。
      代价说清楚：壳加载的是 APK 里的 assets/www（MainActivity.START_URL），不是 GitHub Pages，
@@ -50,6 +54,11 @@ export const LLM_CHUNK_MAX_PARTS = 512;
 export const LLM_MAX_ROUNDS = 6;
 /** 上文回看的长度上限（字符）。超了从最旧的那轮丢起，最近几轮对新问题最有用。 */
 export const LLM_TRANSCRIPT_MAX_CHARS = 8000;
+/** 台账快照（v66）的两处上限：条数与字数。超限是「写明还有多少没带上」，不是静默截。 */
+export const LLM_SNAPSHOT_MAX_ITEMS = 30;
+export const LLM_SNAPSHOT_MAX_CHARS = 4000;
+/** 本机开着「隐藏金额」时，快照里金额位的替代文案。 */
+export const LLM_SNAPSHOT_MASKED = "（金额已隐藏）";
 
 /**
  * 构造发给桥的请求体。**只有问题与指令两样**：
@@ -101,14 +110,83 @@ export function llmTranscript(turns) {
 }
 
 /**
- * 这一轮真正发出去的 input = 上文 + 新问题。没有上文时就是新问题本身（与 v64 同一形状）。
- * @param {{q?: string, a?: string}[]|null} turns @param {string} q
+ * 这一轮真正发出去的 input = 上文 + 台账快照 + 新问题（顺序就按这个排：先给人看过的历史，
+ * 再给本轮的依据，最后才是要回答的那句）。没有上文也没有快照时就是新问题本身。
+ * @param {{q?: string, a?: string}[]|null} turns @param {string} q @param {string} [snapshot]
  */
-export function llmRoundInput(turns, q) {
+export function llmRoundInput(turns, q, snapshot) {
   const fresh = String(q == null ? "" : q).trim();
+  const blocks = [];
   const hist = llmTranscript(turns);
-  if (!hist) return fresh;
-  return "【以前几轮的问答，按时间先后】\n" + hist + "\n\n【这一次要问的】\n" + fresh;
+  if (hist) blocks.push("【以前几轮的问答，按时间先后】\n" + hist);
+  const snap = String(snapshot == null ? "" : snapshot).trim();
+  if (snap) blocks.push(snap);
+  if (!blocks.length) return fresh;
+  blocks.push("【这一次要问的】\n" + fresh);
+  return blocks.join("\n\n");
+}
+
+/** 一个字段进快照前的过一遍：只留一行、限长、去掉可能造成「看着像凭据」的空白粘连。 */
+function oneLine(v, max) {
+  const s = String(v == null ? "" : v).replace(/[\r\n\t]+/g, " ").trim();
+  const lim = max || 80;
+  return s.length > lim ? s.slice(0, lim) + "…" : s;
+}
+
+function num(v, dp) {
+  const n = Number(v);
+  return isFinite(n) ? n.toFixed(dp === undefined ? 2 : dp) : "—";
+}
+
+/**
+ * 把本机台账压成一段文本，作为「这一轮给模型看的依据」（v66）。
+ * ★ 白名单出字段：只写 name / inst / code / risk / nav / navDate / shares / cost /
+ *   holdDays / state 这十个。入参里就算混着 token、secret、仓库路径、任何别的键，
+ *   一个字都不会出来 —— 这段文本是要出这台机器的，白名单比黑名单可靠。
+ * ★ 缺就如实写缺：没净值写「无净值」，日期不明写「日期不明」。
+ *   猜一个数进去，模型会把它当本机台账的真数引用，那比空着坏得多。
+ * ★ 本机开着「隐藏金额」时，份额与成本都不出机器 —— 屏幕上被你藏掉的数，
+ *   不许从这条路上漏出去。产品名 / 代码 / 风险级 / 单位净值 / 日期照旧带着，
+ *   那些本来就是披露里的公开信息，藏了反而什么问题都答不上。
+ * @param {Array<{name?:string,inst?:string,code?:string,risk?:any,nav?:number,navDate?:string,shares?:number,cost?:number,holdDays?:number,state?:string}>|null} items
+ * @param {{hide?: boolean, today?: string}} [opts]
+ * @returns {string}
+ */
+export function llmSnapshot(items, opts) {
+  const o = opts || {};
+  const hide = !!o.hide;
+  const list = Array.isArray(items) ? items : [];
+  const td = /^\d{4}-\d{2}-\d{2}$/.test(String(o.today || "")) ? String(o.today) : "日期不明";
+  const head = "【本机台账快照 · " + list.length + " 只 · 截至 " + td
+    + (hide ? " · 金额按本机设置隐去" : "") + "】";
+  if (!list.length) return head + "\n（本机台账里没有产品，这一份快照没带任何持仓）";
+  const cap = Math.min(list.length, LLM_SNAPSHOT_MAX_ITEMS);
+  const lines = [];
+  let used = head.length + 1, cutByChars = 0;
+  for (let i = 0; i < cap; i++) {
+    const it = list[i] || {};
+    const bits = [
+      (i + 1) + ". " + (oneLine(it.name, 70) || "（无名产品）"),
+      oneLine(it.inst, 40) || "机构未填",
+      "代码 " + (oneLine(it.code, 40) || "未填"),
+      "风险 " + (oneLine(it.risk, 24) || "未填"),
+      "净值 " + (isFinite(Number(it.nav)) && Number(it.nav) > 0 ? num(it.nav, 4) : "无净值")
+        + "（" + (/^\d{4}-\d{2}-\d{2}$/.test(String(it.navDate || "")) ? it.navDate : "日期不明") + "）",
+      hide ? "份额 " + LLM_SNAPSHOT_MASKED : "份额 " + num(it.shares, 2),
+      hide ? "成本 " + LLM_SNAPSHOT_MASKED : "成本 " + num(it.cost, 2),
+      "持有 " + (isFinite(Number(it.holdDays)) && Number(it.holdDays) > 0 ? Math.round(Number(it.holdDays)) + " 天" : "不足 1 天或未起算"),
+    ];
+    if (it.state) bits.push("状态 " + oneLine(it.state, 24));
+    const line = bits.join(" · ");
+    if (lines.length && used + line.length + 1 > LLM_SNAPSHOT_MAX_CHARS) { cutByChars = cap - i; break; }
+    lines.push(line);
+    used += line.length + 1;
+  }
+  const out = lines.slice();
+  const skipped = list.length - cap;
+  if (skipped > 0) out.push("（另有 " + skipped + " 只未列出：超过条数上限 " + LLM_SNAPSHOT_MAX_ITEMS + " 只）");
+  else if (cutByChars > 0) out.push("（另有 " + cutByChars + " 只未列出：超过字数上限 " + LLM_SNAPSHOT_MAX_CHARS + " 字）");
+  return head + "\n" + out.join("\n");
 }
 
 /**

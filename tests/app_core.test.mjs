@@ -1038,7 +1038,7 @@ function t3Slice() {
 
 test("v65 多轮：上文真的进了这一轮的 input，而发送点仍然只有一处", () => {
   const { block } = t3Slice();
-  assert.ok(/input: *llmRoundInput\(LLM\.turns, *q\)/.test(block),
+  assert.ok(/input: *llmRoundInput\(LLM\.turns, *q/.test(block),
     "input 不带上文了：多轮变成每轮都失忆，用户看到的历史只是给自己看的");
   assert.ok(/LLM\.turns\.push\(LLM\.turn\)/.test(block), "落定的轮次没有进上文");
   assert.equal((block.match(/\bb\.ask\(/g) || []).length, 1, "ask 的调用点不止一处");
@@ -1088,4 +1088,78 @@ test("v65 屏上写的轮次上限就是模块里那个常量，没有第二处�
   assert.deepEqual(hard, [], "文案里出现写死的「N 轮」，改上限时这里不会跟着变：" + hard.join("、"));
   assert.ok(block.includes("LLM_MAX_ROUNDS"), "轮次上限没用模块里那个常量");
   assert.ok(block.includes("llmBudget"), "闸门没用 llmBudget，而是页面自己数了一遍轮数");
+});
+
+/* ---- v66：带上我的台账（勾了才给）----
+   钉的是「数据要出机器」这条路上的四件事：默认关、只有勾了才拼、拼出来只有白名单、
+   金额跟随本机「隐藏金额」。快照文本本身的规矩在 tests/llm.test.mjs 里。 */
+function snapItemsFn(block) {
+  const k = block.indexOf("function llmSnapItems()");
+  assert.ok(k > 0, "llmSnapItems 不在了：快照的入参来源变成隐式的了");
+  const end = block.indexOf("\n}\n", k);
+  assert.ok(end > k, "llmSnapItems 的函数体切不出来");
+  return block.slice(k, end);
+}
+
+test("v66 默认不带台账：开关挂在内存里的 LLM 上，没写进任何本机存储", () => {
+  const { block } = t3Slice();
+  assert.match(block, /withData: *false/, "默认值不是关：一进弹层就把台账往外发");
+  assert.ok(!/localStorage\.[gs]etItem/.test(block),
+    "「这一轮带不带台账」被写进本机存储了：它是会话级的选择，刷新就该回到关");
+  assert.ok(!/llmSnap(Text|Items)\s*=|let +snap|var +snap/.test(block), "快照状态没挂在 LLM 上");
+});
+
+test("v66 只有勾了才拼快照，没勾时发出去的是光的一句问题", () => {
+  const { block } = t3Slice();
+  assert.match(block, /const snap = LLM\.withData \? llmSnapText\(\) : "";/,
+    "快照不再跟着开关走：那就是每次都把台账发出去");
+  assert.match(block, /input: *llmRoundInput\(LLM\.turns, *q, *snap\)/,
+    "拼好的 snap 没进 input：勾了等于没勾");
+  const toggle = block.indexOf("const snap = LLM.withData");
+  const ask = block.indexOf("b.ask(");
+  assert.ok(toggle < ask, "快照在发送之后才拼，那这一屏发出去的东西和用户看见的不是一回事");
+});
+
+test("v66 快照的入参只从持仓算出来，不碰同步与凭据那几样", () => {
+  const { block } = t3Slice();
+  const items = snapItemsFn(block);
+  assert.match(items, /position\(p\)/, "持仓数不从 position() 来：快照会和屏幕上看到的对不上");
+  for (const w of ["SYNC", "localStorage", "token", "Key", "cfg"]) {
+    assert.ok(!items.includes(w), "入参里碰了 " + w + "：白名单之外的东西一旦进参数就有漏出去的机会");
+  }
+});
+
+test("v66 金额位跟随本机「隐藏金额」，屏幕上藏掉的数不许从这条路上漏", () => {
+  const { block } = t3Slice();
+  assert.match(block, /hide: *!!DATA\.settings\.hideAmount/,
+    "快照不再读 hideAmount：用户藏了金额，模型照样拿到份额与成本");
+  assert.match(block, /DATA\.settings\.hideAmount \? " · 金额按本机「隐藏金额」隐去"/,
+    "藏了金额却没在屏上说明，用户会以为模型拿到了真数");
+});
+
+test("v66 发之前先把「本轮要带什么」写在屏幕上，勾与不勾都是实话", () => {
+  const { block } = t3Slice();
+  assert.match(block, /<input type="checkbox" id="llmData"[\s\S]{0,80}onchange="llmDataToggle\(\)"/,
+    "勾选框的入口变了：改了状态不重画，屏幕上那句「本轮会带上」就是上一轮的");
+  assert.match(block, /\$\{llmSnapLine\(\)\}/, "没把本轮要带的只数与字数写出来");
+  assert.match(block, /现在没带台账数据：模型只听得到你敲进框里那一句/, "没勾时说得含糊：模型到底看见什么得写明");
+  assert.match(block, /function llmDataToggle\(\)[\s\S]{0,200}\bopenLlm\(\);/,
+    "开关拨了不重画弹层");
+  const k = block.indexOf("Object.assign(window, {");
+  assert.ok(k === -1 || block.slice(k).includes("llmDataToggle"), "内联入口没挂上 llmDataToggle");
+});
+
+test("v66 给模型的指令是实话：没给到的就说没给到", () => {
+  const { block } = t3Slice();
+  assert.match(block, /instructions: *"回答只依据这条消息里给出的台账快照与上文/,
+    "指令退回 v64 那句「只根据台账数据回答」：可快照是可选的，那句话在没勾时是假话");
+  assert.match(block, /没给到的信息就说没给到/, "指令没拦住编：模型拿不到数据时最擅长补一个像样的数");
+  assert.ok(!/instructions: *"只根据/.test(block), "又写回无条件的那句了");
+});
+
+test("v66 屏上的只数与字数上限用模块常量，没有第二处硬编码", () => {
+  const { block } = t3Slice();
+  const hard = (block.match(/(\d+)\s*(只|字)/g) || []).map(s => s.trim());
+  assert.deepEqual(hard, [], "文案里写死了「N 只 / N 字」：" + hard.join("、"));
+  assert.ok(block.includes("LLM_SNAPSHOT_MAX_ITEMS"), "只数没用模块里那个常量");
 });
