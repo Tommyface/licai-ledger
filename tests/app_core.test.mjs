@@ -1024,3 +1024,68 @@ test("T3 铁律 #5：重发消息挂在发起之后的每一屏，代码里没�
   /* 代码路径里除了用户点发起，没有任何地方再调 ask */
   assert.equal((block.match(/\bb\.ask\(/g) || []).length, 1, "ask 的调用点不止一处");
 });
+
+/* ---- v65 多轮问答的页面侧接线 ----
+   上面那组 T3 测试钉的是「一轮」的形状，这一组钉的是「接着问」的形状：
+   上文真的进了请求、闸门排在动手之前、重试与清空都只由人点。
+   全是静态扫描 —— app.js 里没有 DOM 跑不起来（真机/浏览器实况在本地场景脚本里，不在 CI）。 */
+function t3Slice() {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const i = src.indexOf("T3 · 模型接入"), j = src.indexOf("/* 粘贴内容 → 产品键");
+  assert.ok(i > 0 && j > i, "T3 代码块的位置变了，切片失败");
+  return { src, block: src.slice(i, j) };
+}
+
+test("v65 多轮：上文真的进了这一轮的 input，而发送点仍然只有一处", () => {
+  const { block } = t3Slice();
+  assert.ok(/input: *llmRoundInput\(LLM\.turns, *q\)/.test(block),
+    "input 不带上文了：多轮变成每轮都失忆，用户看到的历史只是给自己看的");
+  assert.ok(/LLM\.turns\.push\(LLM\.turn\)/.test(block), "落定的轮次没有进上文");
+  assert.equal((block.match(/\bb\.ask\(/g) || []).length, 1, "ask 的调用点不止一处");
+});
+
+test("v65 轮次闸门排在动手之前，失败与超时那轮也记进上文", () => {
+  const { block } = t3Slice();
+  const gate = block.indexOf("llmBudget(llmUsed())");
+  const push = block.indexOf("LLM.turns.push(LLM.turn)");
+  const ask = block.indexOf("b.ask(");
+  assert.ok(gate > 0 && push > gate && ask > push,
+    `顺序应是「先拦额度 → 再落上文 → 最后发」，现在是 gate=${gate} push=${push} ask=${ask}`);
+  assert.ok(/if \(!bg\.ok\) return toast\(bg\.why/.test(block), "拦到了却没告诉用户为什么");
+  /* 这条是从浏览器场景里抓出来的：额度检查排在空文本检查后面时，到额的这一屏
+     点下去回的是「先写一句要问的话」——框里写什么都发不出去，那句话是假话。 */
+  assert.ok(block.indexOf("llmBudget(llmUsed())") < block.indexOf('if (!q) return toast("先写一句要问的话"'),
+    "额度拦在空文本之后：到数时用户听到的是「先写一句」而不是「为什么不能再发」");
+  assert.ok(/LLM\.turn\.err = "等满/.test(block), "超时那轮进上文时得写明「没回」，不许留个空答案");
+  assert.ok(/if \(LLM\.turn\) LLM\.turn\.err = LLM\.err;/.test(block), "失败那轮没记进上文：下一轮不知道上一轮没答上");
+});
+
+test("v65 重试只挂在失败的那一轮，清空上文是手点的", () => {
+  const { src, block } = t3Slice();
+  assert.ok(/const retryable = !run && !!LLM\.turn && \(LLM\.phase === "error" \|\| LLM\.phase === "timeout"\)/.test(block),
+    "重试按钮的门变了：拿到答案那一轮也给重试，就是白给用户一个再花一次钱的入口");
+  assert.match(block, /function llmRetry\(\)[\s\S]{0,300}llmSend\(LLM\.turn\.q\)/);
+  assert.ok(/onclick="llmClearChat\(\)"/.test(block) && /onclick="llmRetry\(\)"/.test(block), "两颗新按钮没画进弹层");
+  assert.ok(/if \(LLM\.phase === "running"\) return toast\("这一轮还在等/.test(block),
+    "请求在飞时清空会把正在等的那轮抹掉，回传回来找不到 id 就当没发生");
+  const k = src.indexOf("Object.assign(window, {");
+  const bridge = src.slice(k, src.indexOf("});", k));
+  for (const fn of ["llmAsk", "llmRetry", "llmClearChat", "openLlm"])
+    assert.ok(bridge.includes(fn), "内联入口没挂回 window：" + fn);
+});
+
+test("v65 会话只留内存：新字段挂在 LLM 上，屏幕上也是这么写的", () => {
+  const { block } = t3Slice();
+  assert.ok(/turns: \[\], turn: null/.test(block),
+    "会话字段没挂在 LLM 上（散成全局变量就没人管它的生命周期了）");
+  assert.match(block, /上文只在<[^>]*>这台机器的内存<\/b>里/);
+  assert.ok(!/LLM\.turns *= *JSON\.parse/.test(block), "会话从存储里读回来了：那就不叫只留内存");
+});
+
+test("v65 屏上写的轮次上限就是模块里那个常量，没有第二处硬编码", () => {
+  const { block } = t3Slice();
+  const hard = (block.match(/(\d+)\s*轮/g) || []).map(s => s.trim());
+  assert.deepEqual(hard, [], "文案里出现写死的「N 轮」，改上限时这里不会跟着变：" + hard.join("、"));
+  assert.ok(block.includes("LLM_MAX_ROUNDS"), "轮次上限没用模块里那个常量");
+  assert.ok(block.includes("llmBudget"), "闸门没用 llmBudget，而是页面自己数了一遍轮数");
+});

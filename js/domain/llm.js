@@ -16,6 +16,14 @@
      4. **失败不自动重试。** 一次请求一次计费，超时 / 断网 / 5xx 一律把状态交回用户，
         由用户手点重试（llmCanRetry 只认「用户点过」这一个条件）。
         与铁律 #5 同义：自动重试 = 可能双份计费。
+     5. **会话只活在这台机器的内存里。**（v65 多轮问答）上文压成一段文本随 input 上送，
+        落在页面的 LLM.turns / LLM.turn 两个变量上 —— 不写 localStorage、不进 licai-data.json，
+        刷新或换设备就从第一轮重新问。轮次到 LLM_MAX_ROUNDS 就停手，失败与超时的那轮也占额度。
+        这道闸拦的是「连着点、连着计费」，不是拦「问得多」。
+
+   ★ v65 只改页面这一侧：桥面七个方法一字未动，所以不发包（壳里那份桥还是 v64 编进去的）。
+     代价说清楚：壳加载的是 APK 里的 assets/www（MainActivity.START_URL），不是 GitHub Pages，
+     所以 v65 这份页面在**下一次打包之前不会到手机上**；这里能验的只有本地浏览器 + 假桥。
 */
 
 /** 桥名。Java 侧 addJavascriptInterface(..., "NativeLlm") 必须同名，verify-web.sh 比对两侧方法。 */
@@ -34,6 +42,14 @@ export const LLM_BRIDGE_METHODS = ["ready", "getConfig", "setConfig", "hasKey", 
 export const LLM_TIMEOUT_MS = 120000;
 /** 分块缓冲的上限：块数超过这个数一定是拿错了响应，别把内存吃光。 */
 export const LLM_CHUNK_MAX_PARTS = 512;
+/**
+ * 一个会话最多发几轮（v65）。这不是产品能力，是**防误点的闸门**：
+ * 每一轮都是一次真实计费，而多轮问答最容易出的事故就是「连着点、越点越贵」。
+ * 到数就停手，要接着问得先把上文清掉 —— 清空这个动作本身就是一次「我知道我要再花钱」。
+ */
+export const LLM_MAX_ROUNDS = 6;
+/** 上文回看的长度上限（字符）。超了从最旧的那轮丢起，最近几轮对新问题最有用。 */
+export const LLM_TRANSCRIPT_MAX_CHARS = 8000;
 
 /**
  * 构造发给桥的请求体。**只有问题与指令两样**：
@@ -49,6 +65,66 @@ export function llmReq(q) {
     input: String(o.input == null ? "" : o.input),
     instructions: String(o.instructions == null ? "" : o.instructions),
   };
+}
+
+/**
+ * 把已经落定的轮次压成**一段纯文本**，接在新问题前面发给模型（v65 多轮问答）。
+ * ★ 为什么是文本而不是结构化的消息数组：原生侧 LlmBridge.ask() 把 input 原样塞进
+ *   请求体的字符串字段（`req.put("input", input)`），要变成 [{role, content}] 就是 Java 改动。
+ *   v65 不动壳、不发包，所以上下文只能用文本带 —— 这不为好看，为的是「不碰密钥那条路」。
+ * 丢掉的旧轮次要在文本里写明丢了几轮，不许静默缩水：
+ * 用户以为模型还记得，其实模型这回看不到那几轮了。
+ * @param {{q?: string, a?: string}[]|null} turns
+ * @returns {string}
+ */
+export function llmTranscript(turns) {
+  const list = Array.isArray(turns) ? turns : [];
+  const parts = [];
+  for (const t of list) {
+    const q = String((t && t.q) || "").trim();
+    if (!q) continue;                       /* 没问出去的一轮不进上文 */
+    const a = String((t && t.a) || "").trim();
+    parts.push("问：" + q + "\n答：" + (a || "（这一轮没有拿到答案）"));
+  }
+  if (!parts.length) return "";
+  const keep = [];
+  let used = 0, dropped = 0;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const n = parts[i].length + 2;
+    /* 最新那一轮一定留着，哪怕它自己就超长 —— 否则新问题变成一句没头没尾的话 */
+    if (keep.length && used + n > LLM_TRANSCRIPT_MAX_CHARS) { dropped = i + 1; break; }
+    keep.unshift(parts[i]);
+    used += n;
+  }
+  if (dropped) keep.unshift("（更早 " + dropped + " 轮没有带上：超过上文长度上限）");
+  return keep.join("\n\n");
+}
+
+/**
+ * 这一轮真正发出去的 input = 上文 + 新问题。没有上文时就是新问题本身（与 v64 同一形状）。
+ * @param {{q?: string, a?: string}[]|null} turns @param {string} q
+ */
+export function llmRoundInput(turns, q) {
+  const fresh = String(q == null ? "" : q).trim();
+  const hist = llmTranscript(turns);
+  if (!hist) return fresh;
+  return "【以前几轮的问答，按时间先后】\n" + hist + "\n\n【这一次要问的】\n" + fresh;
+}
+
+/**
+ * 还不许再发第 used+1 轮。used = 这个会话里已经发出去的请求数（含失败与超时的）。
+ * ★ 失败的那一轮照样占额度：它多半已经到端点、已经计费了，把它抹掉等于把闸门松开。
+ * @param {number} used
+ * @returns {{ok: boolean, used: number, left: number, why: string}}
+ */
+export function llmBudget(used) {
+  const n = Number(used) | 0;
+  if (n >= LLM_MAX_ROUNDS) return {
+    ok: false, used: n, left: 0,
+    why: "这个会话已经发满 " + LLM_MAX_ROUNDS + " 轮，到数就停 —— 每一轮都是一次计费。"
+      + "要接着问先「清空上文」，清空后从第一轮重新问。",
+  };
+  return { ok: true, used: n, left: LLM_MAX_ROUNDS - n, why: "" };
 }
 
 /**

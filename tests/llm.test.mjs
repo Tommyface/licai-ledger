@@ -1,16 +1,18 @@
 /* 模型接入（T3）的纯逻辑测试：
      node --test tests/llm.test.mjs
-   钉的是 js/domain/llm.js 头部那四条口径：
+   钉的是 js/domain/llm.js 头部那五条口径：
      1. JS 不经手密钥 —— 请求体里连字段名都不许出现；
      2. 不猜端点形状 —— 认得就收，认不得明说 unknown；
      3. 来源要 URL + 发布时间两样齐才入账，缺哪样写哪样；
-     4. 失败不自动重试 —— 只有落定之后才允许出现重试这条路。
+     4. 失败不自动重试 —— 只有落定之后才允许出现重试这条路；
+     5. 会话只活在本机内存里 —— 上文压成文本带上，轮次到 LLM_MAX_ROUNDS 就停。
    ★ 真端点没测过（没有凭据），所以这里的用例是「形状契约」而不是「线上实况」：
      拿到真响应后必须回来补一条按实况形状的用例，别把这份 fixture 当成事实。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { llmReq, llmSource, llmGradeSources, llmParse, llmChunkFeed, llmChunkJoin,
-  llmCanRetry, llmDegrade, LLM_BRIDGE, LLM_BRIDGE_METHODS, LLM_TIMEOUT_MS, LLM_CHUNK_MAX_PARTS } from "../js/domain/llm.js";
+  llmCanRetry, llmDegrade, LLM_BRIDGE, LLM_BRIDGE_METHODS, LLM_TIMEOUT_MS, LLM_CHUNK_MAX_PARTS,
+  llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS, LLM_TRANSCRIPT_MAX_CHARS } from "../js/domain/llm.js";
 
 /* ---- 口径 1：JS 不经手密钥 ---- */
 test("请求体只有问题与指令，没有任何凭据字段", () => {
@@ -188,4 +190,79 @@ test("桥面清单：七个方法，一个不多一个不少（verify-web.sh 按
     ["ready", "getConfig", "setConfig", "hasKey", "promptKey", "clearKey", "ask"]);
   /* 清单里不许出现「把密钥交回页面」的方法 */
   for (const m of LLM_BRIDGE_METHODS) assert.ok(!/getkey|readkey|exportkey|reveal/i.test(m), m);
+});
+
+/* ---- 口径 5（v65 多轮问答）：上文压成文本、失败也占额度、上限是防误点的闸 ----
+   这几条钉的是「多轮」这件事的形状，不是端点的实况：
+   上文的形状由我们定（原生那条路只认字符串），什么时候被端点顶回来要等真凭据实测。 */
+test("上文：没问过就是空串，第一轮的 input 与 v64 同一个形状", () => {
+  assert.equal(llmTranscript([]), "");
+  assert.equal(llmTranscript(null), "");
+  assert.equal(llmRoundInput([], "最短持有期到什么时候？"), "最短持有期到什么时候？");
+  assert.equal(llmRoundInput(null, "  带空格的  "), "带空格的");
+});
+
+test("上文：一轮变成「问 / 答」两行，没拿到答案时明说，不许冒充", () => {
+  assert.equal(llmTranscript([{ q: "A", a: "B" }]), "问：A\n答：B");
+  assert.match(llmTranscript([{ q: "A", a: "" }]), /这一轮没有拿到答案/);
+  assert.match(llmTranscript([{ q: "A", err: "HTTP 429" }]), /这一轮没有拿到答案/,
+    "失败的那轮在原文里也不能被当成答案");
+});
+
+test("上文：按先后串起来，空问题那一轮跳过", () => {
+  const t = llmTranscript([{ q: "第一问", a: "一答" }, { q: "  " }, { q: "第二问", a: "二答" }]);
+  assert.ok(t.indexOf("第一问") < t.indexOf("第二问"), "先后顺序变了");
+  assert.equal(t.split("问：").length - 1, 2);
+});
+
+test("上文：超过长度上限从最旧的丢起，并写明丢了几轮（不许静默缩水）", () => {
+  assert.ok(LLM_TRANSCRIPT_MAX_CHARS >= 2000, "上限小于一篇像样的回答，等于每轮都失忆");
+  const big = "字".repeat(2000);
+  const turns = [];
+  for (let i = 0; i < 5; i++) turns.push({ q: "第" + i + "问", a: big });
+  const t = llmTranscript(turns);
+  assert.ok(t.length <= LLM_TRANSCRIPT_MAX_CHARS + 60, "收不住长度：" + t.length);
+  assert.match(t, /更早 \d+ 轮没有带上/);
+  assert.ok(t.includes("第4问"), "最新那轮一定得留着");
+  assert.ok(!t.includes("第0问"), "该丢的最旧那轮还留着");
+});
+
+test("上文：最新一轮自己就超长也别丢掉 —— 新问题不能变成一句没头没尾的话", () => {
+  const t = llmTranscript([{ q: "老问", a: "老答" }, { q: "新问", a: "字".repeat(LLM_TRANSCRIPT_MAX_CHARS + 10) }]);
+  assert.ok(t.includes("新问"), t.slice(0, 60));
+});
+
+test("发给模型的 input：有上文时是「以前几轮 + 这一次要问的」两段", () => {
+  const s = llmRoundInput([{ q: "上一问", a: "上一答" }], "那它手续费呢");
+  assert.match(s, /以前几轮的问答/);
+  assert.match(s, /问：上一问\n答：上一答/);
+  assert.match(s, /这一次要问的】\n那它手续费呢$/);
+});
+
+test("上文是纯文本：形状由我们定，不出现结构化消息的字段", () => {
+  const t = llmTranscript([{ q: "A", a: "B" }]);
+  assert.equal(typeof t, "string");
+  assert.ok(!/"role"|"content"/.test(t), "原生那条路只认字符串，这里冒出结构化字段就是骗测试");
+});
+
+test("轮次闸门：上限之内放行，到数就停并说清怎么接着问", () => {
+  assert.ok(LLM_MAX_ROUNDS >= 2 && LLM_MAX_ROUNDS <= 20, "上限既不能形同虚设，也不该小到手滑就撞");
+  for (let n = 0; n < LLM_MAX_ROUNDS; n++) {
+    const g = llmBudget(n);
+    assert.equal(g.ok, true, String(n));
+    assert.equal(g.left, LLM_MAX_ROUNDS - n);
+  }
+  const full = llmBudget(LLM_MAX_ROUNDS);
+  assert.equal(full.ok, false);
+  assert.equal(full.left, 0);
+  assert.match(full.why, /清空上文/);
+  assert.match(full.why, /计费/);
+  assert.equal(llmBudget(LLM_MAX_ROUNDS + 3).ok, false);
+  assert.equal(llmBudget(undefined).ok, true, "拿不到数就当第一轮，别把用户锁死");
+});
+
+test("闸门只看轮数不看成败：失败与超时的那轮照样占额度（铁律 #5 的连体闸）", () => {
+  const rows = [{ q: "A", a: "" }, { q: "B", err: "HTTP 500" }];
+  assert.equal(llmTranscript(rows).split("问：").length - 1, 2, "失败的那轮也要进上文");
+  assert.equal(llmBudget(rows.length).ok, rows.length < LLM_MAX_ROUNDS);
 });

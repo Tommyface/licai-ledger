@@ -35,7 +35,7 @@ import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
-  llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS } from "./js/domain/llm.js";
+  llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS } from "./js/domain/llm.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -56,7 +56,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v64";
+const APP_VER = "v65";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1823,9 +1823,19 @@ function openAnaIndex() {
    重试这颗按钮只由用户点，点之前提示「上一次可能已经计费」。
    为什么来源要 URL + 发布时间两样齐（铁律 #3）：缺任何一条，用户事后都回不去原文，
    那就等于没有出处 —— 宁可显示「这次没能拿到可核实的出处」。
+
+   v65 在这一节里加的是「接着问」：会话历史（turns / turn）只在内存，
+   每轮把上文压成一段文本随 input 上送（原生那条路只认字符串），发满 LLM_MAX_ROUNDS 轮停手。
+   ★ 桥面七个方法一个字没动，所以这一版不需要新 APK；代价是壳读的是 APK 里那份 assets/www，
+     v65 要等下一次打包才到手机上 —— 现在能验的只有本地浏览器 + 假桥。
    ============================================================ */
-/* 一轮问答的全部状态。不落 localStorage：换设备 / 刷新就该重问，不留半成品。 */
-const LLM = { phase: "idle", id: "", buf: null, meta: null, res: null, q: "", err: "", timer: 0, cfg: null, hasKey: false, costWarn: false };
+/* 一轮问答的全部状态。不落 localStorage：换设备 / 刷新就该重问，不留半成品。
+   v65 起多了两个字段（turns / turn）—— 会话内容里多半夹着产品名与持仓，
+   把它写进浏览器存储等于把台账多一份没人管的副本，所以只留在内存。 */
+const LLM = { phase: "idle", id: "", buf: null, meta: null, res: null, q: "", err: "",
+  timer: 0, cfg: null, hasKey: false, costWarn: false, turns: [], turn: null };
+/** 这个会话已经发出去几个请求（含失败与超时的那些 —— 它们多半已经计费了，占额度）。 */
+function llmUsed() { return LLM.turns.length + (LLM.turn ? 1 : 0); }
 
 function llmBridge() {
   try {
@@ -1859,7 +1869,7 @@ function renderLlm() {
   const b = llmBridge();
   box.innerHTML = llmStatusLine() + `<div class="row-btn" style="margin-top:10px">
       <button class="btn gh" style="flex:1" onclick="llmSetKey()">${LLM.hasKey ? "更换密钥" : "配置密钥"}</button>
-      <button class="btn gh" style="flex:1" onclick="openLlm()">问一句</button>
+      <button class="btn gh" style="flex:1" onclick="openLlm()">${llmUsed() ? "接着问（已发 " + llmUsed() + " 轮）" : "问一句"}</button>
     </div>
     ${b ? `<div class="foot" style="text-align:left;padding-top:9px">
       密钥走原生输入框，页面全程不经手；它不进 localStorage、不进 licai-data.json、也不随台账推云端。
@@ -1895,15 +1905,18 @@ function llmSaveCfg() {
   toast("已保存端点与模型", 2400);
   openLlm();
 }
-/** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout 五种。 */
+/** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout 五种。
+    标题那行「第 N 轮 · 问」是为了发出去之后还看得见发的是哪一句 —— 输入框发完就清了。 */
 function llmResultHtml() {
+  const t = LLM.turn;
+  const head = t ? `<div class="cap" style="padding-bottom:6px">第 ${LLM.turns.length + 1} 轮 · 问：${esc(t.q)}</div>` : "";
   if (LLM.phase === "running")
-    return `<div class="note b">已发出，等回答…（一次请求一次计费，超时不会自动重发）</div>`;
+    return head + `<div class="note b">已发出，等回答…（一次请求一次计费，超时不会自动重发）</div>`;
   if (LLM.phase === "timeout")
-    return `<div class="note r">等满 ${Math.round(LLM_TIMEOUT_MS / 1000)} 秒没回。<b>这一次可能已经计费</b>，
+    return head + `<div class="note r">等满 ${Math.round(LLM_TIMEOUT_MS / 1000)} 秒没回。<b>这一次可能已经计费</b>，
       确认端点状态再重试。</div>`;
   if (LLM.phase === "error")
-    return `<div class="note r">${esc(LLM.err || "端点没返回可用内容")}</div>`;
+    return head + `<div class="note r">${esc(LLM.err || "端点没返回可用内容")}</div>`;
   const r = LLM.res;
   if (!r) return "";
   const src = r.sources.length
@@ -1919,13 +1932,37 @@ function llmResultHtml() {
     : "";
   const usage = (r.usage.input || r.usage.output)
     ? `<div class="cap" style="padding-top:8px">形状 ${esc(r.shape)} · 输入 ${r.usage.input} / 输出 ${r.usage.output} token</div>` : "";
-  return `<div class="note" style="margin-top:12px;white-space:pre-wrap">${esc(r.text)}</div>${src}${drop}${usage}`;
+  return head + `<div class="note" style="margin-top:12px;white-space:pre-wrap">${esc(r.text)}</div>${src}${drop}${usage}`;
+}
+/** 上文那一叠。已经落定的轮次才进来，当前这一轮走 #llmOut（它在上面）。
+    答案在这里是给人看的全文；发给模型的是压平后的文本，两者同一份内容。 */
+function llmHistoryHtml() {
+  if (!LLM.turns.length) return "";
+  const rows = LLM.turns.map((t, i) => {
+    const src = (t.sources && t.sources.length)
+      ? `<div class="cap" style="padding-top:4px">出处 ${t.sources.length} 条 · 形状 ${esc(t.shape || "—")}</div>`
+      : `<div class="cap" style="padding-top:4px">这一轮没有可核实的出处</div>`;
+    return `<div class="note" style="margin-top:8px">第 ${i + 1} 轮 · 问：${esc(t.q)}
+      <div style="white-space:pre-wrap;margin-top:5px">${esc(t.a || t.err || "（没拿到内容）")}</div>${src}</div>`;
+  }).join("");
+  return `<div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">上文（${LLM.turns.length} 轮）</h2>
+    <span class="hint">只在本机内存里 · 发下一轮时压成文本带上</span></div>${rows}`;
 }
 function openLlm() {
   closeSheet();
   if (!llmBridge()) { renderLlm(); return toast(llmDegrade({ inApp: false, hasKey: false }), 4200); }
   llmReadCfg();
   const c = LLM.cfg || {};
+  /* 额度在打开时算一次就够：这一屏里每发一轮都会重开一次 openLlm()。 */
+  const used = llmUsed();
+  const bg = llmBudget(used);
+  const run = LLM.phase === "running";
+  /* 重试只在「这一轮失败了」时出现。拿到答案的那轮不给重试 —— 再发一次同样的话
+     只是再花一次钱，要接着问就走输入框，那一发是新的一个问题。 */
+  const retryable = !run && !!LLM.turn && (LLM.phase === "error" || LLM.phase === "timeout");
+  const btn = run ? "等待中…"
+    : (!bg.ok ? "已到 " + LLM_MAX_ROUNDS + " 轮上限"
+      : (used ? "问下一句（已用 " + used + "/" + LLM_MAX_ROUNDS + " 轮）" : "发起（本会话最多 " + LLM_MAX_ROUNDS + " 轮）"));
   openSheet(`<div class="sheet-t"><h3>模型接入</h3><button class="x" onclick="closeSheet()">✕</button></div>
     ${llmStatusLine()}
     <div class="card-t" style="margin:14px 0 6px"><h2 style="font-size:14px">端点与模型</h2>
@@ -1941,43 +1978,83 @@ function openLlm() {
       <button class="btn gh" style="flex:1" onclick="llmSaveCfg()">保存端点</button>
       <button class="btn gh" style="flex:1" onclick="llmClearKey()">清除密钥</button>
     </div>
-    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">问一句</h2>
-      <span class="hint">答案不自动入账</span></div>
-    <div class="field"><textarea id="llmQ" rows="3" placeholder="例如：这只产品最短持有期到什么时候？">${esc(LLM.q)}</textarea></div>
+    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">接着问</h2>
+      <span class="hint">答案不自动入账 · 已发 ${used}/${LLM_MAX_ROUNDS} 轮</span></div>
+    ${llmHistoryHtml()}
+    <div class="field" style="margin-top:10px"><textarea id="llmQ" rows="3" placeholder="接着上一轮问，或换个新问题">${esc(LLM.q)}</textarea></div>
     <div class="row-btn" style="margin-top:8px">
-      <button class="btn pri" style="flex:1" onclick="llmAsk()">${LLM.phase === "running" ? "等待中…" : (llmCanRetry(LLM) ? "重试" : "发起")}</button>
+      <button class="btn pri" style="flex:1" onclick="llmAsk()">${btn}</button>
     </div>
+    ${retryable ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="llmRetry()">重试这一轮（原句再发一次，另占一轮额度）</button></div>` : ""}
     ${LLM.costWarn ? `<div class="note r" style="margin-top:8px">这一句发出去就是<b>一次新的计费</b>；
       上一轮如果已经到端点，那一次也算 —— 代码不会自己重发，重发只由你点。</div>` : ""}
     <div id="llmOut" style="margin-top:10px">${llmResultHtml()}</div>
+    ${used ? `<div class="row-btn" style="margin-top:10px"><button class="btn gh" style="flex:1" onclick="llmClearChat()">清空上文（重新计数）</button></div>` : ""}
     <div class="cap" style="padding:12px 0 0">
       原生侧只负责发请求与回原文，解析与来源分级全在页面里（js/domain/llm.js，有测试）。
+      上文只在<b>这台机器的内存</b>里：不写本机存储、不推云端，刷新就没了。
+      发满 ${LLM_MAX_ROUNDS} 轮就停手（失败与超时的那几轮也算），要接着问得先清空 —— 闸门拦的是连着点、连着计费。
       发出去与收回来的形状都按 Responses 形制（含 web_search_preview）写，
       <b>真实端点还没实测过</b>：认不得就明说认不得，不补字段、不自动重发。
     </div>`);
 }
-function llmAsk() {
+/** 发一轮。要发的话由调用方给：新问从输入框取，重试把上一轮那句原样再给一次。
+    顺序是「先闸门后动手」：额度到数就连一个字符都不该发出去，不是等请求做完才提示。 */
+function llmSend(text) {
   const b = llmBridge();
   if (!b) return toast(llmDegrade({ inApp: false, hasKey: false }), 4200);
   if (LLM.phase === "running") return toast("上一句还在等，不重复发（重复发就是重复计费）", 3600);
-  const el = $("llmQ");
-  LLM.q = el ? String(el.value || "") : LLM.q;
-  if (!LLM.q.trim()) return toast("先写一句要问的话", 2600);
+  /* 额度先于空文本：到数的时候，用户点下去要听见的是「为什么不能再发」，
+     而不是「先写一句要问的话」——那句在这屏上是假话，框里写什么都一样。 */
+  const bg = llmBudget(llmUsed());
+  if (!bg.ok) return toast(bg.why, 6000);
+  const q = String(text == null ? "" : text).trim();
+  if (!q) return toast("先写一句要问的话", 2600);
   if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) return toast(llmDegrade({ inApp: true, hasKey: LLM.hasKey }) || "先配端点", 4200);
+  /* 上一轮落进上文 —— 成 / 败 / 超时都算一轮，失败那轮多半已经到过端点。 */
+  if (LLM.turn) { LLM.turns.push(LLM.turn); LLM.turn = null; }
   LLM.costWarn = llmCanRetry(LLM);
   LLM.phase = "running"; LLM.res = null; LLM.err = ""; LLM.meta = null; LLM.buf = null;
+  LLM.turn = { q, a: "", err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 } };
+  LLM.q = "";                 /* 输入框清空：发出去的那句已经在「第 N 轮 · 问」那一行上 */
   LLM.id = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   /* 计时器和提示说的是同一个数：到 LLM_TIMEOUT_MS 就落「超时」，不加缓冲。
      原生侧的整体预算（110 秒）比它小，所以真超时是那边先断、这边兜住没收到回调的情况。 */
   const dead = setTimeout(() => llmTimeout(LLM.id), LLM_TIMEOUT_MS);
   LLM.timer = dead;
-  try { b.ask(LLM.id, JSON.stringify(llmReq({ input: LLM.q, instructions: "只根据给出的台账数据回答；缺什么就说缺什么。" }))); }
-  catch (e) { clearTimeout(dead); LLM.timer = 0; LLM.phase = "error"; LLM.err = "桥调用失败：" + e; }
+  try {
+    b.ask(LLM.id, JSON.stringify(llmReq({
+      input: llmRoundInput(LLM.turns, q),
+      instructions: "只根据给出的台账数据与上文回答；缺什么就说缺什么，不要编。",
+    })));
+  } catch (e) {
+    clearTimeout(dead); LLM.timer = 0; LLM.phase = "error"; LLM.err = "桥调用失败：" + e;
+    LLM.turn.err = "桥调用失败：" + e;
+  }
   openLlm();
+}
+function llmAsk() { const el = $("llmQ"); llmSend(el ? String(el.value || "") : LLM.q); }
+/** 重试 = 把上一轮（连同它那次失败）记进上文，再原样发一次同一个问题。
+    它占一轮额度：这一发又是一次真实计费，不该当成「免费再来一次」。 */
+function llmRetry() {
+  if (!LLM.turn || !LLM.turn.q) return toast("这一会话里没有可重试的一轮", 3200);
+  llmSend(LLM.turn.q);
+}
+/** 清空上文 = 轮次额度一起归零。这是唯一能越过 LLM_MAX_ROUNDS 的路，所以只能由人点。 */
+function llmClearChat() {
+  if (LLM.phase === "running") return toast("这一轮还在等，先等它落定再清", 3200);
+  const n = llmUsed();
+  if (!n) return toast("上文本来就是空的", 2200);
+  LLM.turns = []; LLM.turn = null; LLM.res = null; LLM.err = "";
+  LLM.phase = "idle"; LLM.costWarn = false; LLM.buf = null; LLM.meta = null;
+  openLlm();
+  toast("已清空上文（" + n + " 轮的额度也重新计数了）", 3400);
 }
 function llmTimeout(id) {
   if (LLM.phase !== "running" || LLM.id !== id) return;
   LLM.phase = "timeout"; LLM.err = ""; LLM.buf = null;
+  /* 超时这一轮写进上文时带的是「没回」，不是空字符串 —— 下一轮的模型看得见上一轮没答上。 */
+  if (LLM.turn) LLM.turn.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一次可能已经计费）";
   openLlm();
 }
 /* 原生回传的两个全局函数：名字与 LlmBridge.java 里拼的 JS 必须逐字一致，
@@ -1986,7 +2063,11 @@ window.__llmChunk = function (id, seq, total, text) {
   if (!id || String(id) !== LLM.id || LLM.phase !== "running") return;   /* 迟到的一律丢，别串到下一轮 */
   const r = llmChunkFeed(LLM.buf, Number(seq), Number(total), String(text == null ? "" : text));
   LLM.buf = r.st;
-  if (r.error) { LLM.phase = "error"; LLM.err = "分块组装失败：" + r.error; openLlm(); }
+  if (r.error) {
+    LLM.phase = "error"; LLM.err = "分块组装失败：" + r.error;
+    if (LLM.turn) LLM.turn.err = LLM.err;
+    openLlm();
+  }
 };
 window.__llmDone = function (id, metaJson) {
   if (!id || String(id) !== LLM.id) return;
@@ -2001,6 +2082,7 @@ window.__llmDone = function (id, metaJson) {
     LLM.err = (meta && meta.error) ? String(meta.error) : "原生侧没回元信息";
     if (meta && meta.status) LLM.err += "（HTTP " + meta.status + "）";
     LLM.buf = null;
+    if (LLM.turn) LLM.turn.err = LLM.err;              /* 失败也进上文：下一轮得知道上一轮没答上 */
     openLlm(); return;
   }
   let obj = null;
@@ -2010,6 +2092,15 @@ window.__llmDone = function (id, metaJson) {
   LLM.res = res;
   LLM.err = res.ok ? "" : (res.error || "响应里没有正文");
   LLM.buf = null;
+  if (LLM.turn) {
+    /* 落进上文的是「问 + 答的正文」，来源与 token 数只给人看，不进模型的那段文本。 */
+    LLM.turn.a = res.text;
+    LLM.turn.err = res.ok ? "" : LLM.err;
+    LLM.turn.sources = res.sources;
+    LLM.turn.dropped = res.dropped;
+    LLM.turn.shape = res.shape;
+    LLM.turn.usage = res.usage;
+  }
   openLlm();
 };
 /* 原生侧改完配置 / 密钥后叫这一下，页面重读一次再重画。
@@ -4444,7 +4535,7 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmClearKey, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmClearChat, llmClearKey, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,
