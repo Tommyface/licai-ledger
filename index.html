@@ -625,6 +625,13 @@ html:not(.inApp) .app-only{display:none}
       <div class="card-t"><h2>净值账本（可选）</h2></div>
       <div id="ledgermeBox"></div>
     </div>
+    <!-- 模型接入（T3）：同样只在 App 里出现，理由比上面两节更硬 ——
+         密钥只存在本机加密区（Android Keystore），浏览器里没有能放它的地方。
+         所以网页版不是「能用但收起来」，而是根本没有这条路径：连一节都不画。 -->
+    <div class="card app-only">
+      <div class="card-t"><h2>模型接入（可选）</h2></div>
+      <div id="llmBox"></div>
+    </div>
     <div class="card">
       <div class="card-t"><h2>新净值提醒</h2></div>
       <div id="notifyBox"></div>

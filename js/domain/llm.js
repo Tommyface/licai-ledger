@@ -1,0 +1,214 @@
+// @ts-check
+/* ---------- 模型接入（T3）：请求构造 / 响应解析 / 来源分级 / 分块组装 ----------
+   从 app.js 拆出来的纯函数（同 analysis.js / board.js 的做法）：拆出来才能被 node --test 钉住。
+
+   ★ 这一层的四条口径（改任何一条都要同步改 tests/llm.test.mjs）：
+     1. **JS 永不经手 key。** 请求里没有 key 字段、没有 Authorization 头，
+        llmReq() 的输出会被原样丢给 window.NativeLlm.ask()，由原生侧补鉴权。
+        所以这里连「key」这个字都不许出现成字段名 —— 出现了就等于承诺 JS 能填。
+     2. **不猜端点返回的形状。** Responses 形制（output[] 里有 message / web_search_call）
+        与 Chat 形制（choices[]）都收，认不出来就明说 unknown。
+        ★ 真实端点到底返回什么、web_search_call 里带不带 URL 与发布时间，
+          截至本版**没有实测过**（没有可用凭据）。解析器因此只做「有则收、无则明说」，
+          绝不为了好看去补字段 —— 补出来的出处比没有出处更坏。
+     3. **来源分级要 URL + 发布时间两样齐。** 缺任何一条就不入账，进 dropped 并写明缺哪样。
+        与铁律 #3 同义：一条没有出处的「模型说的」不能进台账。
+     4. **失败不自动重试。** 一次请求一次计费，超时 / 断网 / 5xx 一律把状态交回用户，
+        由用户手点重试（llmCanRetry 只认「用户点过」这一个条件）。
+        与铁律 #5 同义：自动重试 = 可能双份计费。
+*/
+
+/** 桥名。Java 侧 addJavascriptInterface(..., "NativeLlm") 必须同名，verify-web.sh 比对两侧方法。 */
+export const LLM_BRIDGE = "NativeLlm";
+/**
+ * 桥面清单：页面侧只经这几个方法碰原生，一个不多。
+ * scripts/verify-web.sh（私有仓）会拿这张表逐个点 LlmBridge.java 里的方法名 ——
+ * 页面调了原生没有的方法，表现是「点了没反应」而构建全绿，只能靠这张表拦。
+ * 清单放在纯模块里而不是散在 app.js 的调用点，是为了让它可测、可比对。
+ */
+export const LLM_BRIDGE_METHODS = ["ready", "getConfig", "setConfig", "hasKey", "promptKey", "clearKey", "ask"];
+/* 回传为什么要分块：Java→JS 单次 evaluateJavascript 的上限没有实测数据
+   （沙箱里没有真机），所以不赌它 —— 原生侧按块喂 (seq, total, text)，JS 侧拼。
+   块大小是原生侧的事，这里只校验序号：JS 不需要知道切了多少字节。 */
+/** 一次问答的等待上限：模型端点慢是常态，120 秒还没回就当失败（不自动重发）。 */
+export const LLM_TIMEOUT_MS = 120000;
+/** 分块缓冲的上限：块数超过这个数一定是拿错了响应，别把内存吃光。 */
+export const LLM_CHUNK_MAX_PARTS = 512;
+
+/**
+ * 构造发给桥的请求体。**只有问题与指令两样**：
+ * baseUrl / model / 密钥全在原生侧的配置里，JS 连提它们的字段都没有 ——
+ * 少一个入口就少一处能被篡改的地方（页面里任何一段脚本都能调桥）。
+ * @param {{ input?: string, instructions?: string }} q
+ * @returns {{ v: number, input: string, instructions: string }}
+ */
+export function llmReq(q) {
+  const o = q || {};
+  return {
+    v: 1,
+    input: String(o.input == null ? "" : o.input),
+    instructions: String(o.instructions == null ? "" : o.instructions),
+  };
+}
+
+/**
+ * 一条来源。两样齐才算有出处：可核实的链接 + 发布时间。
+ * 只有标题、只有域名、或者时间写的是「今天」这种相对说法，一律不收 ——
+ * 用户事后点不回去或者查不到当时那版，等于没出处。
+ * @param {any} s
+ * @returns {{ ok: boolean, url: string, title: string, publishedAt: string, host: string, why: string }}
+ */
+export function llmSource(s) {
+  const o = s && typeof s === "object" ? s : {};
+  const url = String(o.url || o.href || o.link || "").trim();
+  const title = String(o.title || o.name || "").trim();
+  const at = String(o.publishedAt || o.published_at || o.publishTime || o.publish_time
+    || o.date || o.publishedDate || "").trim();
+  if (!/^https?:\/\//i.test(url)) return { ok: false, url, title, publishedAt: at, host: "", why: "没有可点开的 http(s) 链接" };
+  let host = "";
+  try { host = new URL(url).hostname.toLowerCase(); } catch (e) { return { ok: false, url, title, publishedAt: at, host: "", why: "链接本身不合法" }; }
+  if (!isRealDate(at)) return { ok: false, url, title, publishedAt: at, host, why: "缺发布时间（无法确定看到的是哪一版披露）" };
+  return { ok: true, url, title, publishedAt: at, host, why: "" };
+}
+
+/** 必须是 YYYY-MM-DD（可带时间后缀）的绝对日期；「今天」「近日」「2026」都不算。 */
+function isRealDate(s) {
+  return /^\d{4}-\d{2}-\d{2}([T ]|$)/.test(String(s || ""));
+}
+
+/**
+ * 把一组候选来源分成「可入账」与「被丢弃」。
+ * 丢弃的那一份保留原文与原因，页面上要能列出来 ——
+ * 静默丢掉来源，用户就以为模型说的没有出处；全收，又等于放了假出处进来。
+ * @param {any[]} list
+ * @returns {{ graded: any[], dropped: { url: string, title: string, why: string }[] }}
+ */
+export function llmGradeSources(list) {
+  const graded = [], dropped = [];
+  const seen = Object.create(null);
+  for (const raw of Array.isArray(list) ? list : []) {
+    const s = llmSource(raw);
+    const k = s.url || s.title;
+    if (s.ok) {
+      if (seen[k]) continue;                 /* 同一篇被引两次不重复列 */
+      seen[k] = 1;
+      graded.push(s);
+    } else {
+      dropped.push({ url: s.url, title: s.title, why: s.why });
+    }
+  }
+  return { graded, dropped };
+}
+
+/**
+ * 解析端点返回。认三种形状，认不出就说 unknown 并把原文长度交回去。
+ *   responses —— Responses 形制：output[] 里有 {type:"message",content:[{text}]} 与 web_search_call
+ *   chat      —— Chat 形制：choices[0].message.content
+ *   unknown   —— 其它（含错误体）
+ * @param {any} obj 已经 JSON.parse 过的响应
+ * @returns {{ shape: string, ok: boolean, text: string, sources: any[], dropped: any[], usage: { input: number, output: number }, error: string }}
+ */
+export function llmParse(obj) {
+  const out = { shape: "unknown", ok: false, text: "", sources: /** @type {any[]} */ ([]), dropped: /** @type {any[]} */ ([]), usage: { input: 0, output: 0 }, error: "" };
+  if (!obj || typeof obj !== "object") { out.error = "响应不是对象"; return out; }
+  if (obj.error) {
+    out.error = String(obj.error.message || obj.error.code || "端点返回 error 字段");
+    return out;
+  }
+  const usage = obj.usage || {};
+  out.usage.input = Number(usage.input_tokens || usage.prompt_tokens || 0) || 0;
+  out.usage.output = Number(usage.output_tokens || usage.completion_tokens || 0) || 0;
+
+  const pieces = /** @type {string[]} */ ([]);
+  if (Array.isArray(obj.output)) {
+    out.shape = "responses";
+    for (const item of obj.output) {
+      const it = item && typeof item === "object" ? item : {};
+      if (it.type === "message" || typeof it.content === "string" || Array.isArray(it.content)) {
+        if (typeof it.content === "string") pieces.push(it.content);
+        else for (const c of it.content) {
+          const cc = c && typeof c === "object" ? c : {};
+          const t = cc.text || cc.content;
+          if (typeof t === "string") pieces.push(t);
+          else if (t && typeof t === "object" && typeof t.value === "string") pieces.push(t.value);
+        }
+      }
+      /* web_search_call 里的来源：结构没实测过，所以两处都找一遍 ——
+         item.sources[]（顶层）与 item.action.sources[]（Responses 文档里的那种）。
+         找不到就是找不到，不编。 */
+      const cand = [].concat(Array.isArray(it.sources) ? it.sources : [],
+        it.action && Array.isArray(it.action.sources) ? it.action.sources : []);
+      for (const c of cand) out.sources.push(c);
+    }
+  } else if (Array.isArray(obj.choices)) {
+    out.shape = "chat";
+    const m = (obj.choices[0] && obj.choices[0].message) || {};
+    if (typeof m.content === "string") pieces.push(m.content);
+    const tool = obj.choices[0] && obj.choices[0].tool_calls;
+    if (Array.isArray(tool)) {
+      for (const t of tool) {
+        const fn = t && t.function && t.function.arguments;
+        if (typeof fn === "string") { try { const g = JSON.parse(fn); if (Array.isArray(g.sources)) out.sources.push(...g); } catch (e) { /* 参数不是 JSON 就当没有 */ } }
+      }
+    }
+  }
+  if (typeof obj.output_text === "string" && !pieces.length) pieces.push(obj.output_text);
+
+  const g = llmGradeSources(out.sources);
+  out.dropped = g.dropped;
+  out.text = pieces.join("\n").trim();
+  out.ok = !!out.text;
+  out.sources = g.graded;
+  if (!out.ok && !out.error) out.error = out.shape === "unknown"
+    ? "认不出的响应形状（既没有 output[] 也没有 choices[]）"
+    : "响应里没有正文";
+  return out;
+}
+
+/**
+ * 分块组装的状态机。Java 侧按 (seq, total, text) 逐块喂进来。
+ * 乱序 / 重复 / 越界 / 超块数 —— 全部当场报错，不静默拼接：
+ * 拼出错文比拿不到答案更坏，用户会拿一段被截断的话当结论。
+ * @param {{ total: number, parts: (string|null)[], got: number }|null} st
+ * @param {number} seq @param {number} total @param {string} text
+ * @returns {{ st: { total: number, parts: (string|null)[], got: number }, done: boolean, error: string }}
+ */
+export function llmChunkFeed(st, seq, total, text) {
+  const s = (st && st.parts) ? st : { total: 0, parts: /** @type {(string|null)[]} */ ([]), got: 0 };
+  const t = Number(total) | 0, q = Number(seq) | 0;
+  if (!(t >= 1) || t > LLM_CHUNK_MAX_PARTS) return { st: s, done: false, error: "块数不合法：" + total };
+  if (q < 0 || q >= t) return { st: s, done: false, error: "块号越界：" + seq + "/" + total };
+  if (s.total && s.total !== t) return { st: s, done: false, error: "同一轮请求的 total 变了（" + s.total + " → " + t + "）" };
+  if (!s.total) { s.total = t; s.parts = new Array(t).fill(null); s.got = 0; }
+  if (s.parts[q] !== null) return { st: s, done: false, error: "第 " + q + " 块重复送达" };
+  s.parts[q] = String(text == null ? "" : text);
+  s.got++;
+  if (s.got < s.total) return { st: s, done: false, error: "" };
+  return { st: s, done: true, error: "" };
+}
+
+/** 拼出整段：只在 done 之后调用。 */
+export function llmChunkJoin(st) {
+  return (st && st.parts ? st.parts : []).map(p => p == null ? "" : p).join("");
+}
+
+/**
+ * 能不能重试。落定（拿到结果 / 明确失败 / 超时）之后才允许出现「重试」这颗按钮，
+ * 而点击的一定为是用户 —— 代码路径里没有任何地方自己调 ask() 第二遍（铁律 #5）。
+ * @param {{ phase?: string }|null} st
+ */
+export function llmCanRetry(st) {
+  const ph = (st && st.phase) || "";
+  return ph === "done" || ph === "error" || ph === "timeout";
+}
+
+/**
+ * 无桥 / 无凭据时的诚实降级文案。宁可不给答案，也不装作算过了。
+ * @param {{ inApp: boolean, hasKey: boolean }} env
+ */
+export function llmDegrade(env) {
+  const e = env || { inApp: false, hasKey: false };
+  if (!e.inApp) return "模型问答只在本机 App 内可用：网页版没有原生桥，而且密钥不能存在浏览器里。";
+  if (!e.hasKey) return "还没有配置模型密钥：设置 → 模型接入 → 配置密钥（密钥只存在本机加密区，页面读不到）。";
+  return "";
+}

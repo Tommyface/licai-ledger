@@ -34,6 +34,8 @@ import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateF
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
+import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
+  llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS } from "./js/domain/llm.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -54,7 +56,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v63";
+const APP_VER = "v64";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1109,6 +1111,7 @@ function renderSet() {
   syncAppOnly();
   renderAixhub();
   renderLedgerme();
+  renderLlm();
   renderNotify();
 }
 
@@ -1806,6 +1809,219 @@ function openAnaIndex() {
     ${anaPortfolioLine()}
     <div class="cap" style="padding:10px 0 0">结论缓存在本机，不进 licai-data.json，也不推云端。</div>`);
 }
+
+/* ============================================================
+   T3 · 模型接入（只在 App 内）
+   ------------------------------------------------------------
+   分工是照「JS 不经手密钥」这条切的：
+     原生侧（LlmBridge.java）—— 存密钥（Android Keystore）、存端点与模型、发 HTTPS、
+                                 把响应**原样**分块回传；它不解析内容。
+     页面侧（js/domain/llm.js）—— 认形状、分来源、管超时与重试；它拿不到密钥。
+   两边只交换两样东西：出去一个不含凭据的请求体，回来一串分块的原文 + 一轮元信息。
+
+   为什么不自动重试：一次请求一次计费（铁律 #5）。超时 / 断网 / 5xx 一律把状态摊开，
+   重试这颗按钮只由用户点，点之前提示「上一次可能已经计费」。
+   为什么来源要 URL + 发布时间两样齐（铁律 #3）：缺任何一条，用户事后都回不去原文，
+   那就等于没有出处 —— 宁可显示「这次没能拿到可核实的出处」。
+   ============================================================ */
+/* 一轮问答的全部状态。不落 localStorage：换设备 / 刷新就该重问，不留半成品。 */
+const LLM = { phase: "idle", id: "", buf: null, meta: null, res: null, q: "", err: "", timer: 0, cfg: null, hasKey: false, costWarn: false };
+
+function llmBridge() {
+  try {
+    return (window[LLM_BRIDGE] && window[LLM_BRIDGE].ready && window[LLM_BRIDGE].ready())
+      ? window[LLM_BRIDGE] : null;
+  } catch (e) { return null; }
+}
+/** 原生侧的非敏感配置（baseUrl / model）。读不到就当没配 —— 不猜默认端点。 */
+function llmReadCfg() {
+  const b = llmBridge();
+  if (!b) { LLM.cfg = null; LLM.hasKey = false; return; }
+  let cfg = null, hk = false;
+  try { cfg = JSON.parse(b.getConfig() || "null"); } catch (e) { cfg = null; }
+  try { hk = !!b.hasKey(); } catch (e) { hk = false; }
+  LLM.cfg = (cfg && typeof cfg === "object") ? cfg : {};
+  LLM.hasKey = hk;
+}
+function llmStatusLine() {
+  if (!llmBridge()) return `<div class="note b">${esc(llmDegrade({ inApp: false, hasKey: false }))}</div>`;
+  const c = LLM.cfg || {};
+  const key = LLM.hasKey
+    ? `<b>密钥已配置</b>（存在本机加密区，页面读不到明文）`
+    : `<b>未配置密钥</b>`;
+  const ep = c.baseUrl ? `端点 ${esc(String(c.baseUrl).replace(/^https:\/\//, ""))} · 模型 ${esc(c.model || "未填")}` : "端点未配置";
+  return `<div class="note ${LLM.hasKey && c.baseUrl ? "g" : ""}">${key}<br>${ep}</div>`;
+}
+function renderLlm() {
+  const box = $("llmBox");
+  if (!box) return;
+  llmReadCfg();
+  const b = llmBridge();
+  box.innerHTML = llmStatusLine() + `<div class="row-btn" style="margin-top:10px">
+      <button class="btn gh" style="flex:1" onclick="llmSetKey()">${LLM.hasKey ? "更换密钥" : "配置密钥"}</button>
+      <button class="btn gh" style="flex:1" onclick="openLlm()">问一句</button>
+    </div>
+    ${b ? `<div class="foot" style="text-align:left;padding-top:9px">
+      密钥走原生输入框，页面全程不经手；它不进 localStorage、不进 licai-data.json、也不随台账推云端。
+      模型说的内容<b>不会自动写进台账</b> —— 这里只用来问一句、看看出处。
+    </div>` : ""}`;
+}
+function llmSetKey() {
+  const b = llmBridge();
+  if (!b) return toast(llmDegrade({ inApp: false, hasKey: false }), 4200);
+  /* 输入框是原生的：键入的字符从 IME 直接进 Keystore，不经过 JS 上下文 */
+  try { b.promptKey(); } catch (e) { toast("原生输入框没弹出来：" + e, 4200); }
+}
+function llmClearKey() {
+  const b = llmBridge();
+  if (!b) return toast("只在本机 App 内可清除", 3200);
+  try { b.clearKey(); } catch (e) { return toast("清除失败：" + e, 3600); }
+  llmReadCfg(); renderLlm();
+  toast("已清除本机密钥", 2600);
+}
+function llmSaveCfg() {
+  const b = llmBridge();
+  if (!b) return toast("只在本机 App 内可配置", 3200);
+  const baseUrl = (($("llmBase") || {}).value || "").trim();
+  const model = (($("llmModel") || {}).value || "").trim();
+  const search = !!($("llmSearch") || {}).checked;
+  /* 只交这三样。密钥不在这个 JSON 里 —— 它能写的只有端点与模型名，
+     原生侧（LlmBridge.setConfig）同样只认这三个键，多出来的字段它会丢掉。 */
+  try { b.setConfig(JSON.stringify({ baseUrl, model, search })); }
+  catch (e) { return toast("保存失败：" + e, 3600); }
+  llmReadCfg();
+  /* 设置页那一行的状态文案是上一次渲染的，端点变了不重画就会停在「端点未配置」 */
+  renderLlm();
+  toast("已保存端点与模型", 2400);
+  openLlm();
+}
+/** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout 五种。 */
+function llmResultHtml() {
+  if (LLM.phase === "running")
+    return `<div class="note b">已发出，等回答…（一次请求一次计费，超时不会自动重发）</div>`;
+  if (LLM.phase === "timeout")
+    return `<div class="note r">等满 ${Math.round(LLM_TIMEOUT_MS / 1000)} 秒没回。<b>这一次可能已经计费</b>，
+      确认端点状态再重试。</div>`;
+  if (LLM.phase === "error")
+    return `<div class="note r">${esc(LLM.err || "端点没返回可用内容")}</div>`;
+  const r = LLM.res;
+  if (!r) return "";
+  const src = r.sources.length
+    ? `<div class="card-t" style="margin:14px 0 6px"><h2 style="font-size:14px">出处</h2>
+         <span class="hint">URL 与发布时间两样齐才列进来</span></div>
+        <table class="navtbl"><tbody>${r.sources.map(s =>
+          `<tr><td style="text-align:left"><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || s.host)}</a>
+           <div class="cap">${esc(s.host)} · 发布于 ${esc(s.publishedAt)}</div></td></tr>`).join("")}</tbody></table>`
+    : `<div class="note b" style="margin-top:12px">这次<b>没有拿到可核实的出处</b>（缺链接或缺发布时间）。
+        按口径它不能进台账，只能当参考。</div>`;
+  const drop = r.dropped.length
+    ? `<div class="cap" style="padding-top:8px">另有 ${r.dropped.length} 条被丢弃：${esc(r.dropped.map(d => (d.title || d.url || "无名") + "（" + d.why + "）").join("；"))}</div>`
+    : "";
+  const usage = (r.usage.input || r.usage.output)
+    ? `<div class="cap" style="padding-top:8px">形状 ${esc(r.shape)} · 输入 ${r.usage.input} / 输出 ${r.usage.output} token</div>` : "";
+  return `<div class="note" style="margin-top:12px;white-space:pre-wrap">${esc(r.text)}</div>${src}${drop}${usage}`;
+}
+function openLlm() {
+  closeSheet();
+  if (!llmBridge()) { renderLlm(); return toast(llmDegrade({ inApp: false, hasKey: false }), 4200); }
+  llmReadCfg();
+  const c = LLM.cfg || {};
+  openSheet(`<div class="sheet-t"><h3>模型接入</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    ${llmStatusLine()}
+    <div class="card-t" style="margin:14px 0 6px"><h2 style="font-size:14px">端点与模型</h2>
+      <span class="hint">存原生侧，不进 localStorage</span></div>
+    <div class="field"><label>端点（填 https 的 /v1 根地址）</label>
+      <input id="llmBase" placeholder="https://api.example.com/v1" value="${esc(c.baseUrl || "")}"></div>
+    <div class="field"><label>模型名</label>
+      <input id="llmModel" placeholder="例如 gpt-4o-mini" value="${esc(c.model || "")}"></div>
+    <div class="chk-row"><label><input type="checkbox" id="llmSearch" ${c.search === false ? "" : "checked"}>
+      要求端点做联网检索</label></div>
+    <div class="cap" style="padding-top:2px">出处就从检索里来；关掉它多半一条来源都拿不到。</div>
+    <div class="row-btn" style="margin-top:2px">
+      <button class="btn gh" style="flex:1" onclick="llmSaveCfg()">保存端点</button>
+      <button class="btn gh" style="flex:1" onclick="llmClearKey()">清除密钥</button>
+    </div>
+    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">问一句</h2>
+      <span class="hint">答案不自动入账</span></div>
+    <div class="field"><textarea id="llmQ" rows="3" placeholder="例如：这只产品最短持有期到什么时候？">${esc(LLM.q)}</textarea></div>
+    <div class="row-btn" style="margin-top:8px">
+      <button class="btn pri" style="flex:1" onclick="llmAsk()">${LLM.phase === "running" ? "等待中…" : (llmCanRetry(LLM) ? "重试" : "发起")}</button>
+    </div>
+    ${LLM.costWarn ? `<div class="note r" style="margin-top:8px">这一句发出去就是<b>一次新的计费</b>；
+      上一轮如果已经到端点，那一次也算 —— 代码不会自己重发，重发只由你点。</div>` : ""}
+    <div id="llmOut" style="margin-top:10px">${llmResultHtml()}</div>
+    <div class="cap" style="padding:12px 0 0">
+      原生侧只负责发请求与回原文，解析与来源分级全在页面里（js/domain/llm.js，有测试）。
+      发出去与收回来的形状都按 Responses 形制（含 web_search_preview）写，
+      <b>真实端点还没实测过</b>：认不得就明说认不得，不补字段、不自动重发。
+    </div>`);
+}
+function llmAsk() {
+  const b = llmBridge();
+  if (!b) return toast(llmDegrade({ inApp: false, hasKey: false }), 4200);
+  if (LLM.phase === "running") return toast("上一句还在等，不重复发（重复发就是重复计费）", 3600);
+  const el = $("llmQ");
+  LLM.q = el ? String(el.value || "") : LLM.q;
+  if (!LLM.q.trim()) return toast("先写一句要问的话", 2600);
+  if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) return toast(llmDegrade({ inApp: true, hasKey: LLM.hasKey }) || "先配端点", 4200);
+  LLM.costWarn = llmCanRetry(LLM);
+  LLM.phase = "running"; LLM.res = null; LLM.err = ""; LLM.meta = null; LLM.buf = null;
+  LLM.id = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  /* 计时器和提示说的是同一个数：到 LLM_TIMEOUT_MS 就落「超时」，不加缓冲。
+     原生侧的整体预算（110 秒）比它小，所以真超时是那边先断、这边兜住没收到回调的情况。 */
+  const dead = setTimeout(() => llmTimeout(LLM.id), LLM_TIMEOUT_MS);
+  LLM.timer = dead;
+  try { b.ask(LLM.id, JSON.stringify(llmReq({ input: LLM.q, instructions: "只根据给出的台账数据回答；缺什么就说缺什么。" }))); }
+  catch (e) { clearTimeout(dead); LLM.timer = 0; LLM.phase = "error"; LLM.err = "桥调用失败：" + e; }
+  openLlm();
+}
+function llmTimeout(id) {
+  if (LLM.phase !== "running" || LLM.id !== id) return;
+  LLM.phase = "timeout"; LLM.err = ""; LLM.buf = null;
+  openLlm();
+}
+/* 原生回传的两个全局函数：名字与 LlmBridge.java 里拼的 JS 必须逐字一致，
+   scripts/verify-web.sh 第 3 项就是比对这个（对不上是「点了没反应」，构建不会红）。 */
+window.__llmChunk = function (id, seq, total, text) {
+  if (!id || String(id) !== LLM.id || LLM.phase !== "running") return;   /* 迟到的一律丢，别串到下一轮 */
+  const r = llmChunkFeed(LLM.buf, Number(seq), Number(total), String(text == null ? "" : text));
+  LLM.buf = r.st;
+  if (r.error) { LLM.phase = "error"; LLM.err = "分块组装失败：" + r.error; openLlm(); }
+};
+window.__llmDone = function (id, metaJson) {
+  if (!id || String(id) !== LLM.id) return;
+  if (LLM.timer) { clearTimeout(LLM.timer); LLM.timer = 0; }
+  if (LLM.phase !== "running") return;                 /* 已经按超时落定：迟到的答案不再翻案 */
+  let meta = null;
+  try { meta = JSON.parse(String(metaJson || "{}")); } catch (e) { meta = null; }
+  const body = LLM.buf ? llmChunkJoin(LLM.buf) : "";
+  LLM.meta = meta;
+  if (!meta || !meta.ok) {
+    LLM.phase = "error";
+    LLM.err = (meta && meta.error) ? String(meta.error) : "原生侧没回元信息";
+    if (meta && meta.status) LLM.err += "（HTTP " + meta.status + "）";
+    LLM.buf = null;
+    openLlm(); return;
+  }
+  let obj = null;
+  try { obj = JSON.parse(body); } catch (e) { obj = null; }
+  const res = llmParse(obj);
+  LLM.phase = res.ok ? "done" : "error";
+  LLM.res = res;
+  LLM.err = res.ok ? "" : (res.error || "响应里没有正文");
+  LLM.buf = null;
+  openLlm();
+};
+/* 原生侧改完配置 / 密钥后叫这一下，页面重读一次再重画。
+   msg 非空是原生在回一句话（多半是「这次没保存」），不显示出来用户只会觉得点了没反应。 */
+window.__llmCfg = function (msg) {
+  const m = String(msg == null ? "" : msg);
+  llmReadCfg();
+  renderLlm();
+  const s = $("mask");
+  if (s && s.classList.contains("show")) openLlm();
+  if (m) toast(m, 4200);
+};
 
 /* 粘贴内容 → 产品键：纯函数已拆到 js/core/paste.js（可被 node --test 直接测）。
    这里只保留依赖 DATA / DOM 的去重、预览与落库。 */
@@ -4228,7 +4444,7 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openAna, openAnaIndex, openDisc, openLinkAdd, openMonthly,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmClearKey, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,

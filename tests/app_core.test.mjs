@@ -948,3 +948,79 @@ test("体检入口：台账页一行、交易中心一行，行内小链接已�
   assert.ok(!src.includes("ana-go"), "明细列表那颗行内「体检」小链接应已撤掉（入口改成整行）");
   assert.ok(src.includes("function openAnaIndex()"), "openAnaIndex 没实现");
 });
+
+/* ---- 模型接入（T3）的页面侧接线 ----
+   桥面清单是跨仓约定：页面调的方法名必须在私有仓 LlmBridge.java 里存在，
+   而那一侧的比对在 scripts/verify-web.sh。这里先把「页面不许超出清单」钉住，
+   否则清单会从 JS 这边悄悄长大。 */
+test("T3 桥面：页面只调清单里的方法，三个回传全局函数都在", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const mod = readFileSync(new URL("../js/domain/llm.js", import.meta.url), "utf8");
+  const mm = mod.match(/LLM_BRIDGE_METHODS = \[([^\]]*)\]/);
+  assert.ok(mm, "llm.js 里找不到桥面清单");
+  const manifest = mm[1].split(",").map(s => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+  const i = src.indexOf("T3 · 模型接入"), j = src.indexOf("/* 粘贴内容 → 产品键");
+  assert.ok(i > 0 && j > i, "T3 代码块的位置变了，切片失败");
+  const block = src.slice(i, j);
+  const used = new Set();
+  for (const m of block.matchAll(/\bb\.([A-Za-z][A-Za-z0-9_]*)\s*\(/g)) used.add(m[1]);
+  assert.ok(used.size >= 5, "只抓到 " + used.size + " 个桥方法调用，切片可能切错了");
+  const extra = [...used].filter(n => manifest.indexOf(n) < 0);
+  assert.deepEqual(extra, [], "页面调了清单外的桥方法：" + extra.join(", "));
+  for (const fn of ["__llmChunk", "__llmDone", "__llmCfg"])
+    assert.ok(src.includes("window." + fn + " ="), "原生要回调 " + fn + "，页面里没定义");
+});
+
+test("T3 铁律 #6：密钥与端点不落 localStorage，那一节只在 App 里出现", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  /* 扫整份 app.js 会被既有功能误伤：AIX_LS.token 存的是授权会话令牌，跟模型无关。
+     所以按 T3 那一节的切片来扫——那一节不许有真的存储调用（注释里写「不进 localStorage」
+     是说明文字，不算，因此正则必须带调用括号）。 */
+  const i = src.indexOf("T3 · 模型接入"), j = src.indexOf("/* 粘贴内容 → 产品键");
+  assert.ok(i > 0 && j > i, "T3 代码块的位置变了，切片失败");
+  const block = src.slice(i, j);
+  const bad = block.match(/\b(?:lsSet|lsGet|lsDel)\s*\(|localStorage\s*\.\s*(?:setItem|getItem|removeItem|clear)\s*\(/g) || [];
+  assert.deepEqual(bad, [], "模型接入这一节有存储调用：" + bad.join(" | "));
+  /* 再看整份文件：任何带 llm / apiKey 字样的 localStorage 键名都不许存在。 */
+  const named = src.match(/(lsSet|lsGet|lsDel)\s*\(\s*["'`][^"'`]*(llm|apiKey|api_key)/gi) || [];
+  assert.deepEqual(named, [], "有以 llm / apiKey 命名的 localStorage 键：" + named.join(" | "));
+  assert.ok(/<div class="card app-only">\s*<div class="card-t"><h2>模型接入/.test(html),
+    "模型接入那张卡没标 app-only：网页版会看见一个用不了的小节");
+});
+
+/* 铁律 #6 的另外两个具体落点：写回原生的那份 JSON 只有三样，
+   而「等多久」这件事页面与原生必须是同一个数。两条都是从用户能看见的文案倒推的：
+   提示写着「等满 120 秒」，代码却是 +15000 秒的缓冲，那句话就是假话。 */
+test("T3 配置只交三样；超时用的是常量；原生回的话有地方显示", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const i = src.indexOf("T3 · 模型接入"), j = src.indexOf("/* 粘贴内容 → 产品键");
+  const block = src.slice(i, j);
+  assert.ok(/b\.setConfig\(JSON\.stringify\(\{ *baseUrl, *model, *search *\}\)\)/.test(block),
+    "写回原生的配置不再是那三样（baseUrl / model / search），清单得跟着改");
+  const sends = block.match(/JSON\.stringify\(\{[^}]*\}\)/g) || [];
+  const dirty = sends.filter(s => /key|token|secret|authorization/i.test(s));
+  assert.deepEqual(dirty, [], "有把凭据写进请求体的路径：" + dirty.join(" | "));
+  assert.ok(/setTimeout\(\(\) *=> *llmTimeout\(LLM\.id\), *LLM_TIMEOUT_MS\)/.test(block),
+    "计时器不是直接用 LLM_TIMEOUT_MS：文案里的「等满 N 秒」和实际等的数会不一样");
+  assert.ok(!/LLM_TIMEOUT_MS *[+-] *[0-9]/.test(block), "超时被加了缓冲，两处说的不再是同一个数");
+  assert.ok(/window\.__llmCfg = function \(msg\)/.test(block),
+    "原生回的那句「这次没保存」没有入口显示，用户只会觉得点了没反应");
+  assert.ok(/if \(m\) *toast\(m/.test(block), "__llmCfg 收到 msg 却没显示出来");
+});
+
+/* 铁律 #5 在 UI 上的落点：这一句的文案必须一直挂着（等待中也挂），
+   否则用户看到的是「重试」这颗按钮而没有「这次也要钱」的提示。 */
+test("T3 铁律 #5：重发消息挂在发起之后的每一屏，代码里没有自动重发", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const i = src.indexOf("T3 · 模型接入"), j = src.indexOf("/* 粘贴内容 → 产品键");
+  const block = src.slice(i, j);
+  assert.ok(/LLM\.costWarn = llmCanRetry\(LLM\)/.test(block), "发起时没记下「这是第 N 次发」");
+  const note = block.match(/LLM\.costWarn \? `([^`]*)`/);
+  assert.ok(note, "计费提示这一行不在");
+  assert.ok(/计费/.test(note[1]) && /不会自己重发/.test(note[1]), note && note[1]);
+  assert.ok(!/costWarn[^\n]*&&[^\n]*llmCanRetry/.test(block),
+    "提示被 llmCanRetry 二次门住：请求在飞的这一屏正好不显示");
+  /* 代码路径里除了用户点发起，没有任何地方再调 ask */
+  assert.equal((block.match(/\bb\.ask\(/g) || []).length, 1, "ask 的调用点不止一处");
+});
