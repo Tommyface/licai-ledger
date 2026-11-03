@@ -29,6 +29,7 @@ import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
   boardCols, monthZeroDays, boardSort } from "./js/domain/board.js";
 import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
+import { DISC_TIERS, normDisc, parseDiscForm, discGaps, feeRateFor } from "./js/core/disc.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -45,7 +46,7 @@ const LS_BD = "licai.bdCols";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v59";
+const APP_VER = "v60";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1490,6 +1491,159 @@ function saveProduct(pid) {
   autoPush();
 }
 
+/* ============================================================
+   底层配置与申赎规则（T1）
+   ------------------------------------------------------------
+   口径全部在 js/core/disc.js（null 是不知道 / ratePct 是百分数 / 分档是 [from,to)），
+   这里只做三件事：把字段拼成一张卡、把表单收进 DATA、把缺失如实显示出来。
+   T1 阶段只接受手工录入：检索回填要等模型桥（T3）之后，那时复用的还是这套字段
+   和这个表单，不另开通路 —— 否则「手工录的」和「回填的」会有两套空值语义，
+   而 T7 的规则引擎只认一处。
+   ============================================================ */
+const DISC_TIER_LABEL = {
+  official: "发行机构官网 / 理财网信披原文",
+  disclosure: "代销渠道转发页",
+  media: "媒体报道",
+  unknown: "出处不明"
+};
+const DISC_GAP_LABEL = {
+  lockDays: "最短持有 / 封闭天数", openRule: "开放赎回安排", feeRedeem: "赎回费分档",
+  assets: "底层资产配置", investScope: "投资范围", source: "出处链接"
+};
+const DISC_STATUS_TEXT = { none: "未录入", manual: "手工录入", auto: "检索回填" };
+/* 有内容却没出处 = 脏数据指示器，不是「未录入」：
+   前端写入路径（parseDiscForm）本来就不允许这种组合存进去，会出现只可能是
+   手工改过的数据或别的设备推上来的快照。说成「未录入」是撒谎（屏幕上明明有值），
+   说成「手工录入」更糟 —— 那等于给一条追不到处的规则盖了可信的章。 */
+function discHasContent(d) {
+  return d.lockDays !== null || !!d.openRule || !!d.investScope || d.feeRedeem.length > 0 || d.assets.length > 0;
+}
+function discStatusText(p) {
+  const d = normDisc(p && p.disc);
+  if (!discHasContent(d)) return DISC_STATUS_TEXT.none;
+  if (!d.source) return "缺出处";
+  return DISC_STATUS_TEXT[d.status] || DISC_STATUS_TEXT.none;
+}
+
+/* 一张卡：有值就照录展示，没值就写「未披露」并说清它挡住后面哪一步。
+   不猜、不填默认值 —— 未披露的赎回费在换仓建议里只能是「信息不足」，
+   这里若显示成 0%，用户会以为赎回不要钱。 */
+function discCard(p, pos) {
+  const d = normDisc(p.disc);
+  const gaps = discGaps(p.disc);
+  const rows = [];
+  rows.push(`<tr><td>最短持有 / 封闭</td><td>${d.lockDays === null
+    ? `<span class="muted">未披露</span>` : d.lockDays === 0
+      ? "无持有期限制" : d.lockDays + " 天"}</td></tr>`);
+  rows.push(`<tr><td>开放与赎回安排</td><td>${d.openRule ? esc(d.openRule) : `<span class="muted">未披露</span>`}</td></tr>`);
+  rows.push(`<tr><td>赎回费分档</td><td>${d.feeRedeem.length
+    ? d.feeRedeem.map(f => `${f.from}–${f.to === null ? "不限" : f.to} 天 <b>${f.ratePct}%</b>`).join("<br>")
+    : `<span class="muted">未披露 · 换仓成本算不了</span>`}</td></tr>`);
+  rows.push(`<tr><td>底层资产配置</td><td>${d.assets.length
+    ? d.assets.map(a => `${esc(a.name)}${a.pct === null ? "" : " <b>" + a.pct + "%</b>"}`).join("<br>")
+    : `<span class="muted">未披露</span>`}</td></tr>`);
+  rows.push(`<tr><td>投资范围（短引）</td><td>${d.investScope ? esc(d.investScope) : `<span class="muted">未披露</span>`}</td></tr>`);
+  /* 已持仓时把「当前落在哪一档」直接说出来了，用户才看得见录进去的东西有没有被用上。
+     只是展示，不做任何建议 —— 判定属于 T7。 */
+  const holdRate = pos && pos.shares > 0 && typeof pos.holdDays === "number"
+    ? feeRateFor(p.disc, pos.holdDays) : null;
+  /* 把「录进去的档位真的被取到了」显示出来：只显示落在哪一档，不显示任何建议。
+     判定与措辞属于 T7，这里越界一步就会让用户以为换仓结论已经出来了。 */
+  const holdLine = typeof holdRate === "number"
+    ? `<div class="tip" style="margin-top:8px">按当前持有 ${Math.floor(pos.holdDays)} 天，赎回费落在 <b>${holdRate}%</b> 这一档（仅取档展示，换仓判断还没做）。</div>`
+    : "";
+  const src = d.source
+    ? `<div class="tip" style="margin-top:8px">出处：${esc(DISC_TIER_LABEL[d.source.tier] || d.source.tier)}`
+      + `${d.source.publishedAt ? " · 披露 " + esc(d.source.publishedAt) : ""}`
+      + `｜<a href="${esc(d.source.url)}" target="_blank" rel="noopener">${esc(d.source.url.slice(0, 60))}${d.source.url.length > 60 ? "…" : ""}</a></div>`
+    : "";
+  const warn = gaps.length && discHasContent(d)
+    ? `<div class="tip" style="margin-top:8px">⚠️ 还缺 ${gaps.length} 项（${gaps.map(g => esc(DISC_GAP_LABEL[g] || g)).join("、")}），缺失项在持仓分析里只会得到「信息不足」，不会由模型补猜。</div>`
+    : "";
+  return `<table class="navtbl"><thead><tr><th>披露项</th><th>录入内容</th></tr></thead><tbody>${rows.join("")}</tbody></table>
+    ${src}${holdLine}${warn}
+    <div class="cap" style="padding:6px 0 0">口径为照录披露原文：null 表示未披露，与「0」不同义；占比与费率均为百分数本身。</div>`;
+}
+
+/* 录入 / 编辑表单（独立一张 sheet，不塞进「添加产品」：
+   添加时手上通常只有代码，披露文件是之后另找时间读的。） */
+/* 从产品详情进来时先关掉那一层：closeSheet + openSheet 必须在同一个同步拍里，
+   弹层才是「替换」而不是叠加（openSheet 里靠 sheetPopPending 补压哨兵）。
+   入口名写成 onclick 的第一个调用，是因为 handlers.test.mjs 的桥接扫描只认
+   on*="fn(...)" 里的第一个函数名 —— 用「closeSheet();openDisc(...)」这种多语句，
+   openDisc 会被判成挂了 window 却没人调的多余名字。 */
+function openDisc(pid) {
+  closeSheet();
+  const p = DATA.products.find(x => x.id === pid);
+  if (!p) return toast("产品不存在，请刷新后重试");
+  const d = normDisc(p.disc);
+  const feeText = d.feeRedeem.map(f => `${f.from}${f.to === null ? "+" : "-" + f.to} ${f.ratePct}`).join("\n");
+  const asText = d.assets.map(a => `${a.name}${a.pct === null ? "" : " " + a.pct}`).join("\n");
+  const tierOpt = DISC_TIERS.map(t => `<option value="${t}"${d.source && d.source.tier === t ? " selected" : ""}>${esc(DISC_TIER_LABEL[t] || t)}</option>`).join("");
+  openSheet(`<div class="sheet-t"><h3>底层配置与申赎规则</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    <div class="note b" style="margin-bottom:12px">
+      给 <b>${esc(prodLabel(p))}</b> 录入披露原文里的规则。<br>
+      只照录，不概括：<b>留空就是「未披露」</b>，后面的持仓分析遇到空项只会输出「信息不足」，
+      不会替它猜一个数 —— 所以宁可不填，也别填一个看着像的。
+    </div>
+    <div class="field"><label>最短持有 / 封闭天数</label>
+      <input id="dLock" inputmode="numeric" placeholder="如 7；开放式无持有期填 0" value="${d.lockDays === null ? "" : d.lockDays}">
+      <div class="tip">「XX 天持有期」就填 XX；确需表达「没有持有期」请填 0，留空是未披露</div>
+    </div>
+    <div class="field"><label>开放与赎回安排</label>
+      <input id="dOpen" placeholder="如 每周二开放赎回，T+1 到账" value="${esc(d.openRule)}">
+    </div>
+    <div class="field"><label>赎回费分档（每行一档）</label>
+      <textarea id="dFee" rows="4" placeholder="0-7 1.50&#10;7-30 0.50&#10;30+ 0">${esc(feeText)}</textarea>
+      <div class="tip">写成「起始-结束 费率%」，最后一档没有上限就写「30+ 0」；区间必须首尾相接，有空洞会被拦下</div>
+    </div>
+    <div class="field"><label>底层资产配置（每行一项）</label>
+      <textarea id="dAssets" rows="4" placeholder="非标准化债权类资产 42.5&#10;同业存单 30&#10;债券 27.5">${esc(asText)}</textarea>
+      <div class="tip">写成「名称 占比%」；名称照披露原文（如「现金及银行存款」「非标准化债权类资产」「信托」）</div>
+    </div>
+    <div class="field"><label>投资范围（只摘关键句）</label>
+      <textarea id="dScope" rows="3" placeholder="如 固定收益类资产不低于 80%…">${esc(d.investScope)}</textarea>
+    </div>
+    <div class="note" style="margin:6px 0 10px">出处是必填项：填了内容就得说清从哪来，否则保存会被拦下。</div>
+    <div class="field"><label>披露页链接</label>
+      <input id="dUrl" placeholder="https://…" value="${esc(d.source ? d.source.url : "")}">
+    </div>
+    <div class="field"><label>来源类型</label>
+      <select id="dTier">${tierOpt}</select>
+    </div>
+    <div class="field"><label>披露日期（页面上写的那个日期）</label>
+      <input id="dPub" placeholder="如 2026-09-30" value="${esc(d.source ? d.source.publishedAt : "")}">
+    </div>
+    <div class="row-btn">
+      <button class="btn gh" style="flex:1" onclick="closeSheet()">取消</button>
+      <button class="btn pri" style="flex:1" onclick="saveDisc('${p.id}')">保存</button>
+    </div>`);
+}
+
+function saveDisc(pid) {
+  const p = DATA.products.find(x => x.id === pid);
+  if (!p) return toast("产品不存在，请刷新后重试");
+  const { disc, errors } = parseDiscForm({
+    lockDays: $("dLock").value,
+    openRule: $("dOpen").value,
+    feeRedeem: $("dFee").value,
+    assets: $("dAssets").value,
+    investScope: $("dScope").value,
+    sourceUrl: $("dUrl").value,
+    sourceTier: $("dTier").value,
+    sourceTitle: "",
+    sourcePublishedAt: $("dPub").value
+  });
+  /* 有错就一条都不存：半截保存会让产品看起来「有配置」，
+     而 T7 会拿着缺档的规则算出看不出错的建议。 */
+  if (errors.length) return toast(errors[0], 4200);
+  p.disc = disc;
+  saveLocal(); closeSheet();
+  toast(disc.status === "none" ? "已清空该项配置（按未披露处理）" : "底层配置已保存", 2000);
+  renderProdDetail();
+  autoPush();
+}
+
 /* 粘贴内容 → 产品键：纯函数已拆到 js/core/paste.js（可被 node --test 直接测）。
    这里只保留依赖 DATA / DOM 的去重、预览与落库。 */
 
@@ -1961,8 +2115,13 @@ function renderProdDetail() {
       <tbody>${rows.join("")}</tbody>
     </table>` : `<div class="empty">暂无净值</div>`}
 
+    <div class="card-t" style="margin:16px 0 8px"><h2 style="font-size:14px">底层配置与申赎规则</h2><span class="hint">${esc(discStatusText(p))} · 照录披露原文</span></div>
+    ${discCard(p, pos)}
     <div class="row-btn" style="margin-top:14px">
-      <button class="btn gh" style="flex:1" onclick="closeSheet();editProd('${p.id}')">编辑产品</button>
+      <button class="btn gh" style="flex:1" onclick="openDisc('${p.id}')">录入 / 修改配置</button>
+      <button class="btn pri" style="flex:1" onclick="closeSheet();editProd('${p.id}')">编辑产品</button>
+    </div>
+    <div class="row-btn" style="margin-top:8px">
       <button class="btn pri" style="flex:1" onclick="closeSheet();openNav('${p.id}')">录入净值</button>
     </div>`);
 }
@@ -3905,9 +4064,9 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openLinkAdd, openMonthly,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, openDisc, openLinkAdd, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
-  queryProduct, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink,
+  queryProduct, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,
   setProdRange, setRange, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });
