@@ -992,15 +992,22 @@ test("T3 铁律 #6：密钥与端点不落 localStorage，那一节只在 App �
 /* 铁律 #6 的另外两个具体落点：写回原生的那份 JSON 只有三样，
    而「等多久」这件事页面与原生必须是同一个数。两条都是从用户能看见的文案倒推的：
    提示写着「等满 120 秒」，代码却是 +15000 秒的缓冲，那句话就是假话。 */
-test("T3 配置只交三样；超时用的是常量；原生回的话有地方显示", () => {
+test("T3 配置交出去的是那份清单；超时用的是常量；原生回的话有地方显示", () => {
   const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   const i = src.indexOf("T3 · 模型接入"), j = src.indexOf("/* 粘贴内容 → 产品键");
   const block = src.slice(i, j);
-  assert.ok(/b\.setConfig\(JSON\.stringify\(\{ *baseUrl, *model, *search *\}\)\)/.test(block),
-    "写回原生的配置不再是那三样（baseUrl / model / search），清单得跟着改");
-  const sends = block.match(/JSON\.stringify\(\{[^}]*\}\)/g) || [];
-  const dirty = sends.filter(s => /key|token|secret|authorization/i.test(s));
-  assert.deepEqual(dirty, [], "有把凭据写进请求体的路径：" + dirty.join(" | "));
+  /* v67 起清单是「三样起步 + 新壳再加一个 apiStyle」。这里钉的是**能写哪些键**这份清单本身：
+     清单变了而测试没跟着变，verify-web.sh 与原生 setConfig 的白名单就会各说各话。 */
+  assert.match(block, /const cfgOut = \{ *baseUrl, *model, *search *\};/,
+    "写回原生的配置清单不再是那三样（baseUrl / model / search），这里得跟着改");
+  assert.match(block, /b\.setConfig\(JSON\.stringify\(cfgOut\)\)/,
+    "setConfig 写的不是那份组装好的对象：清单变成隐式的了");
+  const writes = [block.match(/const cfgOut = \{[^}]*\};/)[0]]
+    .concat(block.match(/cfgOut\.[A-Za-z]+ *=/g) || []);
+  assert.ok(writes.length >= 2, "apiStyle 没有写进 cfgOut：那这一项存到哪儿去了");
+  for (const w of writes) {
+    assert.ok(!/key|token|secret|authorization/i.test(w), "有把凭据写进原生配置的路径：" + w);
+  }
   assert.ok(/setTimeout\(\(\) *=> *llmTimeout\(LLM\.id\), *LLM_TIMEOUT_MS\)/.test(block),
     "计时器不是直接用 LLM_TIMEOUT_MS：文案里的「等满 N 秒」和实际等的数会不一样");
   assert.ok(!/LLM_TIMEOUT_MS *[+-] *[0-9]/.test(block), "超时被加了缓冲，两处说的不再是同一个数");
@@ -1162,4 +1169,94 @@ test("v66 屏上的只数与字数上限用模块常量，没有第二处硬编�
   const hard = (block.match(/(\d+)\s*(只|字)/g) || []).map(s => s.trim());
   assert.deepEqual(hard, [], "文案里写死了「N 只 / N 字」：" + hard.join("、"));
   assert.ok(block.includes("LLM_SNAPSHOT_MAX_ITEMS"), "只数没用模块里那个常量");
+});
+
+/* ---- v67（R1）：协议形制 —— 页面只交一个选择，形状只在原生拼 ----
+   星火这类 OpenAI 兼容网关要的是 Chat Completions（messages[] + /chat/completions），
+   而壳里那份是 Responses 形制。这一节钉的四件事：
+     · 「协议」这一行只在认这个键的壳上画 —— 设了不生效比不给这一项更坏；
+     · 判定看的是 getConfig 的 JSON 里键在不在，不是版本号、也不是值对不对；
+     · apiStyle 只在能画出来的时候才发出去，旧壳连这个键都不发；
+     · 页面不许自己拼 messages —— 同一个形状两处各写一遍迟早对不上，错了那一份在花钱。 */
+function t3Fn(block, name) {
+  const k = block.indexOf("function " + name + "(");
+  assert.ok(k > 0, name + " 不在了：这一版的入口变了");
+  const end = block.indexOf("\n}\n", k);
+  assert.ok(end > k, name + " 的函数体切不出来");
+  return block.slice(k, end);
+}
+
+test("v67 「协议」这一行只在认这个键的壳上画，旧壳换成一句实话", () => {
+  const { block } = t3Slice();
+  assert.match(block, /const canStyle = llmCanStyle\(\);/, "没先问这台壳认不认就画选择器");
+  assert.match(block, /\$\{canStyle \? `<div class="field"><label>协议形制/, "选择器不再跟着能力走");
+  assert.match(block, /还不支持换协议（更新 App 之后这一项才会出现）/, "旧壳上没说明白：这一项怎么不见了");
+  const gate = block.indexOf("${canStyle ?");
+  const sel = block.indexOf('<select id="llmStyle">');
+  const other = block.indexOf("还不支持换协议");
+  assert.ok(gate > 0 && sel > gate && other > sel,
+    `「无这一项」那段文案不该出现在 canStyle 为真的分支里：gate=${gate} sel=${sel} cap=${other}`);
+});
+
+test("v67 能力判的是键在不在 —— 不比版本号，也不按值猜", () => {
+  const { block } = t3Slice();
+  const fn = t3Fn(block, "llmCanStyle");
+  assert.match(fn, /hasOwnProperty\.call\(c, *"apiStyle"\)/,
+    "不按键判：旧壳会被读成一个「看起来支持」的默认值");
+  assert.match(fn, /const c = LLM\.cfg;/, "判定的数据源不是桥回来的配置");
+  for (const bad of ["APP_VER", "MIN_APP_VER", "localStorage", "navigator.userAgent"]) {
+    assert.ok(!fn.includes(bad), "llmCanStyle 里出现了 " + bad + "：能力应当从 getConfig 读，不是猜");
+  }
+});
+
+test("v67 保存时只有这台壳认才交 apiStyle，旧壳连这个键都不发", () => {
+  const { block } = t3Slice();
+  const fn = t3Fn(block, "llmSaveCfg");
+  assert.match(fn, /if \(canStyle\) \{[\s\S]{0,240}cfgOut\.apiStyle *=/,
+    "apiStyle 无条件发出去了：旧壳把它当多余键丢掉，用户选了个不生效的东西");
+  assert.match(fn, /b\.setConfig\(JSON\.stringify\(cfgOut\)\)/, "setConfig 写的不是组装好的那份");
+  assert.ok(!/setConfig\(JSON\.stringify\(\{ *baseUrl/.test(fn),
+    "又发回写死的那三个键了：新壳上加键得走那个组装好的对象");
+  assert.ok(!/apiKey|secret|token/i.test(JSON.stringify(fn.match(/cfgOut\.[A-Za-z]+/g) || [])),
+    "往配置里塞了凭据形状的键");
+});
+
+test("v67 协议值只认那两个，认不出的回 responses 而不是原样转发", () => {
+  const { block } = t3Slice();
+  const fn = t3Fn(block, "llmSaveCfg");
+  assert.match(fn, /\$\(\s*"llmStyle"\s*\)/, "读的不是那个选择框");
+  assert.match(fn, /=== *"chat" \? "chat" : "responses"/,
+    "自由文本原样转发了：值应当收敛到两个，别把「未知」发给端点");
+});
+
+test("v67 选择器不新增 window 上的入口，保存还是走那一个按钮", () => {
+  const { block } = t3Slice();
+  assert.match(block, /<select id="llmStyle">/, "选择框上挂了新属性：多一个入口就多一处能走歪的路");
+  assert.ok(!/onchange="llmSave/.test(block), "选择框自己就保存：改一个键发一次，保存不再是那一个动作");
+  assert.match(block, /onclick="llmSaveCfg\(\)"/, "保存那颗按钮不在了");
+  const k = block.indexOf("Object.assign(window, {");
+  assert.ok(k === -1 || block.slice(k).includes("llmSaveCfg"), "内联入口没挂上 llmSaveCfg");
+});
+
+test("v67 发给桥的还是 input 与 instructions 两样，形状没往页面挪", () => {
+  const { block } = t3Slice();
+  assert.ok(!block.includes('"messages"'), "页面开始拼 messages[] 了：形状在两侧各写一遍迟早对不上");
+  assert.ok(!/"tools"|"stream"|role *: *"system"/.test(block), "请求体构造挪进页面了 —— 那一份是花钱的请求");
+  assert.match(block, /input: *llmRoundInput\(LLM\.turns, *q, *snap\)/,
+    "v65/v66 那条 input 的组装变了：多轮或快照其中一路断了");
+  assert.equal((block.match(/\bb\.ask\(/g) || []).length, 1, "ask 的调用点不止一处");
+});
+
+test("v67 保存成功的提示说的是真的存了什么", () => {
+  const { block } = t3Slice();
+  const fn = t3Fn(block, "llmSaveCfg");
+  assert.match(fn, /toast\(canStyle \? "已保存端点、模型与协议" : "已保存端点与模型"/,
+    "旧壳上报「已保存协议」：那一句是假话");
+});
+
+test("v67 屏上仍然写着真实端点没实测（铁律 #10 —— 拿到真凭据前这句不许撤）", () => {
+  const { block } = t3Slice();
+  assert.match(block, /真实端点仍未实测/, "把「没实测」这句撤了：页面上看着像已经验过线上");
+  assert.ok(!/已实测|实测过了|验证过的端点/.test(block), "文案说成了实测过");
+  assert.match(block, /认不得就明说认不得/, "降级那句不在了");
 });

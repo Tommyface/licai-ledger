@@ -2,7 +2,7 @@
 /* ---------- 模型接入（T3）：请求构造 / 响应解析 / 来源分级 / 分块组装 ----------
    从 app.js 拆出来的纯函数（同 analysis.js / board.js 的做法）：拆出来才能被 node --test 钉住。
 
-   ★ 这一层的六条口径（改任何一条都要同步改 tests/llm.test.mjs）：
+   ★ 这一层的七条口径（改任何一条都要同步改 tests/llm.test.mjs）：
      1. **JS 永不经手 key。** 请求里没有 key 字段、没有 Authorization 头，
         llmReq() 的输出会被原样丢给 window.NativeLlm.ask()，由原生侧补鉴权。
         所以这里连「key」这个字都不许出现成字段名 —— 出现了就等于承诺 JS 能填。
@@ -24,10 +24,18 @@
         出这台机器的字段是白名单那十个（名称/机构/代码/风险级/净值/净值日期/份额/成本/持有天数/状态），
         入参里混进别的键也不会出来；本机开着「隐藏金额」时份额与成本跟着一起藏 ——
         屏幕上被你藏掉的数，不许从这条路上漏出去。
+     7. **协议形制由原生侧拼，页面不碰。**（v67 · R1）页面交出去的还是那两样（input / instructions），
+        换成 Chat Completions 的 messages[] 是 LlmBridge.ask() 的事 —— 同一个形状两处各写一遍迟早对不上，
+        而对不上的那一份是花钱的请求。设置里那个「协议」选择器只在**新壳**上出现：
+        getConfig 回来的 JSON 里没有 apiStyle 这个键，就说明这台机器的壳还不认，那一行不画。
+        另外，星火这类 OpenAI 兼容网关的失败是「HTTP 200 + body 里 code 非 0」，
+        llmParse 认它是**业务错误**，把 code 与官方 message 原样交回用户 —— 不翻译、不美化、不归类。
 
-   ★ v65 只改页面这一侧：桥面七个方法一字未动，所以不发包（壳里那份桥还是 v64 编进去的）。
+   ★ v65 / v66 只改页面这一侧：桥面七个方法一字未动，所以不发包（壳里那份桥还是 v64 编进去的）。
      代价说清楚：壳加载的是 APK 里的 assets/www（MainActivity.START_URL），不是 GitHub Pages，
      所以 v65 这份页面在**下一次打包之前不会到手机上**；这里能验的只有本地浏览器 + 假桥。
+   ★ v67（R1）桥面方法表仍未动，改的是原生侧的**行为**，所以这一版配套出 1.0.219：
+     旧壳上「协议」这一行不画（getConfig 里没有那个键），发的还是 Responses —— 与 v66 行为一致。
 */
 
 /** 桥名。Java 侧 addJavascriptInterface(..., "NativeLlm") 必须同名，verify-web.sh 比对两侧方法。 */
@@ -255,10 +263,29 @@ export function llmGradeSources(list) {
 }
 
 /**
+ * 网关型业务错误：HTTP 状态是 200，失败写在 body 里（星火 /v1 的 10007 / 10013 / 11200 这一类）。
+ * ★ 只在「这一份 body 里没有可读正文」时才认它 —— 有些端点正常响应也带个 code（200 / "000000"），
+ *   先认 code 会把一次问答判成失败，那比漏判坏得多：用户会以为没扣到答案，其实拿到了。
+ * code 与 message 原样交回（换行压成空格是显示层的规矩，不是改写内容）；
+ * message 超过 200 字截断，与原生侧 brief() 同一类处理 —— 一整段 HTML 错误页不该进提示条。
+ * @param {any} obj
+ * @returns {string} 空串 = 这条不是业务错误
+ */
+function bizError(obj) {
+  if (!Object.prototype.hasOwnProperty.call(obj, "code")) return "";
+  const cs = String(obj.code == null ? "" : obj.code).trim();
+  /* "0" 与 "000000" 这类是成功码；非数字的 code（"INVALID_KEY"）不是 0，照当错误。 */
+  if (!cs || Number(cs) === 0) return "";
+  const raw = String(obj.message || obj.msg || "").replace(/[\r\n\t]+/g, " ").trim();
+  const msg = raw ? (raw.length > 200 ? raw.slice(0, 200) + "…" : raw) : "端点没给 message";
+  return "端点回业务错误 code " + cs + "：" + msg;
+}
+
+/**
  * 解析端点返回。认三种形状，认不出就说 unknown 并把原文长度交回去。
  *   responses —— Responses 形制：output[] 里有 {type:"message",content:[{text}]} 与 web_search_call
  *   chat      —— Chat 形制：choices[0].message.content
- *   unknown   —— 其它（含错误体）
+ *   unknown   —— 其它（含错误体；星火这类网关的 code 非 0 会报成业务错误而不是「形状不认识」）
  * @param {any} obj 已经 JSON.parse 过的响应
  * @returns {{ shape: string, ok: boolean, text: string, sources: any[], dropped: any[], usage: { input: number, output: number }, error: string }}
  */
@@ -313,9 +340,14 @@ export function llmParse(obj) {
   out.text = pieces.join("\n").trim();
   out.ok = !!out.text;
   out.sources = g.graded;
-  if (!out.ok && !out.error) out.error = out.shape === "unknown"
-    ? "认不出的响应形状（既没有 output[] 也没有 choices[]）"
-    : "响应里没有正文";
+  if (!out.ok && !out.error) {
+    /* 没正文才去认业务错误码（理由见 bizError 上面那段）。
+       报出来的是端点自己的 code 与原话，不是「大概是什么问题」。 */
+    const biz = bizError(obj);
+    out.error = biz ? biz : (out.shape === "unknown"
+      ? "认不出的响应形状（既没有 output[] 也没有 choices[]）"
+      : "响应里没有正文");
+  }
   return out;
 }
 

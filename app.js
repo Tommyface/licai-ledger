@@ -57,7 +57,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v66";
+const APP_VER = "v67";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1830,8 +1830,10 @@ function openAnaIndex() {
    v66 加的是「带上我的台账」：勾了才把本机台账压成一段文本一起发（白名单十个字段，
    金额位跟随本机「隐藏金额」）。v64 那句 instructions 写着「只根据给出的台账数据回答」，
    可当时什么都没给 —— 那是一句假话，这一版把它改成实话。
-   ★ 桥面七个方法一个字没动，所以这两版都不需要新 APK；代价是壳读的是 APK 里那份 assets/www，
-     v65/v66 要等下一次打包才到手机上 —— 现在能验的只有本地浏览器 + 假桥。
+   ★ 桥面七个方法一个字没动，但 v67 改了原生侧的**行为**（setConfig 多认一个 apiStyle、
+     ask 能按 Chat 形制拼、路径跟着换），所以这一版要出包（1.0.219）才有效果。
+     壳读的是 APK 里那份 assets/www（MainActivity.START_URL），不是 GitHub Pages ——
+     v65/v66 那份页面也是到这一版才第一次上手机；旧壳上「协议」这一行不画，行为与 v66 一致。
    ============================================================ */
 /* 一轮问答的全部状态。不落 localStorage：换设备 / 刷新就该重问，不留半成品。
    v65 起多了两个字段（turns / turn）—— 会话内容里多半夹着产品名与持仓，
@@ -1889,6 +1891,17 @@ function llmReadCfg() {
   LLM.cfg = (cfg && typeof cfg === "object") ? cfg : {};
   LLM.hasKey = hk;
 }
+/**
+ * 这台壳认不认「协议形制」这个设置（v67 · R1）。
+ * ★ 判的是**键在不在**，不是值对不对：旧壳（1.0.218 及以前）的 getConfig 里根本没有 apiStyle，
+ *   新壳哪怕没配过也会回一个默认值。按值判的话，旧壳会被读成「responses」，
+ *   于是选择器画出来了、用户选了 Chat、发出去还是 Responses —— 设了不生效比没有更坏。
+ * @returns {boolean}
+ */
+function llmCanStyle() {
+  const c = LLM.cfg;
+  return !!(c && Object.prototype.hasOwnProperty.call(c, "apiStyle"));
+}
 function llmStatusLine() {
   if (!llmBridge()) return `<div class="note b">${esc(llmDegrade({ inApp: false, hasKey: false }))}</div>`;
   const c = LLM.cfg || {};
@@ -1931,14 +1944,22 @@ function llmSaveCfg() {
   const baseUrl = (($("llmBase") || {}).value || "").trim();
   const model = (($("llmModel") || {}).value || "").trim();
   const search = !!($("llmSearch") || {}).checked;
-  /* 只交这三样。密钥不在这个 JSON 里 —— 它能写的只有端点与模型名，
-     原生侧（LlmBridge.setConfig）同样只认这三个键，多出来的字段它会丢掉。 */
-  try { b.setConfig(JSON.stringify({ baseUrl, model, search })); }
+  const canStyle = llmCanStyle();
+  const cfgOut = { baseUrl, model, search };
+  /* 密钥不在这个 JSON 里 —— 它能写的只有端点、模型名、检索开关，外加下面这一个协议选择；
+     原生侧（LlmBridge.setConfig）同样只认这四个键，多出来的字段它会丢掉。
+     ★ apiStyle 只在这台壳认它的时候才交：旧壳会把不认识的键丢掉，
+       于是变成「页面上选了 Chat、发出去还是 Responses」—— 设了不生效，比不给这一项更坏。 */
+  if (canStyle) {
+    const s = String(($("llmStyle") || {}).value || "");
+    cfgOut.apiStyle = s === "chat" ? "chat" : "responses";
+  }
+  try { b.setConfig(JSON.stringify(cfgOut)); }
   catch (e) { return toast("保存失败：" + e, 3600); }
   llmReadCfg();
   /* 设置页那一行的状态文案是上一次渲染的，端点变了不重画就会停在「端点未配置」 */
   renderLlm();
-  toast("已保存端点与模型", 2400);
+  toast(canStyle ? "已保存端点、模型与协议" : "已保存端点与模型", 2400);
   openLlm();
 }
 /** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout 五种。
@@ -1993,6 +2014,12 @@ function openLlm() {
   const used = llmUsed();
   const bg = llmBudget(used);
   const run = LLM.phase === "running";
+  /* 协议形制（v67 · R1）：Responses 走 /responses（input + instructions），
+     Chat Completions 走 /chat/completions（messages[]）—— OpenAI 兼容网关多半是后者。
+     两种请求体都由原生侧拼（LlmBridge.ask），页面只交这一个选择：
+     同一个形状两处各写一遍迟早对不上，而对不上的那一份是花钱的请求。 */
+  const canStyle = llmCanStyle();
+  const style = c.apiStyle === "chat" ? "chat" : "responses";
   /* 重试只在「这一轮失败了」时出现。拿到答案的那轮不给重试 —— 再发一次同样的话
      只是再花一次钱，要接着问就走输入框，那一发是新的一个问题。 */
   const retryable = !run && !!LLM.turn && (LLM.phase === "error" || LLM.phase === "timeout");
@@ -2007,6 +2034,12 @@ function openLlm() {
       <input id="llmBase" placeholder="https://api.example.com/v1" value="${esc(c.baseUrl || "")}"></div>
     <div class="field"><label>模型名</label>
       <input id="llmModel" placeholder="例如 gpt-4o-mini" value="${esc(c.model || "")}"></div>
+    ${canStyle ? `<div class="field"><label>协议形制（决定请求体与路径）</label>
+      <select id="llmStyle">
+        <option value="responses" ${style === "responses" ? "selected" : ""}>Responses · /responses</option>
+        <option value="chat" ${style === "chat" ? "selected" : ""}>Chat Completions · /chat/completions（OpenAI 兼容网关）</option>
+      </select></div>`
+      : `<div class="cap" style="padding-top:2px">这台机器的 App 还不支持换协议（更新 App 之后这一项才会出现），现在只能按 Responses 形制发。</div>`}
     <div class="chk-row"><label><input type="checkbox" id="llmSearch" ${c.search === false ? "" : "checked"}>
       要求端点做联网检索</label></div>
     <div class="cap" style="padding-top:2px">出处就从检索里来；关掉它多半一条来源都拿不到。</div>
@@ -2035,8 +2068,9 @@ function openLlm() {
       勾上「带上我的台账」才把数据发出机器：只带那十个字段（名称 / 机构 / 代码 / 风险级 / 净值与它的日期 /
       份额 / 成本 / 持有天数 / 状态），本机开着「隐藏金额」时份额与成本也跟着藏；不勾就是一句光的问题。
       发满 ${LLM_MAX_ROUNDS} 轮就停手（失败与超时的那几轮也算），要接着问得先清空 —— 闸门拦的是连着点、连着计费。
-      发出去与收回来的形状都按 Responses 形制（含 web_search_preview）写，
-      <b>真实端点还没实测过</b>：认不得就明说认不得，不补字段、不自动重发。
+      请求体按上面选的协议形制拼（Responses 带 web_search_preview，Chat Completions 带 web_search），
+      路径也跟着换 —— <b>沙箱里没有凭据，真实端点仍未实测</b>：
+      认不得就明说认不得，不补字段、不自动重发。
     </div>`);
 }
 /** 发一轮。要发的话由调用方给：新问从输入框取，重试把上一轮那句原样再给一次。

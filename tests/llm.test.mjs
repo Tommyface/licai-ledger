@@ -1,13 +1,15 @@
 /* 模型接入（T3）的纯逻辑测试：
      node --test tests/llm.test.mjs
-   钉的是 js/domain/llm.js 头部那六条口径：
+   钉的是 js/domain/llm.js 头部那七条口径：
      1. JS 不经手密钥 —— 请求体里连字段名都不许出现；
      2. 不猜端点形状 —— 认得就收，认不得明说 unknown；
      3. 来源要 URL + 发布时间两样齐才入账，缺哪样写哪样；
      4. 失败不自动重试 —— 只有落定之后才允许出现重试这条路；
      5. 会话只活在本机内存里 —— 上文压成文本带上，轮次到 LLM_MAX_ROUNDS 就停；
      6. 台账快照勾了才给 —— 出机器只有白名单十个字段，凭据形状的键一个字都不许跟着走，
-        「隐藏金额」开着时份额与成本一起藏。
+        「隐藏金额」开着时份额与成本一起藏；
+     7. 协议形制由原生侧拼 —— 页面只交 input/instructions，网关那种「HTTP 200 + code 非 0」
+        的失败要报成业务错误，code 与官方原话原样交回。
    ★ 真端点没测过（没有凭据），所以这里的用例是「形状契约」而不是「线上实况」：
      拿到真响应后必须回来补一条按实况形状的用例，别把这份 fixture 当成事实。 */
 import { test } from "node:test";
@@ -366,4 +368,65 @@ test("三段式 input：上文在前、快照在中、这一次要问的在最�
   assert.equal(llmRoundInput([{ q: "上一句", a: "上一答" }], "这一句").indexOf("台账快照"), -1,
     "没勾就别把快照塞进去 —— 「勾了才给」是这一条的全部意义");
   assert.equal(llmRoundInput([], "这一句", ""), "这一句");
+});
+
+/* ---- 口径 7：协议形制与网关业务错误（v67 · R1）----
+   星火这类 OpenAI 兼容网关的失败是「HTTP 200 + body 里 code 非 0」：状态码说是成功，
+   真失败写在 body 里。原生侧把 body 原样分块交回（它不解析内容），所以这一层分类
+   落在页面侧，也就能在这里钉住。
+   ★ 用例里的 code 取自星火公开的网关返回码表（10007 / 10013 / 10907 / 11200 等），
+     那是「按文档写的形状」，不是实测回来的样本 —— 拿到真凭据后要回来补实况用例。 */
+
+test("业务错误：HTTP 200 里 code 非 0 要报成业务错误，不许停在「形状不认识」", () => {
+  const r = llmParse({ code: 11200, message: "余额不足或已透支", sid: "aBc123" });
+  assert.equal(r.ok, false);
+  assert.equal(r.shape, "unknown", "形状仍按认不出报 —— 只是错误说得更准，不是猜出了形状");
+  assert.match(r.error, /11200/);
+  assert.match(r.error, /余额不足或已透支/, "官方原话一字不动地交回，翻译一次就多一处说错的地方");
+  assert.equal(r.text, "");
+  assert.equal(r.sources.length, 0, "错误体里不许混出来源");
+});
+
+test("业务错误：code 是字符串也照原样带，不重新格式化", () => {
+  assert.equal(llmParse({ code: "10007", message: "APPID不存在" }).error,
+    "端点回业务错误 code 10007：APPID不存在");
+});
+
+test("业务错误：端点没给 message 就写「没给」，不替它编一个原因", () => {
+  assert.equal(llmParse({ code: 10013 }).error, "端点回业务错误 code 10013：端点没给 message");
+});
+
+test("成功码不算业务错误：0 与「000000」这类跟「没有 code 键」一样只按形状判", () => {
+  for (const c of [0, "0", "000000"]) {
+    const r = llmParse({ code: c, message: "success" });
+    assert.match(r.error, /认不出的响应形状/, "code=" + c + " 是成功码，报成业务错误就是把成功说成失败");
+    assert.ok(!/业务错误/.test(r.error));
+  }
+});
+
+test("有正文时先认正文：带个非 0 code 的 choices 响应不许被判成失败", () => {
+  /* 有些兼容网关正常响应也回 code:200。先认 code 就会把一次成功的问答说成没成功，
+     用户以为没拿到答案（其实拿到了、也已经计费了）—— 这个误判比漏判贵。 */
+  const r = llmParse({ code: 200, choices: [{ message: { content: "答复在此" } }] });
+  assert.equal(r.ok, true);
+  assert.equal(r.shape, "chat");
+  assert.equal(r.text, "答复在此");
+});
+
+test("错误优先级：body 里有 error 字段就用它，code 只是后面那层兜底", () => {
+  const r = llmParse({ error: { message: "Invalid API Key" }, code: 11200, message: "另一种说法" });
+  assert.equal(r.error, "Invalid API Key");
+});
+
+test("业务错误的 message：换行压平、超长截断 —— 一整段错误页不许进提示条", () => {
+  const r = llmParse({ code: 10907, message: "<html>\n" + "X".repeat(400) });
+  assert.ok(!r.error.includes("\n"), "带换行的错误体把提示条撑成多行：" + r.error);
+  assert.ok(r.error.length < 260, "message 没截断，长度 " + r.error.length);
+  assert.match(r.error, /…$/);
+});
+
+test("协议形制不由页面拼：发给桥的请求体里不许出现 apiStyle / messages / tools", () => {
+  const s = JSON.stringify(llmReq({ input: "q", instructions: "i" })).toLowerCase();
+  for (const w of ["apistyle", "messages", "tools", "choices", "chat/completions", "responses"])
+    assert.ok(!s.includes(w), "页面请求体里出现了 " + w + "：同一个形状两处各写一遍迟早对不上");
 });
