@@ -34,6 +34,7 @@ import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateF
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
+import { redeemAdvice } from "./js/domain/advice.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
   llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr } from "./js/domain/llm.js";
@@ -57,7 +58,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v73";
+const APP_VER = "v74";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1674,6 +1675,41 @@ function saveDisc(pid) {
 }
 
 /* ============================================================
+   T7a · 现在赎的话（v74）
+   ------------------------------------------------------------
+   判定全在 js/domain/advice.js（纯函数、可单测），这一层只做三件事：
+     · 把 advice.js 交回来的数字一律走 shown() 现算现显 —— 结论文本里没有钱，
+       钱也就进不了任何缓存（隐私遮罩是显示态，写进文本等于绕过它）；
+     · 把档位词写成字，色带只是辅助：灰度截图、色觉障碍、对比度不足时还得读得出；
+     · 不建缓存：结论每次从当前持仓与当前规则现推。
+       「改完配置卡片还停在旧结论」比多算一次贵得多。
+   这一版只回答「这一只现在赎得出来吗、赎要付多少」。
+   「该不该换到另一只」要跨产品比，比较口径还没定 —— 不在这张卡里越界。
+   ============================================================ */
+function adviceCard(p, pos) {
+  const adv = redeemAdvice({ p, pos, td: today() });
+  /* 结论词的颜色只按档位给，判定本身在 advice.js */
+  const vLevel = adv.verdict === "yes" ? "ok" : adv.verdict === "no" ? "bad"
+    : adv.verdict === "skip" ? "skip" : "na";
+  const row = (title, level, text) =>
+    `<tr class="ana ${level}"><td>${esc(title)}</td><td><b>${esc(ANA_LEVEL_TEXT[level] || level)}</b>${esc(text)}</td></tr>`;
+  /* 费率是百分数本身（disc.js 第 2 条口径），不能喂给 pct()（那个入参是小数） */
+  const rateTxt = v => v === null ? "—" : (Math.round(v * 100) / 100) + "%";
+  const moneyBlock = adv.market !== null
+    ? `<div class="grid2" style="margin:10px 0 6px">
+        <div class="stat"><div class="l">按最新净值</div><div class="v">${shown(money(adv.market))}</div><div class="cap">已确认份额 × ${esc(pos.lastDate || "—")} 的净值</div></div>
+        <div class="stat"><div class="l">扣费后到手</div><div class="v">${adv.net === null ? "—" : shown(money(adv.net))}</div><div class="cap">${adv.ratePct === null ? "赎回费未披露 → 扣多少算不出" : "赎回费 " + rateTxt(adv.ratePct) + "，约扣 " + (adv.fee === null ? "—" : shown(money(adv.fee)))}</div></div>
+      </div>`
+    : "";
+  return `<div class="card-t" style="margin:16px 0 8px"><h2 style="font-size:14px">现在赎的话</h2><span class="hint">只判这一只 · 不给换仓建议</span></div>
+    ${moneyBlock}
+    <table class="navtbl ana"><tbody>
+      ${row("结论", vLevel, adv.verdictText + (adv.unlockInDays !== null ? `（还差 ${adv.unlockInDays} 天）` : ""))}
+      ${adv.lines.map(l => row(l.title, l.level, l.text)).join("")}
+    </tbody></table>`;
+}
+
+/* ============================================================
    T2 · 持仓体检
    ------------------------------------------------------------
    判定与缓存的认账本全在 js/domain/analysis.js（纯函数、可单测），
@@ -2703,6 +2739,7 @@ function renderProdDetail() {
 
     <div class="card-t" style="margin:16px 0 8px"><h2 style="font-size:14px">底层配置与申赎规则</h2><span class="hint">${esc(discStatusText(p))} · 照录披露原文</span></div>
     ${discCard(p, pos)}
+    ${adviceCard(p, pos)}
     <div class="row-btn" style="margin-top:14px">
       <button class="btn gh" style="flex:1" onclick="openDisc('${p.id}')">录入 / 修改配置</button>
       <button class="btn pri" style="flex:1" onclick="closeSheet();editProd('${p.id}')">编辑产品</button>

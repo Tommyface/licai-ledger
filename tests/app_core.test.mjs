@@ -320,7 +320,7 @@ const TONE_FN = ["renderHome", "setStat", "renderCal", "pendingHtml", "closedHtm
   "renderDetailBody", "renderTrade", "renderProd", "renderMonthly", "monthlyHintText"];
 /* 个人数字的遮蔽面：金额 + 份额。份额两位小数，6.9 万份就是 6.9 万元，
    遮了金额不遮份额等于没遮；净值 / 成本净值是四位小数的公开或衍生口径，不在此列。 */
-const MASK_FN = [...TONE_FN, "renderProdDetail"];   /* renderMonthly / monthlyHintText 已随 TONE_FN 进入 */
+const MASK_FN = [...TONE_FN, "renderProdDetail", "adviceCard"];   /* renderMonthly / monthlyHintText 已随 TONE_FN 进入；adviceCard（v74 现在赎的话）也露三个金额 */
 
 test("隐藏：app.js 里不许再手写「隐藏时输出星号」的三元式", () => {
   const hits = APP_SRC.match(/hideAmount\s*\?\s*["'`]\*{2,}["'`]/g) || [];
