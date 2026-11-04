@@ -18,7 +18,7 @@ import { llmReq, llmSource, llmGradeSources, llmParse, llmChunkFeed, llmChunkJoi
   llmCanRetry, llmDegrade, LLM_BRIDGE, LLM_BRIDGE_METHODS, LLM_TIMEOUT_MS, LLM_CHUNK_MAX_PARTS,
   llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS, LLM_TRANSCRIPT_MAX_CHARS,
   llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, LLM_SNAPSHOT_MAX_CHARS, LLM_SNAPSHOT_MASKED,
-  llmMetaOf, llmMetaErr } from "../js/domain/llm.js";
+  llmMetaOf, llmMetaErr, LLM_CANCEL_TEXT } from "../js/domain/llm.js";
 
 /* ---- 口径 1：JS 不经手密钥 ---- */
 test("请求体只有问题与指令，没有任何凭据字段", () => {
@@ -212,11 +212,38 @@ test("桥名与超时上限是常量，Java 侧与页面侧都读它们", () => 
   assert.ok(LLM_TIMEOUT_MS >= 30000 && LLM_TIMEOUT_MS <= 300000, "超时不该短到把正常回答判成失败");
 });
 
-test("桥面清单：七个方法，一个不多一个不少（verify-web.sh 按它点名）", () => {
+test("桥面清单：八个方法，一个不多一个不少（v76 起含 cancel，verify-web.sh 按它点名）", () => {
   assert.deepEqual(LLM_BRIDGE_METHODS,
-    ["ready", "getConfig", "setConfig", "hasKey", "promptKey", "clearKey", "ask"]);
+    ["ready", "getConfig", "setConfig", "hasKey", "promptKey", "clearKey", "ask", "cancel"]);
   /* 清单里不许出现「把密钥交回页面」的方法 */
   for (const m of LLM_BRIDGE_METHODS) assert.ok(!/getkey|readkey|exportkey|reveal/i.test(m), m);
+});
+
+
+/* ---- v76 · 取消这一轮的口径（纯模块侧）----
+   「取消」这两个字最容易说错的地方不在代码，在话：它是「不再等」，不是「撤回」。
+   请求早就发出去了，计不计费只有端点知道 —— 所以这句话里既不能出现「未计费」这种
+   确定的钱话（铁律 #10 不许编），也不能让人以为取消后代码会自己再试一次（铁律 #5）。 */
+test("取消那句说的是「不再等」，不是「撤回」，也不许出现确定的钱话", () => {
+  assert.match(LLM_CANCEL_TEXT, /可能已经计费/);
+  assert.match(LLM_CANCEL_TEXT, /不会自己重发/);
+  assert.match(LLM_CANCEL_TEXT, /由你取消/);
+  assert.doesNotMatch(LLM_CANCEL_TEXT, /未计费|一定没|不收费|退款|免费|已撤回/);
+  /* 这段文案要经 esc() 进屏：夹 HTML 就会被念成字面标记 */
+  assert.doesNotMatch(LLM_CANCEL_TEXT, /<[a-z/]/i);
+});
+
+test("取消是一档落定：重试的门为它开着，但 running 时不给点", () => {
+  assert.equal(llmCanRetry({ phase: "cancelled" }), true);
+  assert.equal(llmCanRetry({ phase: "running" }), false);
+  assert.equal(llmCanRetry({ phase: "done" }), true);
+  assert.equal(llmCanRetry(null), false);
+});
+
+test("取消不是第二个方法表项：清单里只有一个 cancel", () => {
+  assert.equal(LLM_BRIDGE_METHODS.filter(m => m === "cancel").length, 1);
+  /* 顺手钉住：新方法也不许变成「把密钥交回页面」的那一类 */
+  assert.ok(!/getkey|readkey|exportkey|reveal/i.test("cancel"));
 });
 
 /* ---- 口径 5（v65 多轮问答）：上文压成文本、失败也占额度、上限是防误点的闸 ----

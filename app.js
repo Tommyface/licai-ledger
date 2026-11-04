@@ -38,7 +38,7 @@ import { redeemAdvice } from "./js/domain/advice.js";
 import { switchAdvice } from "./js/domain/switchadv.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
-  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr } from "./js/domain/llm.js";
+  llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr, LLM_CANCEL_TEXT } from "./js/domain/llm.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -59,7 +59,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v75";
+const APP_VER = "v76";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2083,7 +2083,10 @@ function llmResultHtml() {
   const t = LLM.turn;
   const head = t ? `<div class="cap" style="padding-bottom:6px">第 ${LLM.turns.length + 1} 轮 · 问：${esc(t.q)}</div>` : "";
   if (LLM.phase === "running")
-    return head + `<div class="note b">已发出，等回答…（一次请求一次计费，超时不会自动重发）</div>`;
+    return head + `<div class="note b">已发出，等回答…（一次请求一次计费，超时不会自动重发；'
+      + `等不及可以点下面「取消这一轮」，取消也撤回不了已经发出去的那一发）</div>`;
+  if (LLM.phase === "cancelled")
+    return head + `<div class="note r">${esc(LLM_CANCEL_TEXT)}</div>`;
   if (LLM.phase === "timeout")
     return head + `<div class="note r">等满 ${Math.round(LLM_TIMEOUT_MS / 1000)} 秒没回。<b>这一次可能已经计费</b>，
       确认端点状态再重试。</div>`;
@@ -2137,7 +2140,7 @@ function openLlm() {
   const style = c.apiStyle === "chat" ? "chat" : "responses";
   /* 重试只在「这一轮失败了」时出现。拿到答案的那轮不给重试 —— 再发一次同样的话
      只是再花一次钱，要接着问就走输入框，那一发是新的一个问题。 */
-  const retryable = !run && !!LLM.turn && (LLM.phase === "error" || LLM.phase === "timeout");
+  const retryable = !run && !!LLM.turn && ["error", "timeout", "cancelled"].includes(LLM.phase);
   const btn = run ? "等待中…"
     : (!bg.ok ? "已到 " + LLM_MAX_ROUNDS + " 轮上限"
       : (used ? "问下一句（已用 " + used + "/" + LLM_MAX_ROUNDS + " 轮）" : "发起（本会话最多 " + LLM_MAX_ROUNDS + " 轮）"));
@@ -2172,6 +2175,7 @@ function openLlm() {
     <div class="row-btn" style="margin-top:8px">
       <button class="btn pri" style="flex:1" onclick="llmAsk()">${btn}</button>
     </div>
+    ${run ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="llmCancel()">取消这一轮（不再等 · 已发出的那一发撤回不了）</button></div>` : ""}
     ${retryable ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="llmRetry()">重试这一轮（原句再发一次，另占一轮额度）</button></div>` : ""}
     ${LLM.costWarn ? `<div class="note r" style="margin-top:8px">这一句发出去就是<b>一次新的计费</b>；
       上一轮如果已经到端点，那一次也算 —— 代码不会自己重发，重发只由你点。</div>` : ""}
@@ -2227,6 +2231,24 @@ function llmSend(text) {
   openLlm();
 }
 function llmAsk() { const el = $("llmQ"); llmSend(el ? String(el.value || "") : LLM.q); }
+/** v76 · 取消这一轮。口径三条，一条都不能少：
+ *   1) 这是「不再等」，不是「撤回」—— 请求早就发出去了，这一发该不该计费由端点说了算，
+ *      屏上只说「可能已经计费」（铁律 #10：不替用户编一个确定的数）。
+ *   2) 取消之后 LLM.id 立刻清空：壳那边如果已经读完响应，回传的 __llmDone/__llmChunk
+ *      会因为 id 对不上被丢掉，不会把「已取消」的一轮又翻成答案（也不翻成失败）。
+ *   3) 代码路径里没有任何地方自己再 ask() 一遍（铁律 #5）；要重试得人点那颗按钮。
+ *   桥不在（网页版）时压根没有这颗按钮 —— 网页版本来就发不出去，也就没什么可取消的。 */
+function llmCancel() {
+  if (LLM.phase !== "running") return toast("这一轮已经落定了，没有要取消的东西", 3000);
+  const id = LLM.id, b = llmBridge();
+  if (LLM.timer) { clearTimeout(LLM.timer); LLM.timer = 0; }
+  LLM.id = "";                     /* 先把自己那把锁摘了：迟到的回传一律不认 */
+  LLM.phase = "cancelled"; LLM.res = null; LLM.err = ""; LLM.buf = null; LLM.meta = null;
+  if (LLM.turn) LLM.turn.err = LLM_CANCEL_TEXT;   /* 上文里下一轮看得见：这一轮是人停的，不是模型答的 */
+  if (b && b.cancel) { try { b.cancel(id); } catch (e) { /* 原生没接上也只是继续断开连接，屏上的话不变 */ } }
+  openLlm();
+  toast("已取消这一轮（不再等它，但那一发可能已经计费）", 4200);
+}
 /** 重试 = 把上一轮（连同它那次失败）记进上文，再原样发一次同一个问题。
     它占一轮额度：这一发又是一次真实计费，不该当成「免费再来一次」。 */
 function llmRetry() {
@@ -4870,7 +4892,7 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,

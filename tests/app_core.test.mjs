@@ -1168,16 +1168,61 @@ test("v65 轮次闸门排在动手之前，失败与超时那轮也记进上文"
 
 test("v65 重试只挂在失败的那一轮，清空上文是手点的", () => {
   const { src, block } = t3Slice();
-  assert.ok(/const retryable = !run && !!LLM\.turn && \(LLM\.phase === "error" \|\| LLM\.phase === "timeout"\)/.test(block),
-    "重试按钮的门变了：拿到答案那一轮也给重试，就是白给用户一个再花一次钱的入口");
+  assert.ok(/const retryable = !run && !!LLM\.turn && \["error", "timeout", "cancelled"\]\.includes\(LLM\.phase\)/.test(block),
+    "重试按钮的门变了：拿到答案那一轮也给重试，就是白给用户一个再花一次钱的入口"
+    + "（v76 起「人取消」的那一轮也在门里：要再发得人自己点，那一发是新的一次计费）");
   assert.match(block, /function llmRetry\(\)[\s\S]{0,300}llmSend\(LLM\.turn\.q\)/);
   assert.ok(/onclick="llmClearChat\(\)"/.test(block) && /onclick="llmRetry\(\)"/.test(block), "两颗新按钮没画进弹层");
   assert.ok(/if \(LLM\.phase === "running"\) return toast\("这一轮还在等/.test(block),
     "请求在飞时清空会把正在等的那轮抹掉，回传回来找不到 id 就当没发生");
   const k = src.indexOf("Object.assign(window, {");
   const bridge = src.slice(k, src.indexOf("});", k));
-  for (const fn of ["llmAsk", "llmRetry", "llmClearChat", "openLlm"])
+  for (const fn of ["llmAsk", "llmCancel", "llmRetry", "llmClearChat", "openLlm"])
     assert.ok(bridge.includes(fn), "内联入口没挂回 window：" + fn);
+});
+
+
+/* ---- v76 · 取消这一轮（llmCancel）----
+   这一节钉的四件事都是「看着对、其实会伤人」的形态：
+     1) 取消只是不再等，不是撤回 —— 屏上必须说「可能已经计费」，不许说成没花钱；
+     2) 摘掉 id 必须发生在调桥之前 —— 否则刚好读完的那一班会把「已取消」翻成答案；
+     3) 按钮只在真在等的时候出现 —— 落定了还给点，就是一个骗手指的空动作；
+     4) 代码路径里没有任何地方自己再 ask() 一遍（铁律 #5）。 */
+test("v76 取消：先摘 id 再调桥，落定的轮次不给点", () => {
+  const { src, block } = t3Slice();
+  const head = src.split("function llmCancel()")[1].slice(0, 1200);
+  assert.ok(/if \(LLM\.phase !== "running"\) return/.test(head), "没挡重复点：连点两下把已落定的一轮改写成取消");
+  assert.ok(head.indexOf('LLM.id = ""') >= 0 && head.indexOf("b.cancel(") >= 0,
+    "要么没摘 id、要么没叫桥：前者会收迟到回传，后者请求还在跑还在计费");
+  assert.ok(head.indexOf('LLM.id = ""') < head.indexOf("b.cancel("),
+    "顺序反了：先叫桥再摘 id，中间那一瞬回来的 __llmDone 会认账");
+  assert.ok(/clearTimeout\(LLM\.timer\)/.test(head), "自家的 120 秒计时器没停：取消后还会再跳一次「超时」");
+  assert.ok(!/\bask\(/.test(head.replace("b.cancel(", "")), "llmCancel() 里不许出现第二次 ask（铁律 #5：重发只由人点）");
+});
+
+test("v76 取消：按钮只在等待中出现，取消那句走 esc 且与模块常量同源", () => {
+  const { src, block } = t3Slice();
+  assert.ok(/\$\{run ? [^\n]*onclick="llmCancel\(\)"/.test(block),
+    "取消按钮不是只在等的时候画出来，或者压根没画");
+  assert.ok(/LLM\.phase === "cancelled"[\s\S]{0,120}esc\(LLM_CANCEL_TEXT\)/.test(src),
+    "取消那一档没有分支，或那句文案没经 esc 进屏");
+  const llmjs = readFileSync(new URL("../js/domain/llm.js", import.meta.url), "utf8");
+  assert.ok(/export const LLM_CANCEL_TEXT = [^;]*可能已经计费[^;]*;/.test(llmjs),
+    "取消的话没写在纯模块里，或漏了「可能已经计费」");
+  assert.ok(/export const LLM_CANCEL_TEXT = [^;]*不会自己重发[^;]*;/.test(llmjs),
+    "漏了「代码不会自己重发」：取消之后最容易被当成会自动再来一次");
+  assert.doesNotMatch(llmjs.split("export const LLM_CANCEL_TEXT")[1].split(";")[0],
+    /未计费|一定没|不收费|退款|免费|<b>|<span/, "钱话说死了，或者文案里夹了 HTML");
+});
+
+test("v76 桥面清单里那一格 cancel 与页面调用点同名（点了没反应那种错）", () => {
+  const { src } = t3Slice();
+  const llmjs = readFileSync(new URL("../js/domain/llm.js", import.meta.url), "utf8");
+  const tbl = llmjs.match(/LLM_BRIDGE_METHODS = \[([^\]]*)\]/)[1];
+  assert.ok(tbl.includes('"cancel"'), "清单里没有 cancel");
+  const call = src.match(/b\.cancel\(([^)]*)\)/);
+  assert.ok(call, "页面没有调用桥上的 cancel");
+  assert.equal(call[1].trim(), "id", "取消传的不是这一轮的 id：原生侧摘不到那条在飞记录");
 });
 
 test("v65 会话只留内存：新字段挂在 LLM 上，屏幕上也是这么写的", () => {

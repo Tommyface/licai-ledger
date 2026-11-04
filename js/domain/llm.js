@@ -57,7 +57,15 @@ export const LLM_BRIDGE = "NativeLlm";
  * 页面调了原生没有的方法，表现是「点了没反应」而构建全绿，只能靠这张表拦。
  * 清单放在纯模块里而不是散在 app.js 的调用点，是为了让它可测、可比对。
  */
-export const LLM_BRIDGE_METHODS = ["ready", "getConfig", "setConfig", "hasKey", "promptKey", "clearKey", "ask"];
+export const LLM_BRIDGE_METHODS = ["ready", "getConfig", "setConfig", "hasKey", "promptKey", "clearKey", "ask", "cancel"];
+/**
+ * v76 · 取消这一轮要说的那句话。放在纯模块里是因为这三件事都得被测住：
+ *   · 「可能已经计费」不许省 —— 请求早就发出去了，取消只是不再等它，不是撤回；
+ *   · 不许写成「一定没计费」或「已退款」，那是编的；
+ *   · 重试只能由人点：这句话里必须说清「代码不会自己重发」（铁律 #5）。
+ */
+export const LLM_CANCEL_TEXT = "这一轮由你取消：请求早就发出去了，取消只是不再等它，"
+  + "所以这一发可能已经计费。代码不会自己重发，重试那颗按钮才是再花一次钱。";
 /* 回传为什么要分块：Java→JS 单次 evaluateJavascript 的上限没有实测数据
    （沙箱里没有真机），所以不赌它 —— 原生侧按块喂 (seq, total, text)，JS 侧拼。
    块大小是原生侧的事，这里只校验序号：JS 不需要知道切了多少字节。 */
@@ -390,13 +398,13 @@ export function llmChunkJoin(st) {
 }
 
 /**
- * 能不能重试。落定（拿到结果 / 明确失败 / 超时）之后才允许出现「重试」这颗按钮，
+ * 能不能重试。落定（拿到结果 / 明确失败 / 超时 / 人取消）之后才允许出现「重试」这颗按钮，
  * 而点击的一定为是用户 —— 代码路径里没有任何地方自己调 ask() 第二遍（铁律 #5）。
  * @param {{ phase?: string }|null} st
  */
 export function llmCanRetry(st) {
   const ph = (st && st.phase) || "";
-  return ph === "done" || ph === "error" || ph === "timeout";
+  return ph === "done" || ph === "error" || ph === "timeout" || ph === "cancelled";
 }
 
 /**
