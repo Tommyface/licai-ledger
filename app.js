@@ -59,7 +59,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v78";
+const APP_VER = "v79";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -3735,31 +3735,37 @@ async function triggerFetch() {
 const _navDone = {};
 let _nativeBusy = false;
 
-/* ---------- 秒讯 / 净值账本（可选）：秒讯登录态在 App 的本机加密区，账本 Cookie 仍是本机缓存 ----------
+/* ---------- 秒讯 / 净值账本（可选）：两把登录态都在 App 的本机加密区 ----------
    v78：秒讯 token 不再进 localStorage。值只在原生侧（NavBridge + SecretStore / Android Keystore），
    页面只问得到「有没有」（NativeNav.aixhubHas()），交出去的那一轮抓取由原生侧自己把值塞进载荷。
-   以前这里是 licai.aixhubToken 明文一条，磁盘上可读、DevTools 一展开就是它 —— 铁律 #6 不接受。 */
+   以前这里是 licai.aixhubToken 明文一条，磁盘上可读、DevTools 一展开就是它 —— 铁律 #6 不接受。
+   v79：净值账本那把 Cookie 走同一条路（SecretStore 第三个槽 + NativeNav.ledgermeHas()）。
+   Cookie 和 token 是同一类东西：拿到就等于顶着用户的账号去要数据。它以前躺在
+   licai.ledgermeCookie 里，明文、可读、不清缓存就一直在 —— 现在页面手里没有它，
+   粘贴那一次交给原生侧落盘，之后每一轮抓取都由原生侧注入。 */
 const AIX_LS = {
   email: "licai.aixhubEmail",
   at: "licai.aixhubAt", lic: "licai.aixhubLic", chk: "licai.aixhubChk"
 };
 const AIX_LEGACY_TOKEN = "licai.aixhubToken";   /* 历史遗留的明文键，见到就删，不读不传 */
 const LGM_LS = {
-  cookie: "licai.ledgermeCookie", user: "licai.ledgermeUser",
+  user: "licai.ledgermeUser",
   name: "licai.ledgermeName", at: "licai.ledgermeAt", chk: "licai.ledgermeChk"
 };
+const LGM_LEGACY_COOKIE = "licai.ledgermeCookie";   /* 同上：只删不读 */
 const _aixDone = {};
 let _aixChecking = false, _aixAutoTried = false;
 let _lgmChecking = false, _lgmAutoTried = false;
 function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
 function lsSet(k, v) { try { localStorage.setItem(k, String(v)); } catch (e) { } }
 function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
-/* 老版本存进去的那个明文 token：删掉它，值就只留在加密区。
-   不读它、不拿它去试登录、也不发给任何一侧 —— 删就是删。 */
+/* 老版本存在 localStorage 里的那两把明文登录态：删掉它们，值就只留在加密区。
+   不读它们、不拿它们去试登录、也不发给任何一侧 —— 删就是删。 */
 function aixhubPurgeLegacy() { lsDel(AIX_LEGACY_TOKEN); }
 aixhubPurgeLegacy();
+function ledgermePurgeLegacy() { lsDel(LGM_LEGACY_COOKIE); }
+ledgermePurgeLegacy();
 function aixhubEmail() { return lsGet(AIX_LS.email); }
-function ledgermeCookie() { return lsGet(LGM_LS.cookie); }
 function ledgermeUser() { return lsGet(LGM_LS.user); }
 function ledgermeName() { return lsGet(LGM_LS.name); }
 /* 登录态的唯一来源是原生侧：这里不缓存、不猜 —— 每次画这一行都现问一次。 */
@@ -3776,6 +3782,24 @@ function aixhubShellOld() {
   try {
     return nativeFetchAvailable()
       && typeof window.NativeNav.aixhubHas !== "function";
+  } catch (e) { return false; }
+}
+/* v79：净值账本那把 Cookie 走同一条路 —— 页面只问「加密区里有没有」，值本身一次都不经过 JS。
+   （用户粘贴那一次是例外：那一回由页面直接交给原生侧落盘，见 ledgermeLoginFlow。） */
+function ledgermeLoggedIn() {
+  try {
+    const n = window.NativeNav;
+    if (!n || typeof n.ledgermeHas !== "function") return false;
+    return !!n.ledgermeHas();
+  } catch (e) { return false; }
+}
+/* 桥在、但没有 ledgermeHas = 这台机器的 App 还不认识第三个槽（v78 及以前的壳）。
+   那种壳上 Cookie 本来还躺在明文键里，而这一版页面已经把它删了 —— 照实说，
+   别画成「没登录」让用户以为是自己掉的线，也别假装还能连。 */
+function ledgermeShellOld() {
+  try {
+    return nativeFetchAvailable()
+      && typeof window.NativeNav.ledgermeHas !== "function";
   } catch (e) { return false; }
 }
 function aixhubLic() {
@@ -3928,12 +3952,13 @@ function renderAixhub() {
   }
 }
 
-/* 净值账本：站点的 /api/*nav 都要登录 Cookie；只用用户本人粘贴的会话，不绕过登录。 */
+/* 净值账本：站点的 /api/*nav 都要登录 Cookie；只用用户本人粘贴的会话，不绕过登录。
+   v79：这一趟不再需要页面交出 Cookie —— 原生侧自己从加密区取；判定失效时也是请原生侧清，
+   页面手里从头到尾没有那个值（铁律 #6）。 */
 async function ledgermeCheck(silent) {
-  const c = ledgermeCookie();
-  if (!c || !nativeFetchAvailable() || _lgmChecking) return null;
+  if (!nativeFetchAvailable() || _lgmChecking || !ledgermeLoggedIn()) return null;
   _lgmChecking = true;
-  const r = await aixhubBridge("ledgermeCheck", [c], "净值账本");
+  const r = await aixhubBridge("ledgermeCheck", [], "净值账本");
   _lgmChecking = false;
   if (r && r.ok) {
     lsSet(LGM_LS.user, r.user || "");
@@ -3945,33 +3970,52 @@ async function ledgermeCheck(silent) {
   }
   const dead = Number(r && r.status) === 401 || /401|Cookie|登录|失效|unauthor/i.test(String((r && r.message) || ""));
   if (dead) {
-    lsDel(LGM_LS.cookie); lsDel(LGM_LS.user); lsDel(LGM_LS.name); lsDel(LGM_LS.at);
+    ledgermeClearNative();
+    lsDel(LGM_LS.user); lsDel(LGM_LS.name); lsDel(LGM_LS.at); lsDel(LGM_LS.chk);
+    ledgermePurgeLegacy();
     renderLedgerme();
   }
   if (!silent) toast(String((r && r.message) || "Cookie 检查失败").slice(0, 100), 5200);
   return null;
 }
+/* 请原生侧清掉加密区里那一份。方法在不在都要能站住：v78 及以前的壳没有它，
+   那种机器上这行是空动作，页面画的那句实话由 ledgermeShellOld() 负责。 */
+function ledgermeClearNative() {
+  try {
+    if (window.NativeNav && typeof window.NativeNav.ledgermeClear === "function") window.NativeNav.ledgermeClear();
+  } catch (e) { }
+}
 function ledgermeCheckNow() { ledgermeCheck(false); }
 async function ledgermeLoginFlow() {
   if (!nativeFetchAvailable()) return toast("净值账本连接只在 Android App 内可用（网页版没有本机桥）", 4600);
+  if (ledgermeShellOld()) {
+    return toast("这台机器的 App 还不认识加密区里的账本槽（v78 及以前的壳）：先更新 App 再连接", 5600);
+  }
   const tip = "把 ledgerme.me 的登录 Cookie 粘贴到这里\n"
-    + "（电脑/手机浏览器登录后：开发者工具 → Network → 任意 /api 请求 → Request Headers → Cookie）";
-  const c = (prompt(tip, ledgermeCookie() || "") || "").trim();
+    + "（电脑/手机浏览器登录后：开发者工具 → Network → 任意 /api 请求 → Request Headers → Cookie）\n"
+    + "验证通过就直接存进 App 的本机加密区，页面不保存它";
+  /* 不回填旧值：页面手里根本没有它 */
+  const c = (prompt(tip, "") || "").trim();
   if (!c) return;
   toast("正在验证 Cookie…", 1800);
-  const r = await aixhubBridge("ledgermeCheck", [c], "净值账本");
-  if (!r || !r.ok) return toast(String((r && r.message) || "Cookie 无效").slice(0, 100), 5600);
-  lsSet(LGM_LS.cookie, c);
+  /* 值交给原生侧落盘（SecretStore 第三个槽）。回话里只有 hasCookie 这个布尔：
+     验证没过原生侧就不存，页面没有「先存着再说」这条路。 */
+  const r = await aixhubBridge("ledgermeSet", [c], "净值账本");
+  if (!r || !r.ok || !r.hasCookie) return toast(String((r && r.message) || "Cookie 无效").slice(0, 100), 5600);
   lsSet(LGM_LS.user, r.user || "");
   lsSet(LGM_LS.name, r.name || "");
   lsSet(LGM_LS.chk, Date.now());
   lsDel(LGM_LS.at);
+  ledgermePurgeLegacy();
   renderLedgerme();
-  toast("净值账本已连接，手动抓取时会多查一条渠道", 4200);
+  toast("净值账本已连接，Cookie 只存在本机加密区；手动抓取时会多查一条渠道", 4200);
 }
 function ledgermeLogout() {
-  lsDel(LGM_LS.cookie); lsDel(LGM_LS.user); lsDel(LGM_LS.name);
+  /* 清的是加密区里那一份；页面顺手把本机缓存的身份快照也抹掉 */
+  ledgermeClearNative();
+  lsDel(LGM_LS.user); lsDel(LGM_LS.name);
   lsDel(LGM_LS.at); lsDel(LGM_LS.chk);
+  ledgermePurgeLegacy();
   renderLedgerme();
   toast("已断开净值账本，只走官网 + 中国理财网");
 }
@@ -3979,15 +4023,23 @@ function renderLedgerme() {
   const box = $("ledgermeBox"); if (!box) return;
   syncAppOnly();
   if (!nativeFetchAvailable()) { box.innerHTML = ""; return; }
-  const on = !!ledgermeCookie();
+  /* 新页面 + 旧壳：这座桥还不认识第三个槽。画一句实话，别画成「没登录」骗人白粘一遍。 */
+  if (ledgermeShellOld()) {
+    box.innerHTML = `<div class="note b">这台机器的 App 还不认识加密区里的账本槽（v78 及以前的壳）。
+      净值账本的 Cookie 现在只存在 App 的本机加密区里，页面不再保存它 —— 先更新 App 再连接。
+      不更新不影响官网 + 中国理财网那条线照抓。</div>`;
+    return;
+  }
+  const on = ledgermeLoggedIn();
   const who = ledgermeName() || ledgermeUser();
   box.innerHTML = `
     <div class="note ${on ? "g" : ""}">${on
       ? `已连接：<b>${esc(who || "ledgerme.me")}</b><br>
-         只在点<b>「⚡ 立即抓取」</b>时查一次（3 分钟内不重复）。Cookie 只存本机，退出即删除。`
+         只在点<b>「⚡ 立即抓取」</b>时查一次（3 分钟内不重复）。Cookie 只存在本机加密区
+         （Android Keystore），页面与浏览器都读不到它；断开即从加密区删除。`
       : `可选。ledgerme.me（欣盈净值账本）是另一条账本/代销渠道。它的净值接口要登录，<br>
          需要你在浏览器登录后把 <b>Cookie</b> 粘贴进来；不登录不影响官网抓取。<br>
-         <span class="muted">仅使用你本人账号的会话，不绕过登录、不保存密码。</span>`}</div>
+         <span class="muted">仅使用你本人账号的会话，不绕过登录、不保存密码；粘贴的 Cookie 直接进本机加密区，不写进浏览器缓存。</span>`}</div>
     <div class="row-btn" style="margin-top:10px;flex-wrap:wrap">
       <button class="btn ${on ? "gh" : "pri"}" style="flex:1 1 45%" onclick="ledgermeLoginFlow()">${on ? "更新 Cookie" : "连接净值账本"}</button>
       ${on ? `<button class="btn gh" style="flex:1 1 45%" onclick="ledgermeCheckNow()">检查连接</button>` : ""}
@@ -4080,9 +4132,10 @@ function nativeNavFetch(p, withAixhub, withLedgerme) {
         name: String(p.name || ""),
         inst: String(p.inst || ""),
         navHistory: p.navHistory || {},
-        /* v78：只交「这一轮要不要查秒讯」这个布尔值；token 由原生侧从加密区注入 */
+        /* v78：只交「这一轮要不要查秒讯」这个布尔值；token 由原生侧从加密区注入。
+           v79：净值账本那条同理 —— 页面也只交布尔，Cookie 由原生侧注入，值不经过 JS。 */
         aixhub: !!withAixhub,
-        ledgermeCookie: withLedgerme ? ledgermeCookie() : ""
+        ledgerme: !!withLedgerme
       }));
     } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
   });
@@ -4208,7 +4261,8 @@ async function nativeFetchAll(forceExtra) {
   }
   if (withAixhub) lsSet(AIX_LS.at, Date.now());
 
-  const lgmOn = !!ledgermeCookie();
+  /* v79：这里只问原生侧「加密区里有没有」，页面手里再也没有那个值 */
+  const lgmOn = ledgermeLoggedIn();
   let lastLgm = 0;
   try { lastLgm = Number(localStorage.getItem(LGM_LS.at) || 0); } catch (e) { }
   const withLedgerme = lgmOn && !!forceExtra && Date.now() - lastLgm > 3 * 60000;
@@ -4344,7 +4398,10 @@ async function nativeFetchAll(forceExtra) {
       toast(dead ? "净值账本 Cookie 已失效，请到「设置 → 净值账本」更新（不影响官网抓取）"
         : "净值账本这次没取到：" + lgmErr.slice(0, 60), 6000);
       if (dead) {
-        lsDel(LGM_LS.cookie); lsDel(LGM_LS.user); lsDel(LGM_LS.name); lsDel(LGM_LS.at);
+        /* 失效的那一份在加密区里，页面只能请原生侧清；本机缓存的身份快照顺手抹掉。 */
+        ledgermeClearNative();
+        ledgermePurgeLegacy();
+        lsDel(LGM_LS.user); lsDel(LGM_LS.name); lsDel(LGM_LS.at); lsDel(LGM_LS.chk);
         renderLedgerme();
       }
     }

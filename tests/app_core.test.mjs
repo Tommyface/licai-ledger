@@ -1011,6 +1011,94 @@ test("v78：卡片文案说实话 —— 值在本机加密区，且不许出现
   assert.ok(!/应该能用|应该可以|应该会/.test(r), "v78 的文案里出现猜测式表述");
 });
 
+
+/* ---------- v79：净值账本的会话 Cookie 从 localStorage 搬进本机加密区（铁律 #6） ----------
+   这一半与 v78 是同一条铁律的第二次落地，测的也是那四类「构建全绿、只在用户手里漏」的写法。
+   量的是公开仓这份 app.js 的字节：页面手里有没有那个值、旧壳说什么话、载荷交的是布尔还是值，
+   都在这里钉住 —— Java 那侧由私有仓的 check_bridge_guard.py 钉。 */
+
+test("v79：页面不再持有任何账本 Cookie 的键位，历史明文键装载即删", () => {
+  const s = APP_SRC.indexOf("const LGM_LS = {");
+  const e = APP_SRC.indexOf("};", s);
+  assert.ok(s > 0 && e > s, "LGM_LS 键位表的位置变了，切片失败");
+  assert.ok(!/cookie/i.test(APP_SRC.slice(s, e)),
+    "LGM_LS 里又有 cookie 键位了：值只能待在原生加密区（铁律 #6）");
+  /* 整份 app.js 里带 cookie 字样的 localStorage 键名，只许那一个「见到就删」的历史键 */
+  const named = [...new Set([...APP_SRC.matchAll(/["'`]licai\.[A-Za-z]*[Cc]ookie["'`]/g)].map(m => m[0]))];
+  assert.deepEqual(named, ['"licai.ledgermeCookie"'],
+    "出现了新的 cookie 键名，或历史键名被改名（老用户磁盘上那份就删不掉了）：" + named.join(", "));
+  const purge = fnBody("ledgermePurgeLegacy");
+  assert.ok(/lsDel\(LGM_LEGACY_COOKIE\)/.test(purge), "历史明文键不是删掉");
+  assert.ok(!/lsGet|lsSet/.test(purge), "purge 里居然还读/写历史键：删就是删，不读不传");
+  /* 装载即删：定义完紧跟一次顶层调用，不等某次连接/断开才清 */
+  const at = APP_SRC.indexOf("function ledgermePurgeLegacy()");
+  assert.ok(at > 0, "ledgermePurgeLegacy() 没了");
+  assert.ok(/^function ledgermePurgeLegacy\(\) \{[^}]*\}\nledgermePurgeLegacy\(\);/.test(APP_SRC.slice(at, at + 120)),
+    "历史明文键不是「脚本一装载就删」：升级上来的人在磁盘上又多躺了一天");
+});
+
+test("v79：连接状态现问原生侧，旧壳不许画成「再粘一遍就好」", () => {
+  const b = fnBody("ledgermeLoggedIn");
+  assert.ok(/typeof n\.ledgermeHas !== "function"/.test(b), "没先确认原生侧认识这个方法就调用了");
+  assert.ok(/return !!n\.ledgermeHas\(\)/.test(b), "连接状态不是原生侧现答的");
+  assert.ok(!/lsGet|lsSet/.test(b), "ledgermeLoggedIn 又开始缓存 Cookie 了");
+  /* 桥在、但没有 ledgermeHas = v78 及以前的壳：那种机器上这一路根本连不了 */
+  const o = fnBody("ledgermeShellOld");
+  assert.ok(/nativeFetchAvailable\(\)/.test(o), "旧壳判定不看桥在不在，网页版会被误判");
+  assert.ok(/typeof window\.NativeNav\.ledgermeHas !== "function"/.test(o), "旧壳判定的信号变了");
+  for (const fn of ["ledgermeLoginFlow", "renderLedgerme"]) {
+    assert.ok(/ledgermeShellOld\(\)/.test(fnBody(fn)), `${fn}() 里没有旧壳这一支：那种机器上屏上会画成「可以再粘一遍」`);
+  }
+  const flow = fnBody("ledgermeLoginFlow");
+  assert.ok(/v78 及以前的壳/.test(flow), "旧壳连接被拦下时没说是怎么回事");
+  /* 粘进来的那一步：prompt 不许回填旧值（页面手里没有），回话只认 hasCookie 这个布尔 */
+  assert.ok(/prompt\(tip, ""\)/.test(flow), "prompt 又开始回填旧 Cookie 了：页面手里从来不再有它");
+  assert.ok(/!r\.hasCookie/.test(flow), "页面不再按原生回话里的 hasCookie 落定「连上没有」");
+  assert.ok(!/r\.cookie/.test(flow), "连接回话里还带着 cookie 字段");
+});
+
+test("v79：抓出去的那一轮由页面交布尔、原生侧注入值；ledgermeCheck 不带实参", () => {
+  const nf = fnBody("nativeNavFetch");
+  assert.ok(/ledgerme: !!withLedgerme/.test(nf), "抓取载荷又交的是值而不是布尔开关");
+  assert.ok(!/ledgermeCookie/.test(nf), "抓取载荷里页面又自己填了 Cookie");
+  const body = fnBody("nativeFetchAll");
+  assert.ok(/const lgmOn = ledgermeLoggedIn\(\);/.test(body),
+    "抓取路径又按本机缓存的值决定要不要查账本：那个值已经不在页面手里了");
+  assert.ok(!/ledgermeCookie/.test(body), "抓取路径里又出现了 ledgermeCookie");
+  /* ledgermeCheck 的形状：只认 reqId，页面手里没有可传的东西 */
+  const calls = [...APP_SRC.matchAll(/aixhubBridge\("ledgermeCheck",\s*\[([^\]]*)\]/g)].map(m => m[1]);
+  assert.ok(calls.length >= 1, "找不到 ledgermeCheck 的桥调用，锚点变了要同步改这条");
+  for (const arg of calls) assert.equal(arg, "", "ledgermeCheck 又带实参了：Cookie 不该经过页面");
+  /* 401 与断开都请原生侧清，并顺手删历史明文键 */
+  for (const fn of ["ledgermeCheck", "ledgermeLogout"]) {
+    assert.ok(/ledgermeClearNative\(\)/.test(fnBody(fn)), `${fn}() 没请原生侧清掉加密区里那一份`);
+    assert.ok(/ledgermePurgeLegacy\(\)/.test(fnBody(fn)), `${fn}() 没顺手删历史明文键`);
+  }
+  const clr = fnBody("ledgermeClearNative");
+  assert.ok(/typeof window\.NativeNav\.ledgermeClear === "function"/.test(clr),
+    "清这一份之前没判方法在不在：新页面配旧壳会抛");
+});
+
+test("v79：账本卡片说实话 —— 值在本机加密区，且不许出现「应该能用」", () => {
+  const r = fnBody("renderLedgerme");
+  assert.ok(/Android Keystore/.test(r), "卡片没告诉用户 Cookie 到底存在哪");
+  assert.ok(/页面与浏览器都读不到它/.test(r), "卡片没把「页面读不到」这层说清楚");
+  assert.ok(!/应该能用|应该可以|应该会/.test(r), "v79 的文案里出现猜测式表述");
+  /* 那句「不更新不影响官网那条线」是本机降级的那句实话，不许被顺手删掉 */
+  const old = r.slice(r.indexOf("ledgermeShellOld()"));
+  assert.ok(/先更新 App 再连接/.test(old), "旧壳那一句没说清该怎么办");
+});
+
+test("v79：铁律 #6 的账本这一格 —— 整份页面里没有任何「取 Cookie」的去处", () => {
+  /* 这一条守的是最省事的那种回退：给页面留一个 ledgermeCookie() 读函数，
+     于是抓取路径、卡片、localStorage 又串成一条明文的线。门禁在页面这一侧只认「没有这个函数」。 */
+  assert.ok(!/function ledgermeCookie\s*\(/.test(APP_SRC), "页面又有了取 Cookie 的函数：值只能从原生侧注入");
+  assert.ok(!/LGM_LS\.cookie/.test(APP_SRC), "LGM_LS 又出现了 cookie 键位");
+  /* v79 之后，页面里出现 ledgermeCookie 这七个字符的地方只有历史键名那一行与注释 */
+  const hits = [...APP_SRC.matchAll(/ledgermeCookie/g)].length;
+  assert.ok(hits <= 2, `ledgermeCookie 在页面里出现了 ${hits} 次，迁移做一半等于没做`);
+});
+
 /* ---------- v59：设置里那两节「有时候消失」 ---------- */
 
 test("App-only 判定不再只看「按下这一刻桥在不在」：本机壳 origin + 认出来不反悔 + 排队重试", () => {
