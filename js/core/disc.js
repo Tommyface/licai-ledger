@@ -274,7 +274,6 @@ function hasField(d, k) {
  */
 export function applyAutoDisc(p, got) {
   const d = normDisc(p && p.disc);
-  const had = discHasContent(d);                 // 回填前有没有内容：决定状态算手工还是回填
   const res = { ok: false, filled: [], kept: [], gaps: discGaps(d), why: "" };
   const src = got && got.source;
   if (!discSourceOk(src)) {
@@ -294,7 +293,15 @@ export function applyAutoDisc(p, got) {
       fetchedAt: str(src.fetchedAt),
       tier: DISC_TIERS.indexOf(str(src.tier)) >= 0 ? str(src.tier) : "unknown" };
   }
-  if (!had) d.status = "auto";                   // 原本有内容 → 状态保持手工，别把人工录的说成机器填的
+  /* 状态只有三档：未录入 / 手工录入 / 检索回填。这一步必须动它，但不能乱动：
+     - 原本空账 → 这一条就是机器填的，记 auto；
+     - 手工录过且有出处（manual）→ 保持 manual，别把人工录的说成机器填的；
+     - 有内容却没出处（normDisc 把这种脏记录判成 none）→ 这一次补上了字段、
+       也挂上了官网出处，若还留着 none，卡片顶上的标签会写「未录入」，
+       而下面三行明明有值 —— 同一屏同时说真话和假话。
+     所以：只要不是 manual，回填成功就记 auto；哪几项是手工挡下来的，
+     抓取框那句「手工录入的不覆盖（…）」会当场念出来。 */
+  if (d.status !== "manual") d.status = "auto";
   p.disc = d;
   const reg = str(got.meta && got.meta.regCode);
   if (reg && !str(p.regCode) && !str(p.code)) p.regCode = reg;   // 登记编码是「拿什么去别处查」的钥匙，只在空着时补

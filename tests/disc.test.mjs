@@ -201,8 +201,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v70"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v70"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v71"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v71"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -222,7 +222,7 @@ test("清空全部字段等于回到未披露，而不是留下半截配置", ()
   assert.ok(discGaps(r.disc).includes("source"), "内容清空后出处不该继续算作有效披露");
 });
 
-/* ---------- 8. T1b：官网档案自动回填（v70） ----------
+/* ---------- 8. T1b：官网档案自动回填（v70 起，v71 修了两处口径） ----------
    这一节的每一条都在问同一类问题：机器写账的时候有没有越权。
    fixture 的形状照抄 navsources/rules.py 的 _seal 输出（2026-11-03 实测三家真实回包），
    不是我自己想象的样子。 */
@@ -275,6 +275,20 @@ test("手工值优先：官网给的数不覆盖已录项，只补空着的", ()
   assert.equal(p.disc.status, "manual", "原本有内容 → 状态仍是手工，别把人工录的说成机器填的");
   assert.equal(p.disc.source.url, "https://manual.example/a.pdf", "已有出处不动");
   assert.equal(p.regCode, "Z7008926000006", "登记编码空着就补上（它是去别处查的钥匙，不是手工录的规则值）");
+});
+
+test("脏记录（有内容没出处）回填后：状态不许还写着「未录入」，但手工那项仍不动", () => {
+  /* normDisc 把「有内容 + 出处无效」判成 status:none（界面另有「缺出处」那一格）。
+     v70 的 applyAutoDisc 只在原本全空时改状态，于是这种记录补完字段、挂上官网出处之后
+     仍是 none —— 卡片顶上写「未录入」，底下三行却明明有值，同一屏说了两句相反的话。 */
+  const p = { disc: { status: "manual", lockDays: 14, openRule: "", feeRedeem: [], assets: [],
+    investScope: "", source: null } };
+  const r = applyAutoDisc(p, BOB_GOT());
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.kept, ["lockDays"], "手工录的 14 天仍然挡住官网的 7 天");
+  assert.equal(p.disc.lockDays, 14, "值一个都不许被盖掉");
+  assert.equal(p.disc.status, "auto", "字段与出处都来自这一次检索 → 记检索回填，不能留「未录入」");
+  assert.equal(p.disc.source.tier, "official");
 });
 
 test("出处不合格：一条都不写，只把缺口如实报出去", () => {
@@ -350,6 +364,13 @@ test("页面接线：规则回填复用净值那条桥，两处挂钩 + 前台�
   assert.ok(/徽银[^"]{0,20}翻页/.test(app), "徽银要翻页找产品，慢的事得提前在前台说");
   assert.ok(app.includes("网页版没有本机抓取，规则自动回填用不了"),
     "没有桥就要如实说用不了（铁律 10），不许留个按钮点了没反应");
+  /* v71：抓取框只放得下三条，「不入账 / 没读到」这类话必须排在前面，
+     被截掉的还要说清还有几只 —— 界面少说一句，用户就以为账本是齐的。 */
+  assert.ok(/ruleNotes\.filter\(hardLine\)[\s\S]{0,120}slice\(0, 3\)/.test(app),
+    "回填的话没按「严重的先说」排，最该看见的那句会被顺叙挤掉");
+  assert.ok(/const hardLine = l => \/[^\n]*不入账[^\n]*\/\.test\(l\)/.test(app),
+    "hardLine 的判据里必须认「不入账」");
+  assert.ok(app.includes("只的回填说明在各产品页"), "被截掉的那几只要明说去哪看");
   const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
   ["applyAutoDisc", "rulesDue", "RULES_COOLDOWN_DAYS"].forEach(n =>
     assert.ok(imp[1].includes(n), `app.js 没导入 ${n}：口径第二处实现就会分叉`));
