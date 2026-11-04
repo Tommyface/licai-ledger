@@ -57,7 +57,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v72";
+const APP_VER = "v73";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1519,9 +1519,12 @@ function saveProduct(pid) {
    ------------------------------------------------------------
    口径全部在 js/core/disc.js（null 是不知道 / ratePct 是百分数 / 分档是 [from,to)），
    这里只做三件事：把字段拼成一张卡、把表单收进 DATA、把缺失如实显示出来。
-   T1 阶段只接受手工录入：检索回填要等模型桥（T3）之后，那时复用的还是这套字段
-   和这个表单，不另开通路 —— 否则「手工录的」和「回填的」会有两套空值语义，
-   而 T7 的规则引擎只认一处。
+   这张卡有两条来路：手工录入，和 v70 起的官网档案自动回填（本机 Python 桥，
+   请求带 mode:"rules"）。当年说好的「回填复用这套字段和这个表单、不另开通路」
+   已经兑现 —— 回填只经 applyAutoDisc 写这同一份 DATA，没有第二套空值语义，
+   T7 的规则引擎仍然只认一处。
+   两条来路撞上时手工值优先：手工录过的项回填跳过，哪几项被挡下来在抓取框当场念；
+   官网那一页凑不齐「链接 + 站内披露日期」就只记缺口、不写值。
    ============================================================ */
 const DISC_STATUS_TEXT = { none: "未录入", manual: "手工录入", auto: "检索回填" };
 /* 有内容却没出处 = 脏数据指示器，不是「未录入」：

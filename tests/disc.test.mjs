@@ -201,8 +201,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v72"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v72"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v73"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v73"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -222,7 +222,7 @@ test("清空全部字段等于回到未披露，而不是留下半截配置", ()
   assert.ok(discGaps(r.disc).includes("source"), "内容清空后出处不该继续算作有效披露");
 });
 
-/* ---------- 8. T1b：官网档案自动回填（v70 起，v71 修了两处口径） ----------
+/* ---------- 8. T1b：官网档案自动回填（v70 起，v71 修了两处口径，v73 清了一段与线上相反的注释） ----------
    这一节的每一条都在问同一类问题：机器写账的时候有没有越权。
    fixture 的形状照抄 navsources/rules.py 的 _seal 输出（2026-11-03 实测三家真实回包），
    不是我自己想象的样子。 */
@@ -377,4 +377,24 @@ test("页面接线：规则回填复用净值那条桥，两处挂钩 + 前台�
   const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
   ["applyAutoDisc", "rulesDue", "RULES_COOLDOWN_DAYS"].forEach(n =>
     assert.ok(imp[1].includes(n), `app.js 没导入 ${n}：口径第二处实现就会分叉`));
+});
+
+test("注释不许和已经上线的行为相反：T1 那句旧口径必须改掉，改完的话要有代码撑着", () => {
+  /* 这段注释是这张卡的「说明书」：它说「只接受手工录入」的时候，回填早就在跑了。
+     读代码的人信的是注释 —— 注释撒谎，比没注释更糟，因为它会把人往错的方向改。
+     所以这一条既钉「旧句子不许回来」，也钉「新写的每一句都能在代码里落到实处」。 */
+  const app = read("app.js");
+  assert.ok(!/检索回填要等模型桥/.test(app),
+    "回填 v70 就上线了，注释还写着「要等模型桥（T3）之后」：这是与线上行为相反的说明");
+  assert.ok(!app.includes("T1 阶段只接受手工录入"),
+    "「只接受手工录入」这句限定已经不成立，不许以任何形式留在 app.js 里");
+  assert.ok(app.includes("这张卡有两条来路：手工录入"),
+    "注释要说清这张卡有两条来路，别只写一条");
+  assert.ok(/回填只经 applyAutoDisc 写这同一份 DATA/.test(app),
+    "注释承诺回填不另开第二条写账通路 —— 这句话是 applyAutoDisc 唯一入口那条门禁的说明书");
+  /* 注释里的每一句「前台会怎么说」都要真有对应的代码，不然就是许愿 */
+  assert.ok(/请求带 mode:"rules"/.test(app) && /mode: "rules"/.test(app),
+    "注释说请求带 mode:\"rules\"，代码里就得真带");
+  assert.ok(app.includes("手工录入的不覆盖"),
+    "注释说手工值优先、挡下来的项当场念，抓取框里就要真有那句");
 });
