@@ -35,6 +35,7 @@ import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
 import { redeemAdvice } from "./js/domain/advice.js";
+import { switchAdvice } from "./js/domain/switchadv.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
   llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr } from "./js/domain/llm.js";
@@ -58,7 +59,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v74";
+const APP_VER = "v75";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -123,7 +124,7 @@ let SYNC = { owner: "glorywork", repo: "licai-data", path: "licai-data.json", to
 let NOTIFY = { on: false, lastCheck: 0 };
 /* 用户已忽略的抓取告警签名（按「失败集合」生成，集合一变就重新提示） */
 let ALERT_DISMISSED = "";
-let UI = { range: "day", groupBy: "inst", calY: 0, calM: 0, selDate: "", activePick: "", viewProd: "", detTab: "active", prodRange: "3m", prodOv: "a7", detQ: "", detInst: "", detSort: "dayP", detAsc: false,
+let UI = { range: "day", groupBy: "inst", calY: 0, calM: 0, selDate: "", activePick: "", viewProd: "", detTab: "active", prodRange: "3m", prodOv: "a7", detQ: "", detInst: "", detSort: "dayP", detAsc: false, switchTo: "",
   /* 产品页收益表：机构筛选 / 搜索 / 排序列与方向（默认按 7 日年化降序 ——
      v54 起持有天数那一列已下线，默认键跟着落到表里第一列数字上）
      bdCols = "" 表示这台设备还没选过列模式，此时按屏宽给默认（见 bdMode()） */
@@ -1559,13 +1560,13 @@ function discCard(p, pos) {
     : `<span class="muted">未披露</span>`}</td></tr>`);
   rows.push(`<tr><td>投资范围（短引）</td><td>${d.investScope ? esc(d.investScope) : `<span class="muted">未披露</span>`}</td></tr>`);
   /* 已持仓时把「当前落在哪一档」直接说出来了，用户才看得见录进去的东西有没有被用上。
-     只是展示，不做任何建议 —— 判定属于 T7。 */
+     这里只取档、不给建议 —— 建议是下面 T7a「现在赎的话」与 T7b「换到另一只的话」两张卡的事。 */
   const holdRate = pos && pos.shares > 0 && typeof pos.holdDays === "number"
     ? feeRateFor(p.disc, pos.holdDays) : null;
   /* 把「录进去的档位真的被取到了」显示出来：只显示落在哪一档，不显示任何建议。
-     判定与措辞属于 T7，这里越界一步就会让用户以为换仓结论已经出来了。 */
+     越界一步就会让用户以为换仓结论已经出来了 —— 结论有它自己的两张卡（v74 / v75）。 */
   const holdLine = typeof holdRate === "number"
-    ? `<div class="tip" style="margin-top:8px">按当前持有 ${Math.floor(pos.holdDays)} 天，赎回费落在 <b>${holdRate}%</b> 这一档（仅取档展示，换仓判断还没做）。</div>`
+    ? `<div class="tip" style="margin-top:8px">按当前持有 ${Math.floor(pos.holdDays)} 天，赎回费落在 <b>${holdRate}%</b> 这一档（仅取档展示，判断在下面的卡里）。</div>`
     : "";
   const src = d.source
     ? `<div class="tip" style="margin-top:8px">出处：${esc(DISC_TIER_LABEL[d.source.tier] || d.source.tier)}`
@@ -1684,7 +1685,8 @@ function saveDisc(pid) {
      · 不建缓存：结论每次从当前持仓与当前规则现推。
        「改完配置卡片还停在旧结论」比多算一次贵得多。
    这一版只回答「这一只现在赎得出来吗、赎要付多少」。
-   「该不该换到另一只」要跨产品比，比较口径还没定 —— 不在这张卡里越界。
+   「该不该换到另一只」是跨产品的比较，v75 起另有一张卡（T7b 换到另一只的话）——
+   两张卡各判各的：这张卡仍然不出现任何跨产品的结论。
    ============================================================ */
 function adviceCard(p, pos) {
   const adv = redeemAdvice({ p, pos, td: today() });
@@ -1707,6 +1709,54 @@ function adviceCard(p, pos) {
       ${row("结论", vLevel, adv.verdictText + (adv.unlockInDays !== null ? `（还差 ${adv.unlockInDays} 天）` : ""))}
       ${adv.lines.map(l => row(l.title, l.level, l.text)).join("")}
     </tbody></table>`;
+}
+
+/* ============================================================
+   T7b · 换到另一只的话（v75）
+   ------------------------------------------------------------
+   判定全在 js/domain/switchadv.js（纯函数、可单测），这一层只做四件事：
+     · 「要换进的那一只」由用户选：没有对比对象时引擎只回「不适用」，
+       页面绝不拿一只去猜另一只；
+     · 钱与收益一律走 shown() 现算现显 —— 赎回来的到手是钱，两边的年化是钱折算
+       出来的，隐藏开关打开时两类一起藏（把「差 0.83 个百分点」写成文字就等于
+       绕过遮罩把收益摆在大屏上）；
+     · 引擎没有「该换」这一档，卡片也不许造：措辞只说换得动、要背什么代价；
+     · 不缓存：结论每次从两边当前持仓与当前规则现推，
+       改完任一张配置卡片，下一屏就得变，不然用户对照的是旧账。
+   ============================================================ */
+function switchCard(p, pos) {
+  const others = DATA.products.filter(x => x.id !== p.id);
+  const b = UI.switchTo ? DATA.products.find(x => x.id === UI.switchTo) : null;
+  const sw = switchAdvice({ a: p, b, posA: pos, posB: b ? position(b) : null, td: today() });
+  const row = (title, level, text) =>
+    `<tr class="ana ${level}"><td>${esc(title)}</td><td><b>${esc(ANA_LEVEL_TEXT[level] || level)}</b>${esc(text)}</td></tr>`;
+  const vLevel = sw.verdict === "ready" ? "ok" : sw.verdict === "no" ? "bad"
+    : sw.verdict === "skip" ? "skip" : "na";
+  const rateTxt = v => v === null ? "—" : (Math.round(v * 100) / 100) + "%";
+  const pick = others.length
+    ? `<div class="field" style="margin-top:10px"><label>要换进的那一只</label>
+        <select id="switchPick" onchange="setSwitchTarget(this)">
+          <option value="">— 选一只做对比对象 —</option>
+          ${others.map(x => `<option value="${esc(x.id)}"${UI.switchTo === x.id ? " selected" : ""}>${esc(prodLabel(x))}</option>`).join("")}
+        </select></div>`
+    : `<div class="tip" style="margin-top:8px">台账里只有这一只产品：跨产品的比较要两只都在才判得了，先另建一只。</div>`;
+  const nums = sw.market !== null
+    ? `<div class="grid2" style="margin:10px 0 6px">
+        <div class="stat"><div class="l">赎出来到手</div><div class="v">${sw.net === null ? "—" : shown(money(sw.net))}</div><div class="cap">${sw.ratePct === null ? "赎回费未披露 → 扣多少算不出" : "市值 " + shown(money(sw.market)) + "，赎回费 " + rateTxt(sw.ratePct)}</div></div>
+        <div class="stat"><div class="l">换进去后新锁定</div><div class="v">${sw.toLockDays === null ? "—" : sw.toLockDays === 0 ? "不限" : sw.toLockDays + " 天"}</div><div class="cap">${sw.toLockDays === null ? "那一只的持有期没录 → 锁多久不知道" : sw.toLockDays === 0 ? "披露为无持有期限制" : "从零起算，在手的天数带不过去"}</div></div>
+      </div>`
+    : "";
+  /* 两边的年化是钱折算出来的：数值只在 shown(pct(...)) 的括号里出现，
+     颜色也走 tone()，否则隐藏时「绿的还是红的」就把收益方向漏了 */
+  const perf = sw.perf.diff === null ? ""
+    : `<div class="tip" style="margin-top:8px">持仓年化：这一只 <b class="${tone(sw.perf.a)}">${shown(pct(sw.perf.a))}</b>、那一只 <b class="${tone(sw.perf.b)}">${shown(pct(sw.perf.b))}</b>，差 <b class="${tone(sw.perf.diff)}">${shown(pct(Math.abs(sw.perf.diff)))}</b>。<span class="muted">两边各按自己的持有天数折算，窗口不同；历史不代表未来，这两个数不是换的依据。</span></div>`;
+  return `<div class="card-t" style="margin:16px 0 8px"><h2 style="font-size:14px">换到另一只的话</h2><span class="hint">只判换得动 · 不说该不该</span></div>
+    ${pick}
+    ${nums}
+    <table class="navtbl ana"><tbody>
+      ${row("结论", vLevel, sw.verdictText + (sw.unlockInDays !== null ? `（还差 ${sw.unlockInDays} 天）` : ""))}
+      ${sw.lines.map(l => row(l.title, l.level, l.text)).join("")}
+    </tbody></table>${perf}`;
 }
 
 /* ============================================================
@@ -2603,6 +2653,7 @@ function openProdDetail(pid) {
   const p = DATA.products.find(x => x.id === pid);
   if (!p) return toast("产品不存在");
   UI.viewProd = pid;
+  UI.switchTo = "";
   if (!UI.prodRange) UI.prodRange = "3m";
   if (!UI.prodOv) UI.prodOv = "a7";
   renderProdDetail();
@@ -2614,6 +2665,12 @@ function setProdRange(btn, r) {
 function setProdOv(btn, o) {
   if (btn) { btn.parentElement.querySelectorAll("button").forEach(b => b.classList.remove("on")); btn.classList.add("on"); }
   UI.prodOv = o; renderProdDetail();
+}
+/* 换仓比较的对象：只改这一屏的状态，不写账本 —— 选了哪一只不是用户的事实数据，
+   下一次进详情应当从「没选」开始（见 openProdDetail 里跟着 viewProd 一起复位）。 */
+function setSwitchTarget(sel) {
+  UI.switchTo = sel && sel.value ? String(sel.value) : "";
+  renderProdDetail();
 }
 function renderProdDetail() {
   const p = DATA.products.find(x => x.id === UI.viewProd);
@@ -2740,6 +2797,7 @@ function renderProdDetail() {
     <div class="card-t" style="margin:16px 0 8px"><h2 style="font-size:14px">底层配置与申赎规则</h2><span class="hint">${esc(discStatusText(p))} · 照录披露原文</span></div>
     ${discCard(p, pos)}
     ${adviceCard(p, pos)}
+    ${switchCard(p, pos)}
     <div class="row-btn" style="margin-top:14px">
       <button class="btn gh" style="flex:1" onclick="openDisc('${p.id}')">录入 / 修改配置</button>
       <button class="btn pri" style="flex:1" onclick="closeSheet();editProd('${p.id}')">编辑产品</button>
@@ -4815,7 +4873,7 @@ Object.assign(window, {
   exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
-  saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth,
+  saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
   setProdRange, setRange, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });
 
