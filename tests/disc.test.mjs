@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DISC_TIERS, parseFeeLine, parseAssetLine, parseDiscForm, normDisc, discGaps, feeRateFor,
+  discSourceOk, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS, DISC_GAP_LABEL,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -200,8 +201,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v69"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v69"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v70"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v70"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -219,4 +220,137 @@ test("清空全部字段等于回到未披露，而不是留下半截配置", ()
   assert.equal(r.errors.length, 0, r.errors.join("；"));
   assert.equal(r.disc.status, "none", "只有出处没有内容，仍算未录入");
   assert.ok(discGaps(r.disc).includes("source"), "内容清空后出处不该继续算作有效披露");
+});
+
+/* ---------- 8. T1b：官网档案自动回填（v70） ----------
+   这一节的每一条都在问同一类问题：机器写账的时候有没有越权。
+   fixture 的形状照抄 navsources/rules.py 的 _seal 输出（2026-11-03 实测三家真实回包），
+   不是我自己想象的样子。 */
+
+/* 北银真实档案封出来的样子（PROD_TERM_DAYS=7 / NAV_DATE=20261102） */
+const BOB_GOT = () => ({
+  org: "bob",
+  rules: { lockDays: 7, openRule: "最短持有 / 最低持有7天", feeRedeem: [], assets: [], investScope: "" },
+  meta: { regCode: "Z7008926000006" },
+  source: { url: "https://beijingbobwealth.com.cn/bylc-api/product/info?PROD_CODE=YJ01251204A",
+    title: "春系列诚享7天持有期29号A类份额", publishedAt: "2026-11-02",
+    fetchedAt: "2026-11-04T01:00:00.000Z", tier: "official" },
+  gaps: ["feeRedeem", "assets", "investScope"], why: ""
+});
+
+test("出处合格判据：URL 与发布时间两样齐 —— 缺一样就不算出处", () => {
+  assert.equal(discSourceOk(null), false);
+  assert.equal(discSourceOk({}), false);
+  assert.equal(discSourceOk({ url: "https://a.com/x" }), false, "有链接没日期说不出哪天披露的");
+  assert.equal(discSourceOk({ publishedAt: "2026-11-02" }), false, "有日期没链接追不到原文");
+  assert.equal(discSourceOk({ url: "a.com/x", publishedAt: "2026-11-02" }), false, "不是完整地址");
+  assert.equal(discSourceOk({ url: "https://a.com/x", publishedAt: "2026-11-02" }), true);
+});
+
+test("空账本 + 合格出处：补上的项进账、状态记成检索回填、出处一起落", () => {
+  const p = { name: "北银诚享7天持有期29号" };
+  const r = applyAutoDisc(p, BOB_GOT());
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.filled, ["lockDays", "openRule"]);
+  assert.deepEqual(r.kept, [], "本来没东西，谈不上覆盖");
+  assert.equal(p.disc.lockDays, 7);
+  assert.equal(p.disc.status, "auto", "全新一条来自检索，不能记成手工录入");
+  assert.equal(p.disc.source.publishedAt, "2026-11-02", "披露日期是站内的，不是 fetchedAt");
+  assert.notEqual(p.disc.source.fetchedAt, undefined);
+  assert.equal(p.disc.source.tier, "official");
+  assert.deepEqual(discGaps(p.disc), ["feeRedeem", "assets", "investScope"]);
+  assert.deepEqual(r.gaps, discGaps(p.disc), "回给界面的缺口必须与 discGaps 同口径");
+  assert.equal(p.regCode, "Z7008926000006", "登记编码是去别处查的钥匙，空着就该补上");
+});
+
+test("手工值优先：官网给的数不覆盖已录项，只补空着的", () => {
+  const p = { disc: { status: "manual", lockDays: 30, openRule: "", feeRedeem: [], assets: [],
+    investScope: "固定收益类不低于 80%",
+    source: { url: "https://manual.example/a.pdf", title: "说明书", publishedAt: "2026-09-30", tier: "official" } } };
+  const r = applyAutoDisc(p, BOB_GOT());
+  assert.equal(r.ok, true);
+  assert.equal(p.disc.lockDays, 30, "官网说 7 天也不许盖掉手工录的 30 天");
+  assert.deepEqual(r.kept, ["lockDays", "investScope"]);
+  assert.deepEqual(r.filled, ["openRule"], "只有空着的那项被补");
+  assert.equal(p.disc.status, "manual", "原本有内容 → 状态仍是手工，别把人工录的说成机器填的");
+  assert.equal(p.disc.source.url, "https://manual.example/a.pdf", "已有出处不动");
+  assert.equal(p.regCode, "Z7008926000006", "登记编码空着就补上（它是去别处查的钥匙，不是手工录的规则值）");
+});
+
+test("出处不合格：一条都不写，只把缺口如实报出去", () => {
+  /* rules.py 的 _seal 在这种情况下已经把 rules 倒空了；JS 这侧再判一次是防御，
+     万一以后有条路绕过 _seal（手工导入了半截 JSON），账面也不能被写脏。 */
+  const got = BOB_GOT();
+  delete got.source.publishedAt;
+  got.why = "官网产品档案里没有可读到的披露日期，按未入账处理（只记缺口）";
+  const p = { name: "某产品" };
+  const r = applyAutoDisc(p, got);
+  assert.equal(r.ok, false);
+  assert.equal(p.disc, undefined, "没出处就连一个字段都不许落地");
+  assert.deepEqual(r.filled, []);
+  assert.equal(r.why, got.why, "Python 说的那句原因要原样带到前台，别换一句话");
+  assert.equal(r.gaps.length, 6, "六项全缺（五项规则 + 出处）");
+});
+
+test("官网回包里混进脏值：走 normDisc 那套类型口径，不许写出半截规则", () => {
+  const got = BOB_GOT();
+  got.rules.lockDays = "七天";                     // 非数 → 未知，不是 0
+  got.rules.assets = "固定收益类";                  // 不是数组 → 丢弃
+  got.rules.feeRedeem = [{ from: 0, to: null, ratePct: "1.5" }];
+  const p = {};
+  const r = applyAutoDisc(p, got);
+  assert.equal(r.ok, true);
+  assert.equal(p.disc.lockDays, null);
+  assert.deepEqual(p.disc.assets, []);
+  assert.deepEqual(p.disc.feeRedeem, [], "费率是字符串的那一档认不出来就别写，写了 T7 会当数算");
+  assert.deepEqual(r.filled, ["openRule"]);
+});
+
+test("一项都没补上时连出处也不写：账面保持原样", () => {
+  const p = { disc: { status: "manual", lockDays: 7, openRule: "最短持有", feeRedeem: [],
+    assets: [], investScope: "", source: null } };
+  const got = BOB_GOT();
+  got.rules.investScope = ""; got.rules.assets = [];   // 官网这几项本来就没有
+  const before = JSON.stringify(p);
+  const r = applyAutoDisc(p, got);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.filled, []);
+  assert.equal(JSON.stringify(p), before, "没补任何东西就不许改动账面（出处也不能单独挂上去）");
+  assert.ok(r.gaps.includes("source"), "有内容没出处 → 缺口里必须还有 source");
+});
+
+test("冷却：五项都齐不跑；30 天内试过不跑；过期/没试过/时间在 futuro 都跑", () => {
+  const D = 86400000, now = Date.parse("2026-11-04T00:00:00.000Z");
+  const iso = ms => new Date(ms).toISOString();
+  assert.equal(rulesDue({ }, now), true, "新添加的产品没有 rulesAt = 没试过");
+  assert.equal(rulesDue({ rulesAt: "不是时间" }, now), true, "认不出来就重跑，别当永久冷却");
+  assert.equal(rulesDue({ rulesAt: iso(now - 10 * D) }, now), false, "10 天前刚翻过页");
+  assert.equal(rulesDue({ rulesAt: iso(now - (RULES_COOLDOWN_DAYS - 1) * D) }, now), false);
+  assert.equal(rulesDue({ rulesAt: iso(now - RULES_COOLDOWN_DAYS * D) }, now), true, "满 30 天该再跑");
+  assert.equal(rulesDue({ rulesAt: iso(now + 5 * D) }, now), true, "时钟倒挂按没试过处理");
+  const full = { lockDays: 7, openRule: "最短持有", feeRedeem: [{ from: 0, to: null, ratePct: 1.5 }],
+    assets: [{ name: "债券", pct: 80 }], investScope: "固定收益类",
+    source: { url: "https://a.com/x", publishedAt: "2026-10-01", tier: "official" } };
+  assert.equal(rulesDue({ disc: full }, now), false, "齐了就不该再去打扰官网");
+  assert.equal(rulesDue({ disc: { ...full, source: null } }, now), false,
+    "只差出处不值得再跑一趟：出处是手工的活，自动那条给不出来就别白翻");
+});
+
+test("页面接线：规则回填复用净值那条桥，两处挂钩 + 前台话术都在", () => {
+  const app = read("app.js");
+  assert.ok(/mode: "rules"/.test(app), "没往桥里写 mode，Python 会当成净值请求跑");
+  assert.ok(/fetchedAt: new Date\(\)\.toISOString\(\)/.test(app),
+    "fetchedAt 由页面盖：Python 的解析侧不读时钟，谁的表谁写");
+  assert.ok(!/NativeNav\.(rules|disc)/.test(app),
+    "不许另开桥方法：复用 NativeNav.fetch，Java 侧少一处可漏的守卫");
+  assert.ok(app.includes('autoFillRules(target, "add")'), "添加产品后没跑回填");
+  assert.ok(app.includes('await autoFillRules(cur, "sync")'), "净值抓完后没按冷却跑回填");
+  assert.ok(app.includes("p.rulesAt = new Date().toISOString()"),
+    "试过就得留凭据（进账本、跟着数据同步，不是 localStorage —— 铁律 6）");
+  assert.ok(/徽银[^"]{0,20}翻页/.test(app), "徽银要翻页找产品，慢的事得提前在前台说");
+  assert.ok(app.includes("网页版没有本机抓取，规则自动回填用不了"),
+    "没有桥就要如实说用不了（铁律 10），不许留个按钮点了没反应");
+  const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
+  ["applyAutoDisc", "rulesDue", "RULES_COOLDOWN_DAYS"].forEach(n =>
+    assert.ok(imp[1].includes(n), `app.js 没导入 ${n}：口径第二处实现就会分叉`));
 });

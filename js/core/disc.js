@@ -203,10 +203,15 @@ export function normDisc(raw) {
       .map(a => ({ name: str(a.name), pct: isNum(a.pct) ? a.pct : null }))
     : [];
   const s = raw.source;
-  d.source = s && typeof s === "object" && /^https?:\/\//i.test(str(s.url))
-    ? { url: str(s.url), title: str(s.title), publishedAt: str(s.publishedAt),
-        tier: DISC_TIERS.indexOf(str(s.tier)) >= 0 ? str(s.tier) : "unknown" }
-    : null;
+  if (s && typeof s === "object" && /^https?:\/\//i.test(str(s.url))) {
+    d.source = { url: str(s.url), title: str(s.title), publishedAt: str(s.publishedAt),
+      tier: DISC_TIERS.indexOf(str(s.tier)) >= 0 ? str(s.tier) : "unknown" };
+    /* fetchedAt 有才带：它是自动回填那条线的凭据（我们自己的表），手工录入根本没有这一项。
+       空字符串也算一个键，会让「表单录进去再过一遍 normDisc」的往返对不上（tests 盯着）。 */
+    if (str(s.fetchedAt)) d.source.fetchedAt = str(s.fetchedAt);
+  } else {
+    d.source = null;
+  }
   const hasContent = discHasContent(d);
   if (!hasContent) d.source = null;          // 与 parseDiscForm 同一条规则：无内容即无出处
   d.status = !hasContent ? "none" : (d.source ? (raw.status === "auto" ? "auto" : "manual") : "none");
@@ -224,6 +229,98 @@ export function discGaps(d) {
   if (!x.investScope) gaps.push("investScope");
   if (!x.source) gaps.push("source");
   return gaps;
+}
+
+/* ---------- T1b：官网产品档案 → 自动回填（v70 新增） ----------
+   分工：Python 侧（navsources/rules.py）负责「读官网并封成一条有出处的记录」，
+   出处不齐它就已经把内容倒空了；这一层只管「落账时不越权」——
+   手工录过的字段一律不动，只补空着的，补完如实说还缺什么。
+
+   为什么 JS 这一侧还要再判一次出处（discSourceOk）：铁律 3 的判据若只活在 Python，
+   改 Python 的人不会想到页面也靠「有出处才有内容」这条不变式；
+   schema 的 description 里点名的也是这个名字 —— 两侧各留一份，缺哪侧都看得见。 */
+
+/** 合格出处：URL 与发布时间两样齐（缺一样就是说不出这条规则哪天披露的）。 */
+/** @param {any} src normDisc 意义上的 source 对象 @returns {boolean} */
+export function discSourceOk(src) {
+  if (!src || typeof src !== "object") return false;
+  return /^https?:\/\//i.test(str(src.url)) && !!str(src.publishedAt);
+}
+
+/* 自动回填能写的五项 —— 名字与 rules.py 的 GAP_FIELDS 一一对上，
+   对账在 scripts/check_bridge_guard.py 第 7 项里做（对不上就报错，不许静默放行）。 */
+const AUTO_FIELDS = ["lockDays", "openRule", "feeRedeem", "assets", "investScope"];
+
+/** 某一项算不算「已经有值」：判据与 discGaps 完全一致，两处不许分叉。 */
+function hasField(d, k) {
+  if (k === "lockDays") return d.lockDays !== null;
+  if (k === "feeRedeem") return d.feeRedeem.length > 0;
+  if (k === "assets") return d.assets.length > 0;
+  return !!d[k];
+}
+
+/**
+ * got 是壳回包里的规则部分：{rules, source, meta, gaps, why}。
+ * 只在出处合格时把**空着**的字段补上；返回 {ok, filled, kept, gaps, why} 供调用方组织文案。
+ * 三条不许越界的规矩：
+ *   1. 出处不合格（discSourceOk=false）→ 一条都不写，ok=false，只把缺口报出去；
+ *   2. 手工已有的值一律不动（kept），哪怕官网给的数跟它不一样 ——
+ *      用户手上的说明书才是准的，回填不能反过来盖掉它；
+ *   3. 一项都没补上时连出处也不写：账面保持原样，别留一条「有出处没内容」的记录。
+ * p.rulesAt 由调用方写（那是「试过一次」的凭据，不是披露日期，别混进 disc）。
+ * @param {any} p 产品对象（就地改 p.disc / p.regCode）
+ * @param {any} got 壳的规则回包
+ * @returns {{ok:boolean, filled:string[], kept:string[], gaps:string[], why:string}}
+ */
+export function applyAutoDisc(p, got) {
+  const d = normDisc(p && p.disc);
+  const had = discHasContent(d);                 // 回填前有没有内容：决定状态算手工还是回填
+  const res = { ok: false, filled: [], kept: [], gaps: discGaps(d), why: "" };
+  const src = got && got.source;
+  if (!discSourceOk(src)) {
+    res.why = str(got && got.why) || "官网档案里没读到披露日期：没有出处就不入账，只记缺口";
+    return res;
+  }
+  const g = normDisc(got.rules);                 // 类型口径与手工录入共用同一套
+  AUTO_FIELDS.forEach(k => {
+    if (hasField(d, k)) { res.kept.push(k); return; }
+    if (hasField(g, k)) { d[k] = g[k]; res.filled.push(k); }
+  });
+  res.ok = true;
+  if (!res.filled.length) return res;            // 规矩 3：没补东西就不动账面
+  if (!d.source) {
+    d.source = { url: str(src.url), title: str(src.title), publishedAt: str(src.publishedAt),
+      /* fetchedAt 是我们自己的表（schema 里与 publishedAt 分开的就是这两个） */
+      fetchedAt: str(src.fetchedAt),
+      tier: DISC_TIERS.indexOf(str(src.tier)) >= 0 ? str(src.tier) : "unknown" };
+  }
+  if (!had) d.status = "auto";                   // 原本有内容 → 状态保持手工，别把人工录的说成机器填的
+  p.disc = d;
+  const reg = str(got.meta && got.meta.regCode);
+  if (reg && !str(p.regCode) && !str(p.code)) p.regCode = reg;   // 登记编码是「拿什么去别处查」的钥匙，只在空着时补
+  res.gaps = discGaps(d);
+  return res;
+}
+
+/* 冷却天数：徽银要先翻页找产品（2026-11-04 实测单只 90~96 秒），
+   天天跑既慢又是在替官网加负载；30 天与「说明书改版」的节奏对得上。 */
+export const RULES_COOLDOWN_DAYS = 30;
+
+/**
+ * 该不该为这只产品跑一次规则回填。
+ * 五种情况：五项都齐 → 不跑；30 天内试过 → 不跑；没 rulesAt / rulesAt 认不出来 /
+ * rulesAt 在未来（时钟或数据倒挂）→ 都按「没试过」跑。
+ * @param {any} p 产品对象 @param {number} [now] 毫秒时刻（测试传固定值）
+ * @returns {boolean}
+ */
+export function rulesDue(p, now) {
+  const need = discGaps(p && p.disc).filter(g => g !== "source");
+  if (!need.length) return false;                // 只差出处不值得再跑一趟：那是手工的活
+  const at = Date.parse(str(p && p.rulesAt));
+  if (!isFinite(at)) return true;
+  const t = isFinite(now) ? Number(now) : Date.now();
+  if (at > t) return true;
+  return (t - at) / 86400000 >= RULES_COOLDOWN_DAYS;
 }
 
 /**

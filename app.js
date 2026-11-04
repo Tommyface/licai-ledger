@@ -30,7 +30,7 @@ import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
 import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
-  DISC_TIER_LABEL, DISC_GAP_LABEL } from "./js/core/disc.js";
+  DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -57,7 +57,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v69";
+const APP_VER = "v70";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1509,6 +1509,9 @@ function saveProduct(pid) {
   toast((pid ? "产品已更新。" : "产品已保存。") + st.txt, st.ok ? 2200 : 3600);
   renderProd(); renderHome();
   autoPush();
+  /* T1b：新添加的产品当场去官网档案取一次底层/申赎规则（不挡这条同步返回的路）。
+     手工值优先、出处不齐不入账，这些判定都在 applyAutoDisc 里，这里只负责起一趟。 */
+  if (!pid && rulesOrgOk(target)) autoFillRules(target, "add").catch(e => toast("规则回填异常：" + String(e).slice(0, 60), 5000));
 }
 
 /* ============================================================
@@ -1568,8 +1571,23 @@ function discCard(p, pos) {
   const warn = gaps.length && discHasContent(d)
     ? `<div class="tip" style="margin-top:8px">⚠️ 还缺 ${gaps.length} 项（${gaps.map(g => esc(DISC_GAP_LABEL[g] || g)).join("、")}），缺失项在持仓分析里只会得到「信息不足」，不会由模型补猜。</div>`
     : "";
+  /* 还缺东西时得说清「这几项会不会自己补上、什么时候补」：
+     只报缺口不报下一步，用户会以为得天天手工催；反过来在网页版上说「等下次同步」
+     就是撒谎 —— 这一版根本没有本机抓取。 */
+  let autoTip = "";
+  if (gaps.length && rulesOrgOk(p)) {
+    if (!nativeFetchAvailable()) {
+      autoTip = `<div class="tip" style="margin-top:8px">${esc(bridgeMissingMsg("网页版没有本机抓取，规则自动回填用不了：这几项请照说明书手工录入。"))}</div>`;
+    } else if (rulesDue(p)) {
+      autoTip = `<div class="tip" style="margin-top:8px">下一次本机抓取会顺带去官网档案补这几项（北银 / 农银几秒，徽银要在产品列表里翻页找，可能要一两分钟）。</div>`;
+    } else if (p.rulesAt) {
+      autoTip = `<div class="tip" style="margin-top:8px">上一次官网检索是 ${esc(String(p.rulesAt).slice(0, 10))}，${RULES_COOLDOWN_DAYS} 天内不重复翻页；这几项要是官网档案里本来就没有（赎回费分档在说明书 PDF 里），只能手工补。</div>`;
+    } else {
+      autoTip = `<div class="tip" style="margin-top:8px">这几项已经录齐到不用再去官网检索；要继续手工核对就照披露原文改。</div>`;
+    }
+  }
   return `<table class="navtbl"><thead><tr><th>披露项</th><th>录入内容</th></tr></thead><tbody>${rows.join("")}</tbody></table>
-    ${src}${holdLine}${warn}
+    ${src}${holdLine}${warn}${autoTip}
     <div class="cap" style="padding:6px 0 0">口径为照录披露原文：null 表示未披露，与「0」不同义；占比与费率均为百分数本身。</div>`;
 }
 
@@ -2159,7 +2177,7 @@ window.__llmDone = function (id, metaJson) {
   if (!id || String(id) !== LLM.id) return;
   if (LLM.timer) { clearTimeout(LLM.timer); LLM.timer = 0; }
   if (LLM.phase !== "running") return;                 /* 已经按超时落定：迟到的答案不再翻案 */
-  /* 「元信息用不了」有三样，v69 起分开说（读法与文案都挪到 js/domain/llm.js，有单测）。
+  /* 「元信息用不了」有四样，v69 起分开说（读法与文案都挪到 js/domain/llm.js，有单测）。
      上一版一句话兜底：壳回的是对象而不是 JSON 字符串（1.0.220 及之前每轮都这样），
      屏上却写「原生侧没回元信息」—— 把「参数类型不一致」说成「没回」，排查方向直接被带歪，
      还会让人以为是自己端点或密钥配错了。两侧回调名字对得上（verify-web 第 2f 项一直绿），
@@ -3426,7 +3444,7 @@ function manStatusHtml() {
       <div class="tip" style="color:inherit;margin-top:4px">${nat
         ? `开始时间 <b>${esc(at)}</b> ｜ 已处理 <b>${m.done || 0} / ${m.total || 0}</b> 只产品`
         : `触发时间 <b>${esc(at)}</b>${run}${m.dur ? " ｜ 已等 " + durTxt(m.dur) : ""}`}<br>
-      ${nat ? "本机直接访问披露源，结果会逐只回填。" : (m.runNo ? "云端正在抓取，通常 1-4 分钟。" : "已提交，等待云端接单…")}本页可继续使用，出结果后这里会自动更新。</div></div>`;
+      ${nat ? "本机直接访问披露源，结果会逐只回填。" : (m.runNo ? "云端正在抓取，通常 1-4 分钟。" : "已提交，等待云端接单…")}本页可继续使用，出结果后这里会自动更新。${m.rules ? `<br>规则回填：${esc(m.rules)}` : ""}</div></div>`;
   if (m.state === "ok") {
     const extra = nat
       ? (m.added ? `<br>本次新增净值 <b>${m.added}</b> 条`
@@ -3436,8 +3454,10 @@ function manStatusHtml() {
         : "");
     const late = (!nat && m.lateWait) ? `<br>ℹ️ 本结果在触发后 ${durTxt(m.lateWait)} 才被本机确认到（期间 App 离线或挂后台），并非云端实际耗时。` : "";
     const warn = m.fail ? `<br>⚠️ 但仍有 <b>${m.fail}</b> 只产品没拿到净值${m.msg ? "：" + esc(m.msg) : ""}` : "";
+    /* 规则回填的话单独一行：它跟「净值拿到没」是两件事，混在一句里用户分不清缺的是哪个 */
+    const ruleLine = m.rules ? `<br>规则回填：${esc(m.rules)}` : "";
     return `<div class="note g"><b>✅ ${what}成功</b>
-      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}</div>${clear}</div>`;
+      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}${ruleLine}</div>${clear}</div>`;
   }
   if (m.state === "fail")
     return `<div class="note"><b>❌ ${what}失败</b>${m.conclusion ? `（云端结论：${esc(m.conclusion)}）` : ""}
@@ -3907,6 +3927,100 @@ function nativeNavFetch(p, withAixhub, withLedgerme) {
     } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
   });
 }
+/* ---------- T1b：官网产品档案 → 底层/申赎规则的自动回填 ----------
+   复用净值那条桥：同一个 NativeNav.fetch，多带一个 mode:"rules"，
+   Python 侧在 navservice._fetch_rules 分派，不另开一个桥方法（也不另开一条线程）。
+   fetchedAt 由页面盖：规则解析那一侧不读时钟，谁的表谁写 —— 披露日期另有其人
+   （disc.source.publishedAt，站内自己写的那个），两者不许混。 */
+function nativeRulesFetch(p) {
+  return new Promise(resolve => {
+    if (!nativeFetchAvailable()) {
+      /* 网页版没有原生抓取，这条就是走不了 —— 如实说，不假装在跑（铁律 10） */
+      resolve({ ok: false, error: bridgeMissingMsg("网页版没有本机抓取，规则自动回填用不了：底层规则请手工录入") });
+      return;
+    }
+    const id = "u" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    /* 徽银要先在官网列表里翻页找产品（实测单只 90~96 秒），90 秒那条超时是净值抓取的口径，
+       照搬过来就会天天误报；这里给 240 秒，到点如实报「这一次没翻到」。 */
+    const timer = setTimeout(() => finish({ ok: false, error: "本机规则检索超时（240 秒）：这一次没翻到，下次同步再试" }), 240000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      window.NativeNav.fetch(id, JSON.stringify({
+        prodCode: prodCodeOf(p),
+        regCode: String(p.regCode || p.code || "").trim(),
+        name: String(p.name || ""),
+        inst: String(p.inst || ""),
+        mode: "rules",
+        fetchedAt: new Date().toISOString()
+      }));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
+
+/* 回填结果怎么说：补了什么、手工挡住了什么、还缺什么都要照实念一遍。
+   「仍缺：赎回费分档」这类话必须出现在前台 —— 界面少说一句，用户就会以为账本是齐的。 */
+function rulesResultText(res) {
+  const zh = k => DISC_GAP_LABEL[k] || k;
+  const left = (res.gaps || []).filter(g => g !== "source");
+  const bits = [];
+  bits.push(res.filled.length ? "已按官网档案回填：" + res.filled.map(zh).join("、")
+    : "官网档案里没有可补的项");
+  if (res.kept.length) bits.push("手工录入的不覆盖（" + res.kept.map(zh).join("、") + "）");
+  if (left.length) bits.push("仍缺：" + left.map(zh).join("、"));
+  return bits.join(" · ");
+}
+
+/* 只接了三家（第一期）。机构名和代码前缀都认一下：
+   用户常常只填代码不填机构，而对没接入的机构白跑一趟、还说一句「网页版用不了」，
+   那是把两件不相干的事说成一件事。 */
+const RULES_ORGS = /(北银|徽银|农银)理财/;
+const RULES_CODES = /^(PNHY|YJ|ADTC)/i;
+function rulesOrgOk(p) {
+  return RULES_ORGS.test(String((p && p.inst) || ""))
+    || RULES_CODES.test(String((p && p.prodCode) || "").trim());
+}
+
+/**
+ * 跑一次规则回填（就地改 p.disc，并落盘）。返回给用户看的一句话；不该跑时返回 ""。
+ * trigger："add" 添加产品当场说一句，"sync" 跟着本机抓取那一趟走（写进抓取框）。
+ */
+async function autoFillRules(p, trigger) {
+  if (!p || !rulesOrgOk(p) || !rulesDue(p)) return "";
+  /* 网页版 / 桥没挂上：这条整段走不了。先说清楚再回来，也不写 rulesAt ——
+     rulesAt 的意思是「真的试过一趟」，没发出去的请求不许给自己盖这个章。 */
+  if (!nativeFetchAvailable()) {
+    return bridgeMissingMsg("网页版没有本机抓取，规则自动回填用不了：在产品页「底层配置与申赎规则」里手工录入");
+  }
+  const say = m => {
+    if (MANUAL && MANUAL.t0) { MANUAL.rules = m; saveManual(); renderManBox(); }
+    if (trigger === "add") toast(m, 6500);
+    return m;
+  };
+  /* 徽银那一站没有按代码直查的接口，只能一页一页翻（实测 129 页、单只 90~96 秒）：
+     慢不是 bug，但必须提前说 —— 不然用户看到的是「点了没反应」。 */
+  if (/徽银/.test(String(p.inst || "")) || /^PNHY/i.test(String(p.prodCode || ""))) {
+    say("徽银理财没有按代码直查的接口，要在官网产品列表里翻页找这只产品，可能要一两分钟…");
+    if (trigger === "add") toast("徽银在翻页找产品，可能要一分钟…", 6000);
+  }
+  const r = await nativeRulesFetch(p);
+  /* 试过就是试过了：成败都写 rulesAt，否则每次同步都去翻一遍 129 页 */
+  p.rulesAt = new Date().toISOString();
+  if (!r || !r.ok) {
+    saveLocal();
+    return say("官网规则这次没读到：" + ((r && r.error) || "没有回包") + "（不改账面，下次同步再试）");
+  }
+  const res = applyAutoDisc(p, r);
+  if (!res.ok) {
+    saveLocal(); renderProd(); renderHome();
+    return say("官网档案里没读到披露日期 —— 按铁律不入账，只记缺口："
+      + (res.gaps || []).map(g => DISC_GAP_LABEL[g] || g).join("、"));
+  }
+  if (res.filled.length) { saveLocal(); renderProd(); renderHome(); autoPush(); }
+  return say(rulesResultText(res));
+}
+
 async function nativeFetchAll(forceExtra) {
   if (_nativeBusy) return;
   /* 本机抓取不依赖 GitHub：没配同步也能抓、能落盘；配了才会在抓到新净值后自动推送 */
@@ -3952,7 +4066,7 @@ async function nativeFetchAll(forceExtra) {
   if (btn) { btn.disabled = true; btn.textContent = "本机抓取中…"; }
 
   let added = 0, fail = 0, last = "";
-  const fails = [], srcMap = {}, fetchedNavs = {};
+  const fails = [], srcMap = {}, fetchedNavs = {}, ruleNotes = [];
   const runOne = async p => {
     /* 已经有今天的净值就没必要再问秒讯，进一步减少请求 */
     const l0 = latestNav(p);
@@ -3991,6 +4105,14 @@ async function nativeFetchAll(forceExtra) {
       fail++;
       fails.push(prodLabel(p) + "：" + ((r && r.error) || "未知错误"));
     }
+    /* T1b：净值这一趟完了，再按冷却补一次底层/申赎规则（同一次运行里连着做：
+       徽银那份列表索引还热着，省掉第二次翻页）。判据全在 rulesDue()/autoFillRules() 里，
+       这里不留第二套 —— 没接入的机构、五项都齐的、30 天内试过的都不跑。 */
+    const cur = DATA.products.find(x => x.id === p.id) || p;
+    if (rulesDue(cur)) {
+      const line = await autoFillRules(cur, "sync");
+      if (line) ruleNotes.push(prodLabel(cur) + "：" + line);
+    }
     MANUAL.added = added; MANUAL.fail = fail;
     saveManual(); renderManBox();
   };
@@ -4015,6 +4137,8 @@ async function nativeFetchAll(forceExtra) {
     MANUAL.dur = Date.now() - t0;
     MANUAL.navTime = last || stampOf(Date.now());
     MANUAL.msg = fails.slice(0, 3).join("；");
+    /* 规则回填这一趟的话留在抓取框里：慢的、只记缺口的、手工没被覆盖的，都要留字据 */
+    MANUAL.rules = ruleNotes.length ? ruleNotes.slice(0, 3).join(" ｜ ") : "";
     saveManual(); renderManBox();
     /* 本机抓取也写一份与云端相同结构的 lastFetch：
        告警条、产品详情里的「最新净值取自…」、上次抓取时间都复用云端那套展示，
