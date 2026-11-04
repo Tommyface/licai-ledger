@@ -59,7 +59,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v77";
+const APP_VER = "v78";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2778,7 +2778,7 @@ function renderProdDetail() {
     </div>
     <div class="cap" style="padding:6px 0 0">样本不足时显示「—」，不估算、不补齐；净值型产品官方不披露万份收益与年化，以上均为本工具折算口径。</div>
     ${stale && nativeFetchAvailable()
-      ? `<div class="tip" style="margin-top:6px">⏳ 公开渠道最新到 <b>${esc(stale.date)}</b>，此后已过 <b>${stale.lag}</b> 个交易日。${aixhubToken()
+      ? `<div class="tip" style="margin-top:6px">⏳ 公开渠道最新到 <b>${esc(stale.date)}</b>，此后已过 <b>${stale.lag}</b> 个交易日。${aixhubLoggedIn()
           ? `已登录<b>秒讯</b>：点「⚡ 立即抓取」会用它的数据（通常早上就有）；北银官网在开放日次日 11:00–15:00 才上传。`
           : `北银官网在开放日次日 11:00–15:00 上传净值（汇总表与公告表两张表都会查），App 在前台时每 3 分钟自动核对，上传后几分钟内就会补上。想在早上就看到，可到「设置 → 秒讯」登录（可选）。`}</div>`
       : stale
@@ -3405,7 +3405,7 @@ function refreshNav() {
       打开 App / 切回前台会<b>自动核对</b>：只要还有产品没披露到昨天，就<b>每 3 分钟</b>查一次；
       全部追上后降到每 30 分钟一次。抓到即落盘并自动推送，不需要手动操作。<br><br>
       <b>每条净值都会并发查两条线</b>：<b>① 发行方官网</b>与<b>② 中国理财网信披平台</b>，
-      自动采用更新的一条；同一天都有时用官网（原始披露方）。${aixhubToken()
+      自动采用更新的一条；同一天都有时用官网（原始披露方）。${aixhubLoggedIn()
         ? `<br>已登录<b>秒讯</b>：只有点「⚡ 立即抓取」时才顺带查它一次（后台轮询不碰它）。`
         : `<br>想要更早半天看到，可在「设置 → 秒讯」登录（可选，不登录不影响上面的抓取）。`}<br><br>
       ⓘ 公开披露本身有滞后（通常开放日次日～次二日）。发行方还没披露的日期，
@@ -3735,11 +3735,15 @@ async function triggerFetch() {
 const _navDone = {};
 let _nativeBusy = false;
 
-/* ---------- 秒讯 / 净值账本（可选）：登录态只存本机 ---------- */
+/* ---------- 秒讯 / 净值账本（可选）：秒讯登录态在 App 的本机加密区，账本 Cookie 仍是本机缓存 ----------
+   v78：秒讯 token 不再进 localStorage。值只在原生侧（NavBridge + SecretStore / Android Keystore），
+   页面只问得到「有没有」（NativeNav.aixhubHas()），交出去的那一轮抓取由原生侧自己把值塞进载荷。
+   以前这里是 licai.aixhubToken 明文一条，磁盘上可读、DevTools 一展开就是它 —— 铁律 #6 不接受。 */
 const AIX_LS = {
-  token: "licai.aixhubToken", email: "licai.aixhubEmail",
+  email: "licai.aixhubEmail",
   at: "licai.aixhubAt", lic: "licai.aixhubLic", chk: "licai.aixhubChk"
 };
+const AIX_LEGACY_TOKEN = "licai.aixhubToken";   /* 历史遗留的明文键，见到就删，不读不传 */
 const LGM_LS = {
   cookie: "licai.ledgermeCookie", user: "licai.ledgermeUser",
   name: "licai.ledgermeName", at: "licai.ledgermeAt", chk: "licai.ledgermeChk"
@@ -3750,11 +3754,30 @@ let _lgmChecking = false, _lgmAutoTried = false;
 function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
 function lsSet(k, v) { try { localStorage.setItem(k, String(v)); } catch (e) { } }
 function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { } }
-function aixhubToken() { return lsGet(AIX_LS.token); }
+/* 老版本存进去的那个明文 token：删掉它，值就只留在加密区。
+   不读它、不拿它去试登录、也不发给任何一侧 —— 删就是删。 */
+function aixhubPurgeLegacy() { lsDel(AIX_LEGACY_TOKEN); }
+aixhubPurgeLegacy();
 function aixhubEmail() { return lsGet(AIX_LS.email); }
 function ledgermeCookie() { return lsGet(LGM_LS.cookie); }
 function ledgermeUser() { return lsGet(LGM_LS.user); }
 function ledgermeName() { return lsGet(LGM_LS.name); }
+/* 登录态的唯一来源是原生侧：这里不缓存、不猜 —— 每次画这一行都现问一次。 */
+function aixhubLoggedIn() {
+  try {
+    const n = window.NativeNav;
+    if (!n || typeof n.aixhubHas !== "function") return false;
+    return !!n.aixhubHas();
+  } catch (e) { return false; }
+}
+/* 桥在、但没有这个方法 = 这台机器的 App 还不认识加密区（v77 及以前的壳）。
+   这种情况照实说，别画成「没登录」让用户白重登一遍。 */
+function aixhubShellOld() {
+  try {
+    return nativeFetchAvailable()
+      && typeof window.NativeNav.aixhubHas !== "function";
+  } catch (e) { return false; }
+}
 function aixhubLic() {
   try {
     const o = JSON.parse(lsGet(AIX_LS.lic) || "null");
@@ -3791,12 +3814,12 @@ function aixhubBridge(method, args, label) {
 }
 
 /* 秒讯：/api/me?compact=1 的 license 里有 expires_at（秒）/state。
-   以前只存 token，不看这个字段，所以只能等抓取撞 401 才知道失效。 */
+   以前只存 token，不看这个字段，所以只能等抓取撞 401 才知道失效。
+   v78：这一趟不再需要页面交出 token —— 原生侧自己从加密区取；401 时也是让原生侧清。 */
 async function aixhubCheck(silent) {
-  const token = aixhubToken();
-  if (!token || !nativeFetchAvailable() || _aixChecking) return null;
+  if (!nativeFetchAvailable() || _aixChecking) return null;
   _aixChecking = true;
-  const r = await aixhubBridge("aixhubMe", [token]);
+  const r = await aixhubBridge("aixhubMe", []);
   _aixChecking = false;
   if (r && r.ok) {
     lsSet(AIX_LS.lic, JSON.stringify(r.license || {}));
@@ -3812,7 +3835,9 @@ async function aixhubCheck(silent) {
   }
   const msg = String((r && r.message) || "网络异常");
   if (Number(r && r.status) === 401) {
-    lsDel(AIX_LS.token); lsDel(AIX_LS.lic); lsDel(AIX_LS.at);
+    /* 服务端说这个登录态废了：让原生侧清掉加密区里的那一份（页面手里本来就没有它） */
+    try { window.NativeNav.aixhubClear(); } catch (e) { }
+    lsDel(AIX_LS.lic); lsDel(AIX_LS.at);
     renderAixhub();
     if (!silent) toast("秒讯登录已失效，请重新登录（邮箱已记住）", 5200);
   } else if (!silent) {
@@ -3823,6 +3848,9 @@ async function aixhubCheck(silent) {
 function aixhubCheckNow() { aixhubCheck(false); }
 async function aixhubLoginFlow() {
   if (!nativeFetchAvailable()) return toast("秒讯登录只在 Android App 内可用（网页版没有本机桥）", 4600);
+  if (aixhubShellOld()) {
+    return toast("这台机器的 App 还不认识本机加密区（v77 及以前的壳）：先更新 App 再登录", 5600);
+  }
   const email = (prompt("秒讯账号邮箱", aixhubEmail() || "") || "").trim().toLowerCase();
   if (!email) return;
   toast("正在发送验证码…", 1800);
@@ -3831,13 +3859,13 @@ async function aixhubLoginFlow() {
   const code = (prompt("验证码已发到 " + email + "（10 分钟内有效）", "") || "").trim();
   if (!code) return;
   const r = await aixhubBridge("aixhubLogin", [email, code]);
-  if (!r.ok || !r.token) return toast(r.message || "登录失败", 5200);
-  lsSet(AIX_LS.token, r.token);
+  /* 回话里没有 token，只有 hasToken：值已经在本机加密区了，页面手里什么都没有 */
+  if (!r.ok || !r.hasToken) return toast(r.message || "登录失败", 5200);
   lsSet(AIX_LS.email, email);
   lsDel(AIX_LS.at);
   renderAixhub();
   /* 登录后立刻读一次 license：把“还剩几天/是否已到期”显示出来 */
-  const me = await aixhubBridge("aixhubMe", [r.token]);
+  const me = await aixhubBridge("aixhubMe", []);
   if (me && me.ok) { lsSet(AIX_LS.lic, JSON.stringify(me.license || {})); lsSet(AIX_LS.chk, Date.now()); }
   renderAixhub();
   const li = aixhubLicInfo();
@@ -3847,7 +3875,10 @@ async function aixhubLoginFlow() {
   try { setTimeout(() => nativeFetchAll(true), 300); } catch (e) { }
 }
 function aixhubLogout() {
-  lsDel(AIX_LS.token); lsDel(AIX_LS.at); lsDel(AIX_LS.lic); lsDel(AIX_LS.chk);
+  /* 清的是加密区里那一份；页面顺手把本机缓存的到期快照也抹掉 */
+  try { if (window.NativeNav && typeof window.NativeNav.aixhubClear === "function") window.NativeNav.aixhubClear(); } catch (e) { }
+  lsDel(AIX_LS.at); lsDel(AIX_LS.lic); lsDel(AIX_LS.chk);
+  aixhubPurgeLegacy();
   renderAixhub();
   toast("已退出秒讯，只走官网 + 中国理财网");
 }
@@ -3857,7 +3888,14 @@ function renderAixhub() {
   /* 网页版：卡片已被 CSS 收掉，这里连内容都不渲染，那个 6 小时一次的自动检查
      定时器更不能起 —— 起了也只是每六小时撞一次「仅 App 可用」。 */
   if (!nativeFetchAvailable()) { box.innerHTML = ""; return; }
-  const on = !!aixhubToken();
+  /* 新页面 + 旧壳：这座桥还不认识加密区。画一句实话，别画成「没登录」骗人白重登。 */
+  if (aixhubShellOld()) {
+    box.innerHTML = `<div class="note b">这台机器的 App 还不认识本机加密区（v77 及以前的壳）。
+      秒讯的登录态现在只存在 App 的加密区里，页面不再保存它 —— 先更新 App 再登录。
+      不更新不影响官网 + 中国理财网那条线照抓。</div>`;
+    return;
+  }
+  const on = aixhubLoggedIn();
   const li = aixhubLicInfo();
   let status = "";
   if (on) {
@@ -3872,6 +3910,7 @@ function renderAixhub() {
   box.innerHTML = `
     <div class="note ${on && !li.expired ? "g" : ""}">${on
       ? `已登录：<b>${esc(aixhubEmail() || "秒讯账号")}</b>${status}<br>
+         登录态只存在本机加密区（Android Keystore），页面与浏览器都读不到它。<br>
          只有你点<b>「⚡ 立即抓取」</b>时才查一次秒讯（3 分钟内不重复），
          后台自动轮询不碰它；同一天以官网数值为准。`
       : `可选。秒讯（第三方监控站）的代销净值比官网快，但它要登录后才能读 ——
@@ -4041,7 +4080,8 @@ function nativeNavFetch(p, withAixhub, withLedgerme) {
         name: String(p.name || ""),
         inst: String(p.inst || ""),
         navHistory: p.navHistory || {},
-        aixhubToken: withAixhub ? aixhubToken() : "",
+        /* v78：只交「这一轮要不要查秒讯」这个布尔值；token 由原生侧从加密区注入 */
+        aixhub: !!withAixhub,
         ledgermeCookie: withLedgerme ? ledgermeCookie() : ""
       }));
     } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
@@ -4148,18 +4188,18 @@ async function nativeFetchAll(forceExtra) {
   if (!list.length) { toast("没有可抓取的产品：请先在「交易」页的产品列表补填产品代码或登记编码"); return; }
   _nativeBusy = true;
   /* 手动抓取前先确认秒讯登录态：过期就提前跳过，别等每只产品都撞一次 401。 */
-  if (forceExtra && aixhubToken()) await aixhubCheck(true);
+  if (forceExtra && aixhubLoggedIn()) await aixhubCheck(true);
   /* 秒讯 / 净值账本只在你手动点「⚡ 立即抓取」时查（各 3 分钟内不重复）：
      它们的接口要登录态，后台定时轮询既没必要、也容易被风控；官网那条线照旧自动跑。 */
   /* 秒讯：会员到期也照样去问一次。
      以前是本地看 license.state/expires_at 就先跳过，等于替它做了决定 —— 而那个字段
      是本机缓存的旧快照（到期日按天算，跨过去的那一刻起就一直在「已到期」），
      实际站方续费、宽限、改口径都不会同步过来。用户要的是「照抓，抓不到再说」，
-     所以这里只看有没有 token；到期与否由服务器回什么话来决定（403/会员 → 提示，
-     401 → 才算登录失效并清掉本地 token）。
+     所以这里只问原生侧「加密区里有没有登录态」；到期与否由服务器回什么话来决定
+     （403/会员 → 提示，401 → 才算登录失效，并请原生侧清掉加密区里那一份）。
      顺带去掉那句每次打开都会弹一次的状态提示：本机抓取是自动跑的，
      一个「这次跳过秒讯」的 toast 每天要按十几次，纯噪音。真取不到下面会报。 */
-  const aixOn = !!aixhubToken();
+  const aixOn = aixhubLoggedIn();
   let lastAix = 0;
   try { lastAix = Number(localStorage.getItem(AIX_LS.at) || 0); } catch (e) { }
   const withAixhub = aixOn && !!forceExtra && Date.now() - lastAix > 3 * 60000;
@@ -4292,7 +4332,10 @@ async function nativeFetchAll(forceExtra) {
         : perm ? "秒讯会员/权限异常，请到秒讯确认会员状态（不影响官网抓取）"
           : "秒讯这次没取到：" + aixErr.slice(0, 60), 6000);
       if (dead) {
-        lsDel(AIX_LS.token); lsDel(AIX_LS.lic); lsDel(AIX_LS.at);
+        /* 登录态的值在加密区里，页面手里没有：清就得让原生侧来清（顺手删历史明文键） */
+        try { if (window.NativeNav && typeof window.NativeNav.aixhubClear === "function") window.NativeNav.aixhubClear(); } catch (e) { }
+        aixhubPurgeLegacy();
+        lsDel(AIX_LS.lic); lsDel(AIX_LS.at);
         renderAixhub();
       }
     }

@@ -914,15 +914,22 @@ test("v68 措辞对账：看板列名与设置里的「口径说明」不许再�
 
 test("秒讯：会员到期不再本地跳过，抓不到才提示；也不再每次打开弹状态 toast", () => {
   const body = fnBody("nativeFetchAll");
-  assert.ok(/const aixOn = !!aixhubToken\(\);/.test(body),
-    "本机抓取还在按本机缓存的到期状态决定要不要问秒讯");
+  /* v78：这里只问原生侧「加密区里有没有」，页面手里再也没有那个值 */
+  assert.ok(/const aixOn = aixhubLoggedIn\(\);/.test(body),
+    "本机抓取又按本机缓存的到期状态决定要不要问秒讯，或者把登录态的值收回页面了");
+  assert.ok(!/aixhubToken\(\)/.test(body), "抓取路径里又出现了「页面读 token」的写法");
   assert.ok(!/aixLi\.expired/.test(body), "到期判断又回到抓取路径里了");
   assert.ok(!/toast\(\s*["'`][^"'`]*跳过秒讯/.test(APP_SRC),
     "「这次跳过秒讯」那句提示又回来了：本机抓取是自动跑的，这等于每次打开都弹一次");
   /* 失败仍然要报，而且要分得清是会员问题还是登录失效 */
   assert.ok(/if \(aixErr && withAixhub\)/.test(body), "抓取失败不再提示了");
   assert.ok(/\/403\|会员\|权限\//.test(body), "会员/权限那条判断丢了");
-  assert.ok(/lsDel\(AIX_LS\.token\)/.test(body), "401（真·登录失效）仍要清掉本地 token");
+  /* v78：401 时清的那一份在原生加密区里，页面只能请原生侧清 */
+  assert.ok(/window\.NativeNav\.aixhubClear\(\)/.test(body),
+    "401（真·登录失效）没请原生侧清掉加密区里的登录态");
+  assert.ok(/aixhubPurgeLegacy\(\)/.test(body), "401 时忘了顺手删掉历史明文键");
+  assert.ok(!/lsDel\(AIX_LS\.token\)/.test(APP_SRC),
+    "页面又把 AIX_LS.token 当字段用了：v78 起这个键位不存在");
   /* 到期状态只在界面上说（提示文案、卡片配色），不再替用户决定抓不抓 */
   const topFnAt2 = i => {
     const s = Math.max(APP_SRC.lastIndexOf("\nfunction ", i), APP_SRC.lastIndexOf("\nasync function ", i));
@@ -935,6 +942,73 @@ test("秒讯：会员到期不再本地跳过，抓不到才提示；也不再�
     assert.ok(["aixhubCheck", "aixhubLoginFlow", "renderAixhub"].includes(fn),
       `到期状态又跑到 ${fn}() 里参与决策了：抓取路径只看有没有 token`);
   }
+});
+
+/* ---------- v78：秒讯登录态从 localStorage 搬进本机加密区（铁律 #6） ---------- */
+
+test("v78：页面不再持有任何秒讯 token 的键位，历史明文键装载即删", () => {
+  const s = APP_SRC.indexOf("const AIX_LS = {");
+  const e = APP_SRC.indexOf("};", s);
+  assert.ok(s > 0 && e > s, "AIX_LS 键位表的位置变了，切片失败");
+  assert.ok(!/token/i.test(APP_SRC.slice(s, e)),
+    "AIX_LS 里又有 token 键位了：值只能待在原生加密区");
+  /* 整份 app.js 里带 token 字样的 localStorage 键名，只许那一个「见到就删」的历史键 */
+  const named = [...new Set([...APP_SRC.matchAll(/["'`]licai\.[A-Za-z]*[Tt]oken["'`]/g)].map(m => m[0]))];
+  assert.deepEqual(named, ['"licai.aixhubToken"'],
+    "出现了新的 token 键名，或历史键名被改名（老用户磁盘上那份就删不掉了）：" + named.join(", "));
+  const purge = fnBody("aixhubPurgeLegacy");
+  assert.ok(/lsDel\(AIX_LEGACY_TOKEN\)/.test(purge), "历史明文键不是删掉");
+  assert.ok(!/lsGet|lsSet/.test(purge), "purge 里居然还读/写历史键：删就是删，不读不传");
+  /* 装载即删：定义完紧跟一次顶层调用，不等某次操作才清 */
+  const at = APP_SRC.indexOf("function aixhubPurgeLegacy()");
+  assert.ok(at > 0, "aixhubPurgeLegacy() 没了");
+  assert.ok(/^function aixhubPurgeLegacy\(\) \{[^}]*\}\naixhubPurgeLegacy\(\);/.test(APP_SRC.slice(at, at + 120)),
+    "历史明文键不是「脚本一装载就删」：升级上来的人在磁盘上又多躺了一天");
+});
+
+test("v78：登录态现问原生侧，桥不认识新方法时不许假装已登录", () => {
+  const b = fnBody("aixhubLoggedIn");
+  assert.ok(/typeof n\.aixhubHas !== "function"/.test(b), "没先确认原生侧认识这个方法就调用了");
+  assert.ok(/return !!n\.aixhubHas\(\)/.test(b), "登录态不是原生侧现答的");
+  assert.ok(!/lsGet|lsSet/.test(b), "aixhubLoggedIn 又开始缓存登录态了");
+  /* 旧壳（桥在、但没有 aixhubHas）不能画成「没登录」—— 那是在骗人白重登一遍 */
+  const o = fnBody("aixhubShellOld");
+  assert.ok(/nativeFetchAvailable\(\)/.test(o), "旧壳判定不看桥在不在，网页版会被误判");
+  assert.ok(/typeof window\.NativeNav\.aixhubHas !== "function"/.test(o), "旧壳判定的信号变了");
+  for (const fn of ["aixhubLoginFlow", "renderAixhub"]) {
+    assert.ok(/aixhubShellOld\(\)/.test(fnBody(fn)), `${fn}() 里没有旧壳这一支：v77 的壳会把 token 落回明文键`);
+  }
+  const flow = fnBody("aixhubLoginFlow");
+  assert.ok(/v77 及以前的壳/.test(flow), "旧壳登录被拦下时没说是怎么回事");
+  /* 登录回话里不许再有值，只有一个布尔 */
+  assert.ok(/!r\.hasToken/.test(flow), "页面又开始拿登录回话里的 token 了");
+  assert.ok(!/r\.token/.test(flow), "登录回话里还带着 token 字段");
+});
+
+test("v78：抓出去的那一轮由页面交布尔、原生侧注入值；aixhubMe 不带实参", () => {
+  const body = fnBody("nativeFetchAll");
+  const nf = fnBody("nativeNavFetch");
+  assert.ok(/aixhub: !!withAixhub,/.test(nf), "抓取载荷又交的是值而不是布尔开关");
+  assert.ok(!/aixhubToken/.test(nf), "抓取载荷里页面又自己填了 aixhubToken");
+  assert.ok(!/aixhubToken/.test(body), "抓取路径里又出现了 aixhubToken");
+  assert.ok(!/aixhubToken/.test(fnBody("aixhubBridge")), "桥调用包装层里出现了 token");
+  /* aixhubMe 的形状：只认 reqId，页面手里没有可传的东西 */
+  const me = [...APP_SRC.matchAll(/aixhubBridge\("aixhubMe",\s*([^\)]*)\)/g)].map(m => m[1]);
+  assert.ok(me.length >= 2, "aixhubMe 的调用点比预期少，锚点变了要同步改这条");
+  for (const arg of me) assert.equal(arg, "[]", "aixhubMe 又带实参了：登录态不该经过页面");
+  /* 401 与退出都请原生侧清，并顺手删历史明文键 */
+  for (const fn of ["aixhubCheck", "aixhubLogout"]) {
+    const f = fnBody(fn);
+    assert.ok(/NativeNav\.aixhubClear\(\)/.test(f), `${fn}() 没清掉加密区里那一份`);
+    if (fn === "aixhubLogout") assert.ok(/aixhubPurgeLegacy\(\)/.test(f), "退出没顺手删历史明文键");
+  }
+});
+
+test("v78：卡片文案说实话 —— 值在本机加密区，且不许出现「应该能用」", () => {
+  const r = fnBody("renderAixhub");
+  assert.ok(/Android Keystore/.test(r), "卡片没告诉用户登录态到底存在哪");
+  assert.ok(/页面与浏览器都读不到它/.test(r), "卡片没把「页面读不到」这层说清楚");
+  assert.ok(!/应该能用|应该可以|应该会/.test(r), "v78 的文案里出现猜测式表述");
 });
 
 /* ---------- v59：设置里那两节「有时候消失」 ---------- */
@@ -1075,7 +1149,8 @@ test("T3 桥面：页面只调清单里的方法，三个回传全局函数都�
 test("T3 铁律 #6：密钥与端点不落 localStorage，那一节只在 App 里出现", () => {
   const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
-  /* 扫整份 app.js 会被既有功能误伤：AIX_LS.token 存的是授权会话令牌，跟模型无关。
+  /* 扫整份 app.js 会被既有功能误伤：秒讯那几个 licai.aixhub* 存的是邮箱和到期快照，
+     v78 起值本身在原生加密区，跟模型接入无关。
      所以按 T3 那一节的切片来扫——那一节不许有真的存储调用（注释里写「不进 localStorage」
      是说明文字，不算，因此正则必须带调用括号）。 */
   const i = src.indexOf("T3 · 模型接入"), j = src.indexOf("/* 粘贴内容 → 产品键");

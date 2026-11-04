@@ -616,7 +616,9 @@ html:not(.inApp) .app-only{display:none}
     </div>
     <!-- 秒讯 / 净值账本：两个站都不给跨域许可（实测响应里没有 Access-Control-Allow-Origin，
          预检直接 501），只有 App 内的本机桥能发这个请求。网页版整节收掉 ——
-         留个点了只会回「仅 App 可用」的按钮，等于让用户白跑一趟。 -->
+         留个点了只会回「仅 App 可用」的按钮，等于让用户白跑一趟。
+         v78 起秒讯的登录态存在 App 的本机加密区（Android Keystore），页面不再保存它：
+         浏览器里同样没有能安全放这种东西的地方，所以这条路径只在 App 内成立。 -->
     <div class="card app-only">
       <div class="card-t"><h2>秒讯净值（可选）</h2></div>
       <div id="aixhubBox"></div>
