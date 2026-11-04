@@ -10,7 +10,9 @@
      · 截图 OCR 的「日期 + 净值」配对（错一行就是错一笔账） */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { fmtDate } from "../js/core/util.js";
 import { ORG_ALIAS, ORG_NAME, detectOrg, detectOrgByProdCode } from "../js/core/orgs.js";
 import { parseProductInput } from "../js/core/paste.js";
@@ -1223,6 +1225,33 @@ test("v76 桥面清单里那一格 cancel 与页面调用点同名（点了没�
   const call = src.match(/b\.cancel\(([^)]*)\)/);
   assert.ok(call, "页面没有调用桥上的 cancel");
   assert.equal(call[1].trim(), "id", "取消传的不是这一轮的 id：原生侧摘不到那条在飞记录");
+});
+
+/* ---- v77 · 语法门禁 ----
+   v76 的那一个引号让 app.js 在浏览器里压根没跑起来，而 npm run check 全绿 ——
+   因为解析这一步只存在于 CI，本地没有对应命令。下面两条就是把这一步钉回本地。 */
+test("v77 页面每一个 JS 都要能被 node 解析（解析不了的发出去就是白屏）", () => {
+  const files = ["app.js", "sw.js"]
+    .concat(readdirSync(new URL("../js/core/", import.meta.url)).sort().map(f => "js/core/" + f))
+    .concat(readdirSync(new URL("../js/domain/", import.meta.url)).sort().map(f => "js/domain/" + f))
+    .filter(f => f.endsWith(".js"));
+  assert.ok(files.includes("app.js") && files.length >= 20, "清单本身就是空的：" + files.length);
+  const bad = [];
+  for (const f of files) {
+    const p = fileURLToPath(new URL("../" + f, import.meta.url));
+    try { execFileSync("node", ["--check", p], { stdio: "pipe" }); }
+    catch (e) { bad.push(f + "：" + String(e.stderr || e.message).split("\n")[1]); }
+  }
+  assert.deepEqual(bad, [], "这些文件解析不了：\n" + bad.join("\n"));
+});
+
+test("v77 npm run check 里必须有语法这一步（漏一次就白屏一次）", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(/bash scripts\/check-syntax\.sh/.test(pkg.scripts.check),
+    "check 脚本没跑 scripts/check-syntax.sh：CI 的 node --check 又没有本地对应物");
+  const sh = readFileSync(new URL("../scripts/check-syntax.sh", import.meta.url), "utf8");
+  assert.ok(sh.includes("app.js") && sh.includes("js/core/*.js") && sh.includes("js/domain/*.js"),
+    "语法脚本少了要查的那几类文件");
 });
 
 test("v65 会话只留内存：新字段挂在 LLM 上，屏幕上也是这么写的", () => {

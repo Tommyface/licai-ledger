@@ -6,6 +6,6 @@
   "scripts": {
     "test": "node --test tests/app_core.test.mjs tests/handlers.test.mjs tests/calendar.test.mjs tests/tomb.test.mjs tests/sync_merge.test.mjs tests/board.test.mjs tests/syncstatus.test.mjs tests/update.test.mjs tests/monthly.test.mjs tests/disc.test.mjs tests/analysis.test.mjs tests/advice.test.mjs tests/switchadv.test.mjs tests/llm.test.mjs",
     "typecheck": "tsc -p jsconfig.json",
-    "check": "bash scripts/check-version.sh && node scripts/check-calendar.mjs && npm run typecheck && npm test"
+    "check": "bash scripts/check-version.sh && bash scripts/check-syntax.sh && node scripts/check-calendar.mjs && npm run typecheck && npm test"
   }
 }

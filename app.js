@@ -59,7 +59,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v76";
+const APP_VER = "v77";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2077,13 +2077,13 @@ function llmSaveCfg() {
   toast(canStyle ? "已保存端点、模型与协议" : "已保存端点与模型", 2400);
   openLlm();
 }
-/** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout 五种。
+/** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout / cancelled 六种。
     标题那行「第 N 轮 · 问」是为了发出去之后还看得见发的是哪一句 —— 输入框发完就清了。 */
 function llmResultHtml() {
   const t = LLM.turn;
   const head = t ? `<div class="cap" style="padding-bottom:6px">第 ${LLM.turns.length + 1} 轮 · 问：${esc(t.q)}</div>` : "";
   if (LLM.phase === "running")
-    return head + `<div class="note b">已发出，等回答…（一次请求一次计费，超时不会自动重发；'
+    return head + `<div class="note b">已发出，等回答…（一次请求一次计费，超时不会自动重发；`
       + `等不及可以点下面「取消这一轮」，取消也撤回不了已经发出去的那一发）</div>`;
   if (LLM.phase === "cancelled")
     return head + `<div class="note r">${esc(LLM_CANCEL_TEXT)}</div>`;
