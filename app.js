@@ -57,7 +57,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v71";
+const APP_VER = "v72";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -4139,12 +4139,15 @@ async function nativeFetchAll(forceExtra) {
     MANUAL.msg = fails.slice(0, 3).join("；");
     /* 规则回填这一趟的话留在抓取框里：慢的、只记缺口的、手工没被覆盖的，都要留字据。
        小屏只放得下三条，但「不入账 / 这次没读到」这类话不许被顺叙挤到看不见 ——
-       最该被看到的那句最先报；真被截掉的，说清还有几只、去哪看。 */
+       最该被看到的那句最先报；真被截掉的，说清还有几只、去哪看。
+       措辞要贴着屏上真有东西说：产品页那张卡片给的是「录成了什么、还缺什么」，
+       当场那句「手工录入的不覆盖（…）」不在卡片上复述，
+       所以这里只能承诺卡片上真给得出来的两样：录成的值、还缺的项。 */
     const hardLine = l => /不入账|没读到|用不了|超时/.test(l);
     const shown = ruleNotes.filter(hardLine).concat(ruleNotes.filter(l => !hardLine(l))).slice(0, 3);
     const more = ruleNotes.length - shown.length;
     MANUAL.rules = shown.length
-      ? shown.join(" ｜ ") + (more > 0 ? ` ｜ 另有 ${more} 只的回填说明在各产品页` : "")
+      ? shown.join(" ｜ ") + (more > 0 ? ` ｜ 另有 ${more} 只没逐条列出，录成什么样、还缺什么在各产品页的规则卡片上` : "")
       : "";
     saveManual(); renderManBox();
     /* 本机抓取也写一份与云端相同结构的 lastFetch：

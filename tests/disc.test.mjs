@@ -201,8 +201,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v71"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v71"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v72"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v72"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -370,7 +370,10 @@ test("页面接线：规则回填复用净值那条桥，两处挂钩 + 前台�
     "回填的话没按「严重的先说」排，最该看见的那句会被顺叙挤掉");
   assert.ok(/const hardLine = l => \/[^\n]*不入账[^\n]*\/\.test\(l\)/.test(app),
     "hardLine 的判据里必须认「不入账」");
-  assert.ok(app.includes("只的回填说明在各产品页"), "被截掉的那几只要明说去哪看");
+  assert.ok(app.includes("录成什么样、还缺什么在各产品页的规则卡片上"),
+    "被截掉的那几只要明说去哪看，而且措辞只能是卡片上真有的那两样"),
+  assert.ok(!app.includes("回填说明在各产品页"),
+    "卡片不复述「手工录入的不覆盖（…）」，措辞不能写得像那里也有整句回填说明")
   const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
   ["applyAutoDisc", "rulesDue", "RULES_COOLDOWN_DAYS"].forEach(n =>
     assert.ok(imp[1].includes(n), `app.js 没导入 ${n}：口径第二处实现就会分叉`));
