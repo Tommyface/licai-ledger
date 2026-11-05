@@ -17,6 +17,11 @@
         持有期正好等于边界时落在**下一档**（如持有满 7 天就不算 0–7 这档）。
 */
 
+/* 登记编码形态与 Python 侧 navsources/base.is_reg_code 同一条（Z + 12~14 位数字），
+   判据只在 js/core/orgs.js 写一处，这里复用。注意别跟本文件的 FEED_REG 混起来：
+   FEED_REG 是「云端规则 feed 里认的那一种（Z + 13 位）」，窄一档，改它要另做判断。 */
+import { isRegCode } from "./orgs.js";
+
 /* 来源分级（铁律 3）。只有这四档，schema 里也是这四档的 enum：
    official  = 发行机构官网 / 中国理财网信披平台的原始披露文件
    disclosure= 代销渠道（银行 App、微众/网商等）转发的产品说明页
@@ -440,4 +445,68 @@ export function applyRulesFeeds(data, feeds) {
     }
   }
   return out;
+}
+
+
+/* ---------- v85：登记编码自动补齐 ----------
+   用户提的需求是「后续添加产品时自动补齐登记编码」。这一层的判据只有三条，
+   全部与既有铁律同源：手工值优先（填过就一个字都不改）、唯一命中才写
+   （多义 ⇒ 保持空并把候选交出去，「null 是不知道，0 是知道且为零」）、
+   试过要盖章（`regCodeAt`，否则每次同步都替披露源加负载）。
+   写进 `code` 而不是新字段：App 的「登记编码」栏就是 `code` 字段
+   （产品列表与详情页都显示 `登记编码 ${p.code}`），另起一处等于造出
+   第二个要同步改的地方，读的时候 `regCode` 还会盖住它。 */
+
+/** 冷却天数：编码不像净值那样天天变，但用户改了名称/代码以后值得再问一次。 */
+export const REGCODE_COOLDOWN_DAYS = 7;
+
+/** 登记编码那一栏此刻的值（`regCode` 是读侧别名，`code` 是 App 写的那一栏）。
+    形态对不对都算「有值」：自动补齐只看栏里空不空，判错纠正该由人来。 */
+function regField(p) { return str(p && p.regCode) || str(p && p.code); }
+
+/**
+ * 该不该为这只产品反查一次登记编码。
+ * @param {any} p 产品对象
+ * @param {number} [now] 毫秒时刻（测试传固定值）
+ * @returns {boolean}
+ */
+export function regCodeDue(p, now) {
+  if (regField(p)) return false;                   // 手工值优先：栏里有值就不问（含填错的）
+  const at = Date.parse(str(p && p.regCodeAt));
+  if (!isFinite(at)) return true;                  // 没盖过章 ⇒ 没试过
+  const t = isFinite(now) ? Number(now) : Date.now();
+  if (at > t) return true;                         // 时钟或数据倒挂 ⇒ 按没试过
+  return (t - at) / 86400000 >= REGCODE_COOLDOWN_DAYS;
+}
+
+/**
+ * 把反查结果落进账本（就地改 `p.code`），并如实回答改没改、为什么没改。
+ *
+ * @param {any} p 产品对象
+ * @param {{regCode?:string, candidates?:string[], error?:string}|null} got 桥的回包
+ * @returns {{changed:boolean, wrote?:string, why:string}}
+ */
+export function applyRegCode(p, got) {
+  if (!p) return { changed: false, why: "没有这款产品" };
+  /* 这一栏有没有值（形态对不对都算有值）：有值就不再自动补。
+     「手工值优先」在这里比形态校验更硬 —— 哪怕用户填的是一串产品代码，
+     自动补齐也不许悄悄改写他敲进去的东西：那一栏是登记编码的唯一入口，
+     盖掉之后错了连找回的地方都没有；该说的是「这里要人看一眼」。 */
+  const had = regField(p);
+  if (had) {
+    if (isRegCode(had)) return { changed: false, why: "登记编码已有值（手工值优先，不覆盖）" };
+    return { changed: false, why: `登记编码栏里已有值「${had}」，不是登记编码的形态（应为 Z + 12~14 位数字）：我没有改它，请手工核对后填写` };
+  }
+  const cands = (got && Array.isArray(got.candidates))
+    ? got.candidates.map(c => str(c).toUpperCase()).filter(Boolean) : [];
+  const one = str(got && got.regCode).toUpperCase();
+  if (cands.length > 1) {
+    return { changed: false, why: `理财网里这个名字对应多个登记编码（${cands.join("、")}），认不准就不写` };
+  }
+  if (!one) return { changed: false, why: str(got && got.error) || "反查没有拿到登记编码" };
+  if (!isRegCode(one)) {
+    return { changed: false, why: `拿到的编码形态不对（应为 Z + 12~14 位数字）：${one}` };
+  }
+  p.code = one;
+  return { changed: true, wrote: one, why: `已补齐登记编码 ${one}（下一次抓取就能按编码查披露）` };
 }

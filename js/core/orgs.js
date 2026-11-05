@@ -173,11 +173,25 @@ export function detectOrgByProdCode(code) {
  * @param {ProductLike | null | undefined} p
  * @returns {string}
  */
+/**
+ * 是不是标准登记编码形态（Z + 12~14 位数字）。
+ *
+ * 判据只有这一份：Python 侧同名函数在 navsources/base.py:is_reg_code()，
+ * 两边必须一致 —— 台账 App 的「登记编码」栏写在 `code` 字段里，
+ * 谁把那个 `Z7001…` 当成产品代码交出去，中国理财网的份额类别闸门就会
+ * 对该产品**永久拒取**（不写错数，但静默少一路来源）。
+ * @param {any} v
+ * @returns {boolean}
+ */
+export function isRegCode(v) {
+  return /^Z\d{12,14}$/.test(String(v == null ? "" : v).trim().toUpperCase());
+}
+
 export function prodCodeOf(p) {
   if (!p) return "";
   for (const k of ["prodCode", "code", "shareCode"]) {
     const v = String(p[k] == null ? "" : p[k]).trim();
-    if (v) return v;
+    if (v && !isRegCode(v)) return v;      // 登记编码不是产品代码（见 isRegCode）
   }
   return "";
 }
@@ -192,7 +206,7 @@ export function fetchStatus(p) {
   const code = String(p && p.prodCode || "").trim();
   const org = detectOrg(p);
   const reg = String((p && (p.regCode || p.code)) || "").trim().toUpperCase();
-  const hasReg = /^Z\d{12,14}$/.test(reg);
+  const hasReg = isRegCode(reg);
   const nm = String((p && p.name) || "").trim();
   /* 按产品名称搜索只在名称足够完整时才有意义（"某产品"这类短名在信披平台搜不到），
      故要求 6 字以上 —— 与云端「按名搜索」的实际可用性对齐。 */

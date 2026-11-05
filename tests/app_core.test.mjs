@@ -14,7 +14,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { fmtDate } from "../js/core/util.js";
-import { ORG_ALIAS, ORG_NAME, detectOrg, detectOrgByProdCode } from "../js/core/orgs.js";
+import { ORG_ALIAS, ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus,
+       isRegCode } from "../js/core/orgs.js";
 import { parseProductInput } from "../js/core/paste.js";
 import { navSeries, latestNav, navOnOrBefore, navHit } from "../js/domain/nav.js";
 import { sharesOn, hasAnyTrade, computePosition } from "../js/domain/position.js";
@@ -1670,4 +1671,48 @@ test("队列1（v80 · A1）：GitHub 请求 App 内走原生桥、网页版走�
   /* 7) 卡片正面写清「App 内免输入 / 网页版每次填」这个取舍（文档 §4.5 要求） */
   const card = fnBody("syncCardText");
   assert.ok(/免输入/.test(card) && /每次/.test(card), "卡片没把 A1 的取舍写清楚");
+});
+
+
+/* ============================================================
+   v85 · 登记编码与产品代码不是同一个东西
+
+   台账 App 的「登记编码」栏写在 `code` 字段里（产品列表与详情页都显示
+   `登记编码 ${p.code}`），而 `prodCodeOf()` 从前会回退读 `code`。于是
+   「只填了登记编码、没填产品代码」的产品会把 `Z7001…` 当份额代码交出去
+   ——喂给中国理财网的份额类别闸门就永远对不上，聚合源静默永久拒取。
+   这一组锁的是形态判据只有一份、且两边不许互相冒充。
+   ============================================================ */
+test("isRegCode：Z + 12~14 位数字才算登记编码", () => {
+  assert.equal(isRegCode("Z7001126000218"), true);
+  assert.equal(isRegCode(" z7001126000218 "), true, "大小写与首尾空格不影响判定");
+  assert.equal(isRegCode("NYJXLD1409G"), false);
+  assert.equal(isRegCode("Z7001"), false, "短得不像编码的别硬认");
+  assert.equal(isRegCode(""), false);
+  assert.equal(isRegCode(null), false);
+});
+
+test("prodCodeOf：登记编码形态不当产品代码", () => {
+  assert.equal(prodCodeOf({ prodCode: "NYJXLD1409G", code: "Z7001126000218" }), "NYJXLD1409G",
+    "有产品代码时照常优先");
+  assert.equal(prodCodeOf({ code: "Z7001126000218" }), "",
+    "只有登记编码时必须是空 —— 把 Z 码当份额代码 = 聚合源永久拒取");
+  assert.equal(prodCodeOf({ code: "NYJXLD1409G" }), "NYJXLD1409G",
+    "历史账本里 code 存份额代码的写法不能一起改掉");
+  assert.equal(prodCodeOf({ shareCode: "Z7001126000218" }), "");
+});
+
+test("fetchStatus：只填登记编码的产品仍然算「云端可抓」", () => {
+  /* 修 prodCodeOf 最容易顺手把这类产品判成不能抓 —— 那才是真事故：
+     它会直接从抓取名单里消失（nativeFetchAll 按 fetchStatus(p).ok 过滤）。 */
+  const st = fetchStatus({ name: "农银匠心灵动14天9G", code: "Z7001126000218", inst: "农银理财" });
+  assert.equal(st.ok, true, st.txt);
+  assert.match(st.txt, /中国理财网/);
+  assert.match(st.txt, /登记编码/);
+});
+
+test("fetchStatus：产品代码与登记编码各归各的判据", () => {
+  const a = fetchStatus({ name: "徽银安盈稳健日开7号A", code: "Z7002426000328", prodCode: "PNHY260395A", inst: "徽银理财" });
+  assert.equal(a.ok, true);
+  assert.match(a.txt, /双线/, "官网 + 中国理财网两条线都能跑时必须说双线");
 });

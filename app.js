@@ -31,7 +31,7 @@ import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
   DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS,
-  applyRulesFeeds, rulesFeedReg } from "./js/core/disc.js";
+  applyRulesFeeds, rulesFeedReg, regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -60,7 +60,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v84";
+const APP_VER = "v85";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1547,6 +1547,10 @@ function saveProduct(pid) {
   /* T1b：新添加的产品当场去官网档案取一次底层/申赎规则（不挡这条同步返回的路）。
      手工值优先、出处不齐不入账，这些判定都在 applyAutoDisc 里，这里只负责起一趟。 */
   if (!pid && rulesOrgOk(target)) autoFillRules(target, "add").catch(e => toast("规则回填异常：" + String(e).slice(0, 60), 5000));
+  /* v85：同一趟顺手补登记编码 —— 这就是用户要的「以后加产品不用再手工填 Z 编码」。
+     不判机构：编码是聚合源的查询键，任何发行方在理财网都有登记，比规则回填那三家宽。
+     栏里已填（不管对不对）的由 regCodeDue 挡在外面，这一趟不会改写用户手工输入。 */
+  if (!pid) autoFillRegCode(target, "add").catch(e => toast("登记编码补齐异常：" + String(e).slice(0, 60), 5000));
 }
 
 /* ============================================================
@@ -3483,6 +3487,7 @@ function refreshNav() {
     <div class="field"><label>各产品抓取就绪状态（${ready} / ${DATA.products.length} 可自动抓取）</label>
       <div>${rows}<div class="tip" style="margin-top:6px">判定口径与云端抓取脚本一致：<b>机构可识别</b> + <b>已填产品代码</b>。标 ⚠️ 的产品请到「交易」页的产品列表点「编辑」补填。</div></div>
     </div>
+    ${renderNavSheetRegHints()}
     <div class="row-btn" style="margin-top:14px">
       <button class="btn gh" style="flex:1" onclick="closeSheet();go('pg-trade')">去交易页管理产品</button>
     </div>`);
@@ -3754,8 +3759,11 @@ function manStatusHtml() {
     const warn = m.fail ? `<br>⚠️ 但仍有 <b>${m.fail}</b> 只产品没拿到净值${m.msg ? "：" + esc(m.msg) : ""}` : "";
     /* 规则回填的话单独一行：它跟「净值拿到没」是两件事，混在一句里用户分不清缺的是哪个 */
     const ruleLine = m.rules ? `<br>规则回填：${esc(m.rules)}` : "";
+    /* 登记编码同样单独一行：补齐的是聚合源的查询键，缺它时症状是「抓不到净值」，
+       病因和净值并不是一回事，合在一起说就会指错地方。 */
+    const regLine = m.reg ? `<br>登记编码：${esc(m.reg)}` : "";
     return `<div class="note g"><b>✅ ${what}成功</b>
-      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}${ruleLine}</div>${clear}</div>`;
+      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}${ruleLine}${regLine}</div>${clear}</div>`;
   }
   if (m.state === "fail")
     return `<div class="note"><b>❌ ${what}失败</b>${m.conclusion ? `（云端结论：${esc(m.conclusion)}）` : ""}
@@ -4350,6 +4358,35 @@ function nativeRulesFetch(p) {
   });
 }
 
+/* ---------- v85：登记编码反查 ----------
+   同样复用净值那条桥，只多一个 mode:"identify"，不另开桥方法（开了就要动 Java 侧，
+   两处口径迟早漂）。Python 那侧 resolve_reg_code 只做一件事：拿名称去理财网列表里
+   找同一只产品，把「唯一命中 / 多义 / 没查到 / 被拦」四种结论分开交回来。
+   这一趟不产出净值，所以它绝不能混进「抓取失败」的计数里（v84 分三类就是为这个）。
+   超时给 90 秒：列表页一次请求就够，不像徽银那种要逐页翻，别照搬 240 秒的口径。 */
+function nativeIdentifyFetch(p) {
+  return new Promise(resolve => {
+    if (!nativeFetchAvailable()) {
+      resolve({ ok: false, error: bridgeMissingMsg("网页版没有本机抓取，登记编码自动补齐用不了") });
+      return;
+    }
+    const id = "g" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: "本机登记编码反查超时（90 秒）：这一次没查到，下次同步再试" }), 90000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      window.NativeNav.fetch(id, JSON.stringify({
+        prodCode: prodCodeOf(p),
+        regCode: String(p.regCode || p.code || "").trim(),
+        name: String(p.name || ""),
+        inst: String(p.inst || ""),
+        mode: "identify"
+      }));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
+
 /* 回填结果怎么说：补了什么、手工挡住了什么、还缺什么都要照实念一遍。
    「仍缺：赎回费分档」这类话必须出现在前台 —— 界面少说一句，用户就会以为账本是齐的。 */
 function rulesResultText(res) {
@@ -4412,6 +4449,72 @@ async function autoFillRules(p, trigger) {
   return say(rulesResultText(res));
 }
 
+/**
+ * 跑一次登记编码反查（就地补 p.code，并落盘）。返回给用户看的一句话；不该跑时返回 ""。
+ *
+ * 为什么值得为「一个字段」单开一趟：登记编码是聚合源（中国理财网）的查询键。
+ * 缺了它，这只产品就只能靠名称模糊匹配，披露源一旦改名或同名并发产品就查不准，
+ * 表现却是「这轮没拿到净值」—— 用户看到的症状和真正的病因隔了一层。
+ *
+ * 三条判据全在 regCodeDue() / applyRegCode() 里，这里不留第二套：
+ * 手工值优先（填过就绝不动）、唯一命中才写（多义就把候选交出去，宁可不填）、
+ * 试过要盖章（否则每次同步都替理财网加负载）。
+ * 盖章（regCodeAt）只在请求真的发出去之后才写 —— 网页版没有本机桥，
+ * 一趟没跑就盖章等于让这只产品永远不再被补，那是把「没试过」记成「试过没成」。
+ *
+ * @param {object} p 产品对象
+ * @param {"add"|"sync"} trigger "add" 添加当场说一句，"sync" 跟着本机抓取那一趟走
+ * @returns {Promise<string>} 给用户看的一句话
+ */
+async function autoFillRegCode(p, trigger) {
+  if (!p || !regCodeDue(p)) return "";
+  if (!nativeFetchAvailable()) {
+    return bridgeMissingMsg("网页版没有本机抓取，登记编码自动补齐用不了：请在产品页「登记编码」栏手工填 Z 开头的编码");
+  }
+  const say = m => {
+    if (MANUAL && MANUAL.t0) { MANUAL.reg = m; saveManual(); renderManBox(); }
+    if (trigger === "add") toast(m, 6500);
+    return m;
+  };
+  const r = await nativeIdentifyFetch(p);
+  /* 请求已经发出去了，这一步无论成败都盖章：冷却期内不再重复问 */
+  p.regCodeAt = new Date().toISOString();
+  const res = applyRegCode(p, r);
+  if (res.changed) { saveLocal(); renderProd(); renderHome(); autoPush(); }
+  else saveLocal();
+  return say(res.why);
+}
+
+/* 云端反查回来的登记编码候选（settings.lastFetch.regHints）：只念给用户听，
+   一个字都不写进账本 —— 手机同步是整文件 PUT，身份字段谁来写就以谁为准，
+   两处写同一字段迟早打架（写这个字段的只有本机那一趟 autoFillRegCode）。
+   没有候选可说时返回 ""，不留一个空标题占位置。 */
+function renderNavSheetRegHints() {
+  const lf = lastFetchInfo();
+  const hints = (lf && lf.regHints && typeof lf.regHints === "object") ? lf.regHints : null;
+  if (!hints) return "";
+  const keys = Object.keys(hints);
+  if (!keys.length) return "";
+  const byId = new Map(DATA.products.map(p => [String(p.id), p]));
+  const rows = keys.slice(0, 20).map(k => {
+    const h = hints[k] || {};
+    const p = byId.get(k);
+    const who = p ? prodLabel(p) : ("产品 " + k);
+    const cand = String(h.regCode || "");
+    const list = (Array.isArray(h.candidates) ? h.candidates : []).map(s => esc(String(s))).join("、");
+    return `<div class="sm" style="margin-top:4px">· <b>${esc(who)}</b>：${cand
+      ? `云端查到 ${esc(cand)}`
+      : (list ? `云端查到多个候选 ${list}` : "云端没查到")}——${esc(String(h.why || ""))}
+      ${p && String(p.regCode || p.code || "").trim() ? '<span class="muted">（本机这一栏已填，不改动）</span>' : ""}</div>`;
+  }).join("");
+  const more = keys.length > 20 ? `<div class="tip">另有 ${keys.length - 20} 只未列出。</div>` : "";
+  return `<div class="field"><label>云端反查到的登记编码候选（仅供参考，不自动入账）</label>
+    <div class="note">${rows}${more}
+      <div class="tip" style="margin-top:6px">这些是云端按名称在理财网查到的编码，<b>账本里的登记编码不会被它们改动</b>：
+      手工值优先，本机 App 抓取时会自动补齐唯一命中的那一个；App 外请照上面对照手工填写。
+      云端判定时间 ${esc(stampText(lf))}。</div></div></div>`;
+}
+
 async function nativeFetchAll(forceExtra) {
   if (_nativeBusy) return;
   /* 本机抓取不依赖 GitHub：没配同步也能抓、能落盘；配了才会在抓到新净值后自动推送 */
@@ -4458,7 +4561,7 @@ async function nativeFetchAll(forceExtra) {
   if (btn) { btn.disabled = true; btn.textContent = "本机抓取中…"; }
 
   let added = 0, fail = 0, last = "";
-  const fails = [], srcMap = {}, fetchedNavs = {}, ruleNotes = [];
+  const fails = [], srcMap = {}, fetchedNavs = {}, ruleNotes = [], regNotes = [];
   const runOne = async p => {
     /* 已经有今天的净值就没必要再问秒讯，进一步减少请求 */
     const l0 = latestNav(p);
@@ -4505,6 +4608,14 @@ async function nativeFetchAll(forceExtra) {
       const line = await autoFillRules(cur, "sync");
       if (line) ruleNotes.push(prodLabel(cur) + "：" + line);
     }
+    /* v85：存量产品里缺登记编码的，跟着这一趟顺手补查（冷却与判据都在 regCodeDue 里，
+       这里不留第二套）。放在净值这一趟之后：本轮若刚抓到净值就不必再问编码，
+       而且徽银那类逐页翻的列表索引还热着，同一次运行里连着做省一次冷启动。
+       这一路不计入 fail —— 它没拿到编码不等于这轮净值没入账（v84 的三类口径）。 */
+    if (regCodeDue(cur)) {
+      const line = await autoFillRegCode(cur, "sync");
+      if (line) regNotes.push(prodLabel(cur) + "：" + line);
+    }
     MANUAL.added = added; MANUAL.fail = fail;
     saveManual(); renderManBox();
   };
@@ -4540,6 +4651,15 @@ async function nativeFetchAll(forceExtra) {
     const more = ruleNotes.length - shown.length;
     MANUAL.rules = shown.length
       ? shown.join(" ｜ ") + (more > 0 ? ` ｜ 另有 ${more} 只没逐条列出，录成什么样、还缺什么在各产品页的规则卡片上` : "")
+      : "";
+    /* 登记编码这一趟单独一行：它补的是「查询键」，跟净值拿到没、规则齐不齐都是两件事。
+       同样先报该被看到的那句 —— 「多个候选、认不准就不写」和「被拦下」不是坏消息，
+       是需要用户自己填的消息，埋在最后一行就等于没说。 */
+    const regHard = l => /多个登记编码|对不上|没查到|拦下|超时|用不了|形态/.test(l);
+    const regShown = regNotes.filter(regHard).concat(regNotes.filter(l => !regHard(l))).slice(0, 3);
+    MANUAL.reg = regShown.length
+      ? regShown.join(" ｜ ") + (regNotes.length - regShown.length > 0
+        ? ` ｜ 另有 ${regNotes.length - regShown.length} 只没逐条列出，补齐的编码就写在该产品的「登记编码」栏` : "")
       : "";
     saveManual(); renderManBox();
     /* 本机抓取也写一份与云端相同结构的 lastFetch：

@@ -14,6 +14,7 @@ import {
   DISC_TIERS, parseFeeLine, parseAssetLine, parseDiscForm, normDisc, discGaps, feeRateFor,
   discSourceOk, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS, DISC_GAP_LABEL,
   applyRulesFeed, applyRulesFeeds, rulesFeedReg,
+  regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -202,8 +203,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v84"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v84"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v85"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v85"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -620,4 +621,97 @@ test("Q5 接线：两份 feed 各读各的路径、只有一个取数出口、�
   const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
   assert.ok(imp && imp[1].includes("applyRulesFeeds"),
     "app.js 要导入 applyRulesFeeds：多源编排若在页面里重写一遍就会分叉");
+});
+
+
+/* ============================================================
+   v85 · 登记编码自动补齐（用户提的「后续添加产品时自动补齐登记编码」）
+
+   三条判据一条都不能少：手工值优先（填过就绝不动）、唯一命中才写（多义就把
+   候选交出去，宁可不填）、试过要盖章（否则每次同步都替理财网加负载）。
+   写在 `code` 而不是新字段：App 的「登记编码」栏就是 `code`，另起一处等于
+   造出第三个要同步改的地方。
+   ============================================================ */
+const REG_JX = "Z7001126000218";
+const RC_NOW = 1_800_000_000_000;   /* 固定基准，避免测试跟着真实时钟漂 */
+
+
+test("regCodeDue：已有编码就不问（手工值优先）", () => {
+  assert.equal(regCodeDue({ code: REG_JX, name: "匠心灵动14天9G" }, RC_NOW), false);
+  assert.equal(regCodeDue({ regCode: REG_JX, name: "匠心灵动14天9G" }, RC_NOW), false);
+  assert.equal(regCodeDue({ name: "匠心灵动14天9G" }, RC_NOW), true);
+});
+
+test("regCodeDue：冷却期内不重复问，过期再问", () => {
+  const p = { name: "匠心灵动14天9G", regCodeAt: new Date(RC_NOW - 86400000).toISOString() };
+  assert.equal(regCodeDue(p, RC_NOW), false, "昨天刚问过");
+  const old = { name: "匠心灵动14天9G", regCodeAt: new Date(RC_NOW - (REGCODE_COOLDOWN_DAYS + 1) * 86400000).toISOString() };
+  assert.equal(regCodeDue(old, RC_NOW), true, "过了冷却就该再问一次");
+});
+
+test("regCodeDue：盖章时间认不出来或在未来 ⇒ 按没试过处理", () => {
+  assert.equal(regCodeDue({ name: "x", regCodeAt: "昨天" }, RC_NOW), true);
+  assert.equal(regCodeDue({ name: "x", regCodeAt: new Date(RC_NOW + 86400000).toISOString() }, RC_NOW), true);
+});
+
+test("applyRegCode：唯一命中写进 code，不新建第三处字段", () => {
+  const p = { name: "匠心灵动14天9G", prodCode: "NYJXLD1409G" };
+  const r = applyRegCode(p, { regCode: REG_JX, candidates: [REG_JX] });
+  assert.equal(r.changed, true);
+  assert.equal(p.code, REG_JX);
+  assert.equal(p.regCode, undefined, "不许同时写两个字段，读的时候 regCode 优先会盖住 code");
+  assert.match(r.why, /Z7001126000218/);
+});
+
+test("applyRegCode：已有编码时一个字都不改", () => {
+  const p = { name: "x", code: "Z7008926000006" };
+  const r = applyRegCode(p, { regCode: REG_JX, candidates: [REG_JX] });
+  assert.equal(r.changed, false);
+  assert.equal(p.code, "Z7008926000006", "手工值优先：这条是铁律，不是建议");
+  assert.match(r.why, /手工值优先/);
+});
+
+/* 手工值优先的边界要说到「填错了」这一格：栏里是一串产品代码时，自动补齐
+   同样不许盖掉它 —— 覆盖用户敲进去的东西之后，错了连找回的地方都没有。
+   变异证明：把 regField() 改成「只在形态合法时才返回值」，下面两条一起红。 */
+test("applyRegCode：栏里填的是产品代码（不是编码形态）也不覆盖，并说清要手工核对", () => {
+  const p = { name: "匠心灵动14天9G", code: "NYJXLD1409G" };
+  const r = applyRegCode(p, { regCode: REG_JX, candidates: [REG_JX] });
+  assert.equal(r.changed, false, "有值就不动，不管值是什么");
+  assert.equal(p.code, "NYJXLD1409G", "自动补齐没有改写用户输入的权利");
+  assert.match(r.why, /NYJXLD1409G/, "要把屏幕上那个值原样念出来，不然用户不知道在说什么");
+  assert.match(r.why, /手工核对/);
+});
+
+test("regCodeDue：栏里有值就不再问（填错的也归人管，不留第二套判据）", () => {
+  assert.equal(regCodeDue({ name: "x", code: "NYJXLD1409G" }, RC_NOW), false);
+  assert.equal(regCodeDue({ name: "x", regCode: "Z700892600000" }, RC_NOW), false,
+    "Z+12 也是合法形态：这条按 isRegCode 判，比云端规则 feed 的 FEED_REG 宽");
+});
+
+test("applyRegCode：多个候选不写，并把候选说给用户", () => {
+  const p = { name: "匠心灵动14天" };
+  const r = applyRegCode(p, { regCode: "", candidates: [REG_JX, "Z7001126000999"], error: "对应多个登记编码" });
+  assert.equal(r.changed, false);
+  assert.equal(p.code, undefined, "认不出是哪一个就不写（null 是不知道）");
+  assert.match(r.why, /Z7001126000218/);
+  assert.match(r.why, /Z7001126000999/);
+});
+
+test("applyRegCode：形态不对的返回值不写", () => {
+  const p = { name: "x" };
+  const r = applyRegCode(p, { regCode: "NYJXLD1409G", candidates: ["NYJXLD1409G"] });
+  assert.equal(r.changed, false);
+  assert.equal(p.code, undefined);
+  assert.match(r.why, /形态/);
+});
+
+test("applyRegCode：被拦/没查到时把原因原样交出去，不许编一个编码", () => {
+  const p = { name: "x" };
+  const blocked = applyRegCode(p, { regCode: "", candidates: [], error: "中国理财网本轮被风控拦下（验证失败）" });
+  assert.equal(blocked.changed, false);
+  assert.match(blocked.why, /被风控拦下/, "被拦 ≠ 没有数据（铁律 #10）");
+  const empty = applyRegCode(p, {});
+  assert.equal(empty.changed, false);
+  assert.equal(p.code, undefined);
 });
