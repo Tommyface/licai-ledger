@@ -22,7 +22,7 @@ import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
 import { ocrNavLines } from "./js/domain/ocr.js";
 import { configureCalendar, suggestTradeDates, tradeDaysBetween } from "./js/domain/calendar.js";
 import { normTomb, mergeTombs, purgeTombs, applyTombs as applyTombsIn } from "./js/domain/tomb.js";
-import { mergeForPush } from "./js/domain/sync.js";
+import { mergeForPush, stampMs } from "./js/domain/sync.js";
 import { syncBadge, syncLine } from "./js/domain/syncstatus.js";
 import { readRelease, updateVerdict } from "./js/domain/update.js";
 import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
@@ -60,7 +60,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v81";
+const APP_VER = "v82";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -3431,7 +3431,7 @@ function delTrade(tid) {
    并提交到私有仓库，浏览器端只需「从云端拉取」。
    ============================================================ */
 function refreshNav() {
-  const last = (DATA.settings && DATA.settings.lastNavSync) || "";
+  const last = stampText(DATA.settings && DATA.settings.lastNavSync);
   const hf = lastFetchInfo(), hfN = fetchFailCount(hf);
   const rows = DATA.products.map(p => {
     const st = fetchStatus(p);
@@ -3768,7 +3768,7 @@ function renderManBox() {
   const box = $("manFetchBox"); if (box) box.innerHTML = manStatusHtml();
   const t = $("navSyncTime");
   if (t) {
-    const last = (DATA.settings && DATA.settings.lastNavSync) || "";
+    const last = stampText(DATA.settings && DATA.settings.lastNavSync);
     t.className = "note " + (last ? "g" : "");
     t.textContent = last || "暂无记录（云端抓取任务尚未写入）";
   }
@@ -3849,7 +3849,7 @@ async function collectManualResult() {
   await syncPull(false);
   const after = navFingerprint();
   const lf = lastFetchInfo();
-  MANUAL.navTime = (lf && lf.time) || "";
+  MANUAL.navTime = stampText(lf);
   MANUAL.fail = lf ? (Number(lf.fail) || 0) : 0;
   MANUAL.added = Math.max(0, after.count - before.count);
   saveManual();
@@ -4542,6 +4542,10 @@ async function nativeFetchAll(forceExtra) {
     DATA.settings = DATA.settings || {};
     DATA.settings.lastFetch = {
       time: stampOf(Date.now()), source: "app", total: list.length,
+      /* v82 · Q8：`time` 是设备本地串（显示用），`t` 是 epoch 毫秒（判新旧用）。
+         没有 t 的时候，本机 22:02 会盖掉云端 20:00Z 那条更晚的记录 —— 两侧不同钟，
+         字符串比大小在 8 小时窗口内必然倒置。合并判据见 js/domain/sync.js:stampMs。 */
+      t: Date.now(),
       ok: list.length - fail, fail: fail, items: fails.slice(0, 8),
       sig: fails.map(s => s.slice(0, 40)).join("|"), products: srcMap
     };
@@ -5056,6 +5060,16 @@ function lastFetchInfo() {
   const lf = DATA.settings && DATA.settings.lastFetch;
   return (lf && typeof lf === "object") ? lf : null;
 }
+/* v82 · Q8：把抓取时间显示成本机时间。
+   云端 runner 写的 `time` 是 UTC、手机本机写的是本地，直接印出来差 8 小时；
+   统一先经 sync.js:stampMs 解成时刻再显示。解不出来（老格式、空值）就原样给出，
+   不编一个时间 —— 铁律 #10。 */
+function stampText(v) {
+  const ms = stampMs(v);
+  if (Number.isFinite(ms)) return stampOf(ms);
+  if (v && typeof v === "object") return String(v.time || "");
+  return String(v || "");
+}
 /* 告警签名只取「失败集合」，不含时间戳：
    这样用户点掉之后不会因为下一轮抓取（时间变了）又冒出来，
    但只要失败的产品变了、或有新的产品开始失败，就会重新提示。 */
@@ -5074,7 +5088,7 @@ function renderAlert() {
   const more = n > 3 ? `<div class="sm">…另有 ${n - 3} 只，点「详情」看全部</div>` : "";
   bar.className = "alert warn show";
   bar.innerHTML = `<div class="tx">
-      <b>${lf.source === "app" ? "本机抓取" : "云端抓取"}有 ${n} 只产品没拿到净值</b>${lf.time ? `<span class="sm"> · ${esc(lf.time)}</span>` : ""}
+      <b>${lf.source === "app" ? "本机抓取" : "云端抓取"}有 ${n} 只产品没拿到净值</b>${lf.time ? `<span class="sm"> · ${esc(stampText(lf))}</span>` : ""}
       ${items}${more}
       <div style="margin-top:4px"><span class="more" onclick="refreshNav()">详情与处理办法 ›</span></div>
     </div>

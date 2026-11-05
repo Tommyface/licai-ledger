@@ -8,7 +8,13 @@
      · 不修改传入的本地数据（静默推送不能动本地账面） */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeForPush, PUSH_TOMB_DAYS } from "../js/domain/sync.js";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { mergeForPush, stampMs, PUSH_TOMB_DAYS } from "../js/domain/sync.js";
+
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const read = f => fs.readFileSync(path.join(root, f), "utf8");
 
 const now = 1_800_000_000_000;          // 固定时钟，墓碑有效期才可复现
 const DAY = 86_400_000;
@@ -213,4 +219,64 @@ test("disc 合并：不修改传入的本地数据对象", () => {
   const snap = JSON.stringify(l);
   mergeForPush(l, local([dp("p1", dOf("auto", { lockDays: 7 }))]), { now });
   assert.equal(JSON.stringify(l), snap);
+});
+
+/* ---------- v82 · 队列 Q8：抓取时间戳的时区口径 ----------
+   settings.lastFetch / lastNavSync 有两个写入方，写的不是同一个钟：
+   云端 runner 写 UTC（navsources/cli.py 的 time.strftime），手机本机写设备本地
+   （app.js 的 stampOf）。v81 及之前的判据是字符串比大小，于是本机 22:02
+   （=14:02Z）会盖掉云端 20:00Z 那条**更晚**的记录 —— 8 小时窗口内新旧倒置。
+   现在的口径：带 t（epoch 毫秒）就按 t；没 t 则无时区的串一律按 UTC 解释；
+   都解不出来才退回旧的字符串比较（铁律 #10：解不出就明说，不许编一个时刻）。 */
+
+test("Q8 时区：本机 +8h 的假象新时间，不许盖掉更晚的云端记录", () => {
+  const l = local([prod("p1")], [], {
+    lastFetch: { time: "2026-11-05 22:02:57", source: "app", added: 0,
+                 t: Date.parse("2026-11-05T14:02:57Z") },
+  });
+  const r = local([prod("p1")], [], {
+    lastFetch: { time: "2026-11-05 20:00:00", added: 3 },     // runner 写的 UTC 串
+  });
+  const { payload } = mergeForPush(l, r, { now });
+  assert.equal(payload.settings.lastFetch.added, 3, "云端这条时刻更晚，必须赢");
+  assert.equal(payload.settings.lastFetch.time, "2026-11-05 20:00:00");
+});
+
+test("Q8 时区：两侧都带 t 时严格按 t 判，字符串再花哨也不作数", () => {
+  const l = local([prod("p1")], [], {
+    lastFetch: { time: "2026-11-05 23:00:00", t: 1_760_000_000_000, added: 0 } });
+  const r = local([prod("p1")], [], {
+    lastFetch: { time: "2026-01-01 00:00:00", t: 1_760_000_600_000, added: 7 } });
+  const { payload } = mergeForPush(l, r, { now });
+  assert.equal(payload.settings.lastFetch.added, 7, "t 比字符串诚实，判新旧只认 t");
+});
+
+test("stampMs：t 优先 > ISO 带时区 > naive 当 UTC > 认不出的返回 NaN", () => {
+  assert.equal(stampMs({ t: 1_700_000_000_000, time: "2026-11-05 20:00:00" }), 1_700_000_000_000);
+  assert.equal(stampMs("2026-11-05T20:00:00Z"), Date.parse("2026-11-05T20:00:00Z"));
+  assert.equal(stampMs({ time: "2026-11-05 20:00:00" }), Date.parse("2026-11-05T20:00:00Z"));
+  assert.equal(stampMs({ time: "2026-11-05T20:00+08:00" }), Date.parse("2026-11-05T12:00:00Z"));
+  assert.ok(Number.isNaN(stampMs("2026-10-30 01:00 UTC")), "认不出就 NaN，不许猜一个时刻");
+  assert.ok(Number.isNaN(stampMs(undefined)), "没有值也是 NaN，不要当 0 处理");
+});
+
+test("Q8 兼容：解不出时刻的老格式仍按字符串比，行为一字不变", () => {
+  const l = local([prod("p1")], [], { lastNavSync: "2026-10-29 16:00 UTC" });
+  const r = local([prod("p1")], [], { lastNavSync: "2026-10-30 01:00 UTC" });
+  const { payload, stats } = mergeForPush(l, r, { now });
+  assert.equal(payload.settings.lastNavSync, "2026-10-30 01:00 UTC");
+  assert.equal(stats.settings, 1);
+});
+
+test("Q8 接线：本机抓取要带 t，显示处一律走 stampText", () => {
+  const app = read("app.js");
+  assert.match(app, /DATA\.settings\.lastFetch = \{[\s\S]{0,500}?t: Date\.now\(\)/,
+    "本机抓取没写 t：合并判据又要退回字符串比较，8 小时倒置复活");
+  assert.ok(app.includes('import { mergeForPush, stampMs } from "./js/domain/sync.js";'),
+    "app.js 没引 stampMs：显示层拿不到归一口径");
+  const n = (app.match(/stampText\(/g) || []).length;
+  assert.ok(n >= 5, `stampText 该有「1 处定义 + 4 处显示接线」，实测 ${n} 处`);
+  /* 反向：显示不许再直接印原始串（云端那份是 UTC，直接印就差 8 小时） */
+  assert.ok(!/MANUAL\.navTime = \(lf && lf\.time\)/.test(app),
+    "又有人直接印 lf.time 了：绕过 stampText 就是绕过时区归一");
 });

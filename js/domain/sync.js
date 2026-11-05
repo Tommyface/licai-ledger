@@ -39,6 +39,47 @@ function objOf(v) {
 }
 
 /**
+ * v82 · 队列 Q8：抓取时间戳的归一读取。
+ *
+ * 事故面：`settings.lastFetch.time` 有两个写入方，而它们写的不是同一个钟。
+ * 云端 `navsources/cli.py` 用 `time.strftime`（GitHub runner 是 UTC），
+ * 手机本机抓取用 `app.js` 的 `stampOf(Date.now())`（设备本地时间，北京 +8）。
+ * 老的合并判据是「字符串比大小」，于是本机 22:02（=14:02Z）会盖掉云端
+ * 20:00Z 那条**更晚**的记录 —— 8 小时窗口内新旧倒置，`lastNavSync` 同规则同病。
+ *
+ * 口径（数据端 `scripts/merge_remote.py:stamp_ms` 与本函数逐条对称）：
+ *  1. 对象里带 `t`（epoch 毫秒）→ 直接用它，这是唯一不带歧义的来源；
+ *  2. 否则认字符串：带 `Z` 或 `±hh:mm` 的按明示时区解；
+ *     `YYYY-MM-DD HH:MM[:SS]` 这种没带时区的，**按 UTC 解释**（历史上这个字段的
+ *     绝大多数写入方是 runner），不再假装它是本地时间；
+ *  3. 都解不出来（比如旧测试里 `"2026-10-30 01:00 UTC"` 这种尾巴格式）→ 返回 NaN，
+ *     调用方退回旧的字符串比较，不许自己编一个时刻（铁律 #10 诚实降级）。
+ *
+ * @param {any} v settings 里的值：字符串，或带 time / t 的对象
+ * @returns {number} 毫秒时间戳；解不出来返回 NaN
+ */
+export function stampMs(v) {
+  if (v && typeof v === "object") {
+    const t = Number(v.t);
+    if (Number.isFinite(t) && t > 0) return t;
+    return textMs(v.time);
+  }
+  return textMs(v);
+}
+
+/** @param {any} s @returns {number} */
+function textMs(s) {
+  if (typeof s !== "string" || !s) return NaN;
+  if (/z$/i.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)) {
+    const x = Date.parse(s);
+    return Number.isFinite(x) ? x : NaN;
+  }
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2})?$/);
+  if (!m) return NaN;
+  return Date.parse(m[1] + "T" + m[2] + (m[3] || ":00") + "Z");
+}
+
+/**
  * 生成本次 PUT 的 payload：本地快照为骨架，把远端独有且没被删过的东西并进来。
  *
  * 规则（按重要性排序）：
@@ -134,7 +175,12 @@ export function mergeForPush(local, remote, opts) {
     const a = rs[k], b = payload.settings[k];
     const ta = a ? String(a.time || a) : "";
     const tb = b ? String(b.time || b) : "";
-    if (ta && ta > tb) { payload.settings[k] = JSON.parse(JSON.stringify(a)); stats.settings++; }
+    /* v82 · Q8：能解出真实时刻就按时刻判（两侧钟不同、字符串比大小会倒置），
+       解不出来才退回旧的字符串比较 —— 与数据端 merge_remote.py 同口径。 */
+    const ma = stampMs(a), mb = stampMs(b);
+    const useMs = Number.isFinite(ma) && Number.isFinite(mb);
+    const newer = useMs ? ma > mb : ta > tb;
+    if (ta && newer) { payload.settings[k] = JSON.parse(JSON.stringify(a)); stats.settings++; }
   }
 
   return { payload, stats };
