@@ -30,7 +30,8 @@ import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
 import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
-  DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS } from "./js/core/disc.js";
+  DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS,
+  applyRulesFeed, rulesFeedReg } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -59,7 +60,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v80";
+const APP_VER = "v81";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -132,6 +133,12 @@ let DATA = { products: [], trades: [], settings: { hideAmount: false } };
    syncShellOld() 认出来给一句实话，绝不静默发一发空 token 请求。 */
 let SYNC = { owner: "glorywork", repo: "licai-data", path: "licai-data.json", sha: "", auto: true };
 let SYNC_MEM_TOKEN = "";   /* 网页版专用：只在内存里，绝不进 localStorage / DOM */
+/* v81 第 4 步：云端规则 feed 的路径，与「披露原文摘录」的内存态。
+   product-rules.json 是私有仓里 Update NAV 每天写的独立产物（第 1~3 步落地），
+   页面只读不写。摘录只留内存、绝不进 DATA —— 进账本就会随整文件同步来回搬
+   这段低频大文本，还会把 schema 撑大；刷新即失，下次同步重建。 */
+const RULES_FEED_PATH = "product-rules.json";
+let RULES_QUOTES = {};
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳 */
 let NOTIFY = { on: false, lastCheck: 0 };
 /* 用户已忽略的抓取告警签名（按「失败集合」生成，集合一变就重新提示） */
@@ -1543,10 +1550,11 @@ function saveProduct(pid) {
    ------------------------------------------------------------
    口径全部在 js/core/disc.js（null 是不知道 / ratePct 是百分数 / 分档是 [from,to)），
    这里只做三件事：把字段拼成一张卡、把表单收进 DATA、把缺失如实显示出来。
-   这张卡有两条来路：手工录入，和 v70 起的官网档案自动回填（本机 Python 桥，
-   请求带 mode:"rules"）。当年说好的「回填复用这套字段和这个表单、不另开通路」
-   已经兑现 —— 回填只经 applyAutoDisc 写这同一份 DATA，没有第二套空值语义，
-   T7 的规则引擎仍然只认一处。
+   这张卡有三条来路：手工录入、v70 起的官网档案自动回填（本机 Python 桥，
+   请求带 mode:"rules"），以及 v81 起的云端规则 feed（Update NAV 每天写
+   product-rules.json，同步时按登记编码配对落账）。当年说好的「回填复用这套
+   字段和这个表单、不另开通路」已经兑现 —— 两条自动来路都只经 applyAutoDisc
+   写这同一份 DATA，没有第二套空值语义，T7 的规则引擎仍然只认一处。
    两条来路撞上时手工值优先：手工录过的项回填跳过，哪几项被挡下来在抓取框当场念；
    官网那一页凑不齐「链接 + 站内披露日期」就只记缺口、不写值。
    ============================================================ */
@@ -1613,8 +1621,23 @@ function discCard(p, pos) {
       autoTip = `<div class="tip" style="margin-top:8px">这几项已经录齐到不用再去官网检索；要继续手工核对就照披露原文改。</div>`;
     }
   }
+  /* v81 第 4 步：云端规则 feed 带回来的披露原文摘录（内存态，不进 DATA）。
+     用 <details> 折叠、纯 HTML 无内联 handler —— handlers.test.mjs 的桥接扫描
+     只认 on*="fn(...)" 里的第一个函数名，这里不新增任何入口名。
+     没有摘录就整块不渲染，绝不留一个点开是空的「原文摘录」。 */
+  const qReg = rulesFeedReg(p);
+  const q = qReg ? RULES_QUOTES[qReg] : null;
+  const qKeys = q && typeof q === "object"
+    ? Object.keys(q).filter(k => q[k] !== null && q[k] !== undefined && String(q[k]) !== "") : [];
+  const qRows = qKeys.map(k =>
+    `<tr><td style="white-space:nowrap">${esc(DISC_GAP_LABEL[k] || k)}</td><td style="white-space:pre-wrap;word-break:break-all">${esc(String(q[k]))}</td></tr>`).join("");
+  const quoteHtml = qKeys.length
+    ? `<details style="margin-top:10px"><summary style="cursor:pointer">披露原文摘录（${qKeys.length} 项）</summary>
+      <table class="navtbl" style="margin-top:8px"><tbody>${qRows}</tbody></table>
+      <div class="cap" style="padding:6px 0 0">摘录只作核对用，机器仍按上表结构化字段判断；原文与结构化值不一致时请照披露原文手工改。</div></details>`
+    : "";
   return `<table class="navtbl"><thead><tr><th>披露项</th><th>录入内容</th></tr></thead><tbody>${rows.join("")}</tbody></table>
-    ${src}${holdLine}${warn}${autoTip}
+    ${src}${holdLine}${warn}${autoTip}${quoteHtml}
     <div class="cap" style="padding:6px 0 0">口径为照录披露原文：null 表示未披露，与「0」不同义；占比与费率均为百分数本身。</div>`;
 }
 
@@ -3656,6 +3679,24 @@ async function ghReq(method, url, body) {
   if (!r.ok) { const t = await r.text(); throw new Error(`HTTP ${r.status} ${t.slice(0, 120)}`); }
   return r.status === 204 ? null : r.json();
 }
+/* v81 第 4 步：读私有仓里那份独立规则 feed。
+   这是「附带信息」，不是账本本体：404（云端还没写过）、JSON 坏、网络失败、
+   旧壳、没配 token —— 一律静默降级成 null，绝不把一次规则文件读取失败
+   变成「拉取失败」。ghReq 是唯一出口，App 内走桥、网页版走 fetch，两条通道
+   共用一份，不在页面里另写一套鉴权。 */
+async function fetchRulesFeed() {
+  try {
+    const info = await ghReq("GET", `${GH}/repos/${SYNC.owner}/${SYNC.repo}/contents/${RULES_FEED_PATH}`);
+    if (!info || typeof info.content !== "string") return null;
+    const feed = JSON.parse(b64ToUtf8(info.content));
+    if (!feed || typeof feed !== "object" || !feed.products
+      || typeof feed.products !== "object" || Array.isArray(feed.products)) return null;
+    return feed;
+  } catch (e) {
+    console.warn("规则 feed 读取失败（不影响账本同步）：", String(e).slice(0, 120));
+    return null;
+  }
+}
 /* 手动触发云端抓取（#延时对策，2026-09-16）：
    GitHub 免费仓库的 schedule 是「尽力而为」，实测延迟 2-9.5 小时且可能被跳过 ——
    点这个按钮用 workflow_dispatch 立刻触发一次（官方接口，非定时任务、无排队延迟）。
@@ -4590,7 +4631,18 @@ async function syncPull(manual) {
     if (manual && !confirm("用云端数据覆盖本地？本地未同步的改动将丢失。\n建议：先在另一台设备推送，或先导出本地备份。")) return;
     /* 覆盖前留一份净值指纹，用来判断云端是不是真有新净值（见 notifyNewNav） */
     const before = navFingerprint();
+    /* v81 第 4 步：先取独立规则 feed（读不到就 null），再整文件覆盖 DATA。
+       落账必须排在唯一这一次 saveLocal() **之前**：feed 逐只就地改 disc，
+       若另调一次 saveLocal，DIRTY 会被当成「用户改的」；若排在后面，
+       这批修改就根本没落盘。判据全在 applyRulesFeed → applyAutoDisc 里，
+       这里只做配对与统计，出处不齐一条都不写。 */
+    const feed = await fetchRulesFeed();
     DATA = Object.assign({ products: [], trades: [], settings: {} }, remote);
+    let rulesStat = null;
+    if (feed) {
+      rulesStat = applyRulesFeed(DATA, feed);
+      RULES_QUOTES = rulesStat.quotes;      /* 只给展示层，绝不写进 DATA */
+    }
     saveLocal();
     applyCalendarConfig();   /* 云端可能补了新的年份 / 截止时间 */
     const pullVer = _POS_VER;
@@ -4608,7 +4660,9 @@ async function syncPull(manual) {
        拿它当基准会算出「云端有 200 条新净值」这种荒唐提示，故跳过。 */
     if (before.count > 0) notifyNewNav(navDeltaSince(before.latest), after.latest);
     renderAlert();
-    if (manual) toast(migratedRemote ? "已从云端拉取，并自动整理数据" : "已从云端拉取");
+    const rulesTip = rulesStat && rulesStat.filled
+      ? `，规则文件回填 ${rulesStat.filled} 项` : "";
+    if (manual) toast((migratedRemote ? "已从云端拉取，并自动整理数据" : "已从云端拉取") + rulesTip);
   } catch (e) {
     if (manual) toast("拉取失败：" + String(e).slice(0, 80), 3000);
   }

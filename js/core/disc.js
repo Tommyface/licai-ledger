@@ -343,3 +343,62 @@ export function feeRateFor(d, holdDays) {
   }
   return null;                                            // 落进空洞：同样按未知处理
 }
+
+/* ---------- 第 4 步（v81）：云端规则 feed → 账本 ----------
+   第 1~3 步把「按登记编码抓销售文件 → 抽五字段」放到了云端 CI，产物是独立的
+   product-rules.json（只抓取器写、手机端从不碰）。这一层负责把它落进账本：
+   **判据一行都不重写** —— 逐只产品交给已有的 applyAutoDisc()，出处合格才写、
+   只补空白、手工值优先全在那一个函数里；这里只做「按登记编码配对 + 把 feed
+   条目翻译成 applyAutoDisc 认得的 got 形状」，并回报统计供前台说一句话。
+
+   纯编排：不碰网络 / 时钟 / DOM / 存储，data 与 feed 都是传进来的对象。
+   rawQuote（披露原文摘录）只随返回值交给展示层，**不写进账本** ——
+   账本里的 disc 一旦带上摘录，双向整文件同步就会把这段低频大文本来回搬，
+   还会撑大 schema；展示层用内存态按登记编码查即可。 */
+
+/** feed 的产品键形态，与第 1 步 schema 的 propertyNames 同一条。 */
+const FEED_REG = /^Z\d{13}$/;
+
+/** 取产品的标准登记编码：regCode 优先，老数据放在 code 里也认。两边共用这一份口径。 */
+export function rulesFeedReg(p) {
+  const a = str(p && p.regCode), b = str(p && p.code);
+  return FEED_REG.test(a) ? a : (FEED_REG.test(b) ? b : "");
+}
+
+/**
+ * 把独立 feed 落进账本（就地改 data.products[].disc）。
+ * @param {any} data 账本对象
+ * @param {any} feed product-rules.json 解析后的对象
+ * @returns {{total:number, matched:number, filled:number, kept:number,
+ *            skippedNoCode:number, skippedNoEntry:number, badSource:number,
+ *            quotes:Record<string, any>}}
+ */
+export function applyRulesFeed(data, feed) {
+  const stat = { total: 0, matched: 0, filled: 0, kept: 0,
+    skippedNoCode: 0, skippedNoEntry: 0, badSource: 0,
+    /** @type {Record<string, any>} */ quotes: {} };
+  const products = (data && Array.isArray(data.products)) ? data.products : [];
+  const entries = (feed && feed.products && typeof feed.products === "object"
+    && !Array.isArray(feed.products)) ? feed.products : {};
+  stat.total = products.length;
+  for (const p of products) {
+    if (!p || typeof p !== "object") { stat.skippedNoCode++; continue; }
+    const reg = rulesFeedReg(p);
+    if (!reg) { stat.skippedNoCode++; continue; }        // 无标准登记编码：抓不到销售文件
+    const e = entries[reg];
+    if (!e || typeof e !== "object") { stat.skippedNoEntry++; continue; }
+    stat.matched++;
+    /* feed 条目已是 {rules, source, rawQuote, gaps, why}；applyAutoDisc 只认
+       got.rules / got.source / got.meta.regCode / got.why。原样透传，不在这里
+       另立空值语义、不自己拼 disc 对象、不判 status。 */
+    const got = { rules: e.rules, source: e.source,
+      meta: { regCode: e.regCode || reg }, why: e.why };
+    const res = applyAutoDisc(p, got);
+    if (!res.ok) { stat.badSource++; continue; }        // 出处不齐：一条都不写
+    stat.filled += res.filled.length;
+    stat.kept += res.kept.length;
+    if (e.rawQuote && typeof e.rawQuote === "object" && Object.keys(e.rawQuote).length)
+      stat.quotes[reg] = e.rawQuote;                     // 只给展示层，不进 DATA
+  }
+  return stat;
+}

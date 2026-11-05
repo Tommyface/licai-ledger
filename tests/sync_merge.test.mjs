@@ -151,3 +151,66 @@ test("云端或本地字段形状被改坏（对象当数组用）也不炸、�
   assert.deepEqual(out.payload.products[0].navHistory, { "2026-10-29": 1.02 },
     "本地 navHistory 被写坏时换成真对象再补，别把字符串留在文件里");
 });
+
+/* ---------- 第 4 步（v81）：disc 单独判，不套「规则 5：只填空白」 ----------
+   disc 是对象类型，用「只填空值」会两头误判：本地 normDisc 生成的全空骨架
+   也是非空对象，会把云端回填的真值挡在门外；反过来本地 auto 值又会盖掉
+   别台设备手工录的 manual 值。口径全复用 disc.js 的 normDisc/discHasContent。 */
+const D_SRC = { url: "https://x.example.com/disc.pdf", publishedAt: "2026-01-01", tier: "official" };
+const dOf = (status, body = {}) => Object.assign({
+  status, lockDays: null, openRule: "", feeRedeem: [], assets: [], investScope: "", source: D_SRC,
+}, body);
+const dp = (id, d) => prod(id, { disc: d });
+
+test("disc 合并：本地手工录入绝对优先，远端无论什么形状都不盖", () => {
+  const l = local([dp("p1", dOf("manual", { lockDays: 180 }))]);
+  const r = local([dp("p1", dOf("auto", { lockDays: 7 }))]);
+  const { payload } = mergeForPush(l, r, { now });
+  assert.equal(payload.products[0].disc.lockDays, 180);
+  assert.equal(payload.products[0].disc.status, "manual");
+});
+
+test("disc 合并：远端是别台设备手工录的，盖过本地 auto / none", () => {
+  const l = local([dp("p1", dOf("auto", { lockDays: 7 }))]);
+  const r = local([dp("p1", dOf("manual", { lockDays: 180 }))]);
+  const { payload } = mergeForPush(l, r, { now });
+  assert.equal(payload.products[0].disc.status, "manual");
+  assert.equal(payload.products[0].disc.lockDays, 180);
+});
+
+test("disc 合并：本地只是全空骨架且远端有内容才取远端", () => {
+  const l = local([dp("p1", dOf("none"))]);
+  const r = local([dp("p1", dOf("auto", { lockDays: 7, openRule: "每周二" }))]);
+  const { payload, stats } = mergeForPush(l, r, { now });
+  assert.equal(payload.products[0].disc.lockDays, 7, "全空骨架不该把云端回填的真值挡在门外");
+  assert.equal(payload.products[0].disc.openRule, "每周二");
+  assert.ok(stats.fields >= 1);
+});
+
+test("disc 合并：本地已有 auto 内容、远端也是 auto 时不互相覆盖", () => {
+  const l = local([dp("p1", dOf("auto", { lockDays: 30 }))]);
+  const r = local([dp("p1", dOf("auto", { lockDays: 7 }))]);
+  const { payload } = mergeForPush(l, r, { now });
+  assert.equal(payload.products[0].disc.lockDays, 30, "同档按本地为准，不做「谁新谁赢」的猜判");
+});
+
+test("disc 合并：远端只有全空骨架，不许把本地已有内容顶掉", () => {
+  const l = local([dp("p1", dOf("auto", { lockDays: 7 }))]);
+  const r = local([dp("p1", dOf("none"))]);
+  const { payload } = mergeForPush(l, r, { now });
+  assert.equal(payload.products[0].disc.lockDays, 7);
+});
+
+test("disc 合并：普通档案字段仍按规则 5 只填空白，不受 disc 特判影响", () => {
+  const l = local([prod("p1", { orgName: "", disc: dOf("none") })]);
+  const r = local([prod("p1", { orgName: "招银理财", disc: dOf("none") })]);
+  const { payload } = mergeForPush(l, r, { now });
+  assert.equal(payload.products[0].orgName, "招银理财");
+});
+
+test("disc 合并：不修改传入的本地数据对象", () => {
+  const l = local([dp("p1", dOf("none"))]);
+  const snap = JSON.stringify(l);
+  mergeForPush(l, local([dp("p1", dOf("auto", { lockDays: 7 }))]), { now });
+  assert.equal(JSON.stringify(l), snap);
+});

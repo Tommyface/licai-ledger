@@ -14,6 +14,7 @@
    这边以本地为骨架补云端条目），墓碑口径两侧一致（30 天内不复活）。 */
 
 import { normTomb, mergeTombs, purgeTombs } from "./tomb.js";
+import { normDisc, discHasContent } from "../core/disc.js";
 
 /** 与 app.js / tomb.js / merge_remote.py 保持同一个有效期 */
 export const PUSH_TOMB_DAYS = 30;
@@ -96,14 +97,24 @@ export function mergeForPush(local, remote, opts) {
         stats.navs++;
       }
     }
-    for (const k in copy) {                        // 规则 5：只填空白
-      if (k === "navHistory" || k === "id") continue;
+    for (const k in copy) {                        // 规则 5：只填空白（disc 除外）
+      if (k === "navHistory" || k === "id" || k === "disc") continue;
       const v = copy[k];
       if (v === undefined || v === null || v === "") continue;
       const cur = p[k];
       if (cur === undefined || cur === null || cur === "" ||
         (Array.isArray(cur) && cur.length === 0)) { p[k] = v; stats.fields++; }
     }
+    /* v81 第 4 步：disc 单独判，不套规则 5。对象类型用「只填空值」会两头误判 ——
+       本地 normDisc() 生成的全空骨架也是非空对象，会把另一台设备 / 云端回填的真值
+       挡在门外；反过来本地 auto 值又会盖掉别台设备手工录的 manual 值（同一型事故）。
+       口径全复用 disc.js 的 normDisc / discHasContent，这里不另立一套空值语义。 */
+    const L = normDisc(p.disc), R = normDisc(copy.disc);
+    let takeDisc = false;
+    if (L.status === "manual") takeDisc = false;             // 手工录入绝对优先
+    else if (R.status === "manual") takeDisc = true;         // 别台设备手工录的，盖过 auto/none
+    else if (!discHasContent(L) && discHasContent(R)) takeDisc = true;  // 本地只是全空骨架
+    if (takeDisc) { p.disc = copy.disc; stats.fields++; }
   }
 
   const trades = Array.isArray(payload.trades) ? payload.trades : (payload.trades = []);

@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import {
   DISC_TIERS, parseFeeLine, parseAssetLine, parseDiscForm, normDisc, discGaps, feeRateFor,
   discSourceOk, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS, DISC_GAP_LABEL,
+  applyRulesFeed, rulesFeedReg,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -201,8 +202,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v80"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v80"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v81"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v81"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -375,7 +376,7 @@ test("页面接线：规则回填复用净值那条桥，两处挂钩 + 前台�
   assert.ok(!app.includes("回填说明在各产品页"),
     "卡片不复述「手工录入的不覆盖（…）」，措辞不能写得像那里也有整句回填说明")
   const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
-  ["applyAutoDisc", "rulesDue", "RULES_COOLDOWN_DAYS"].forEach(n =>
+  ["applyAutoDisc", "rulesDue", "RULES_COOLDOWN_DAYS", "applyRulesFeed", "rulesFeedReg"].forEach(n =>
     assert.ok(imp[1].includes(n), `app.js 没导入 ${n}：口径第二处实现就会分叉`));
 });
 
@@ -388,13 +389,153 @@ test("注释不许和已经上线的行为相反：T1 那句旧口径必须改�
     "回填 v70 就上线了，注释还写着「要等模型桥（T3）之后」：这是与线上行为相反的说明");
   assert.ok(!app.includes("T1 阶段只接受手工录入"),
     "「只接受手工录入」这句限定已经不成立，不许以任何形式留在 app.js 里");
-  assert.ok(app.includes("这张卡有两条来路：手工录入"),
-    "注释要说清这张卡有两条来路，别只写一条");
-  assert.ok(/回填只经 applyAutoDisc 写这同一份 DATA/.test(app),
-    "注释承诺回填不另开第二条写账通路 —— 这句话是 applyAutoDisc 唯一入口那条门禁的说明书");
+  assert.ok(app.includes("这张卡有三条来路：手工录入"),
+    "注释要说清这张卡有三条来路（手工 / T1b 本机桥 / v81 云端 feed），别只写两条");
+  assert.ok(/两条自动来路都只经 applyAutoDisc\s+写这同一份 DATA/.test(app),
+    "注释承诺两条自动来路都不另开写账通路 —— 这句话是 applyAutoDisc 唯一入口那条门禁的说明书");
+  /* v81：注释里点名的第三条来路，代码里必须真有路径常量与落账调用，不许只写许愿 */
+  assert.ok(app.includes('const RULES_FEED_PATH = "product-rules.json"') &&
+    app.includes("applyRulesFeed(DATA, feed)"),
+    "注释说有云端 feed 这条来路，代码里就得真有路径常量与落账调用");
   /* 注释里的每一句「前台会怎么说」都要真有对应的代码，不然就是许愿 */
   assert.ok(/请求带 mode:"rules"/.test(app) && /mode: "rules"/.test(app),
     "注释说请求带 mode:\"rules\"，代码里就得真带");
   assert.ok(app.includes("手工录入的不覆盖"),
     "注释说手工值优先、挡下来的项当场念，抓取框里就要真有那句");
+});
+
+/* ============================================================
+   第 4 步（v81）：云端规则 feed → 账本
+   ------------------------------------------------------------
+   applyRulesFeed 只做「按登记编码配对 + 把 feed 条目翻成 applyAutoDisc 的 got」，
+   判据一行都不重写。所以这里的测试专盯三件最容易走偏的事：
+     · 出处不齐一条都不写（铁律 3 不能被新路径绕过去）；
+     · 手工值仍然优先、状态仍由 applyAutoDisc 判（不另立第二套语义）；
+     · rawQuote 只随返回值交给展示层，绝不进账本。
+   ============================================================ */
+
+const REG = "Z7008926000006";
+const SRC = { url: "https://xinxipilu.chinawealth.com.cn/a.pdf",
+  publishedAt: "2026-07-02", tier: "official" };
+const RULES = { lockDays: 7, openRule: "每周二开放", feeRedeem: [{ from: 0, to: null, ratePct: 0 }],
+  assets: [{ name: "固收", pct: 80 }], investScope: "固定收益类" };
+const fEntry = (over = {}) => ({ regCode: REG, rules: JSON.parse(JSON.stringify(RULES)),
+  source: Object.assign({}, SRC), rawQuote: { lockDays: "需持有 7 个自然日" }, ...over });
+const fFeed = (products) => ({ version: 1, generatedAt: "2026-11-05T12:07:58Z", products });
+const fData = (...ps) => ({ products: ps, trades: [], settings: {} });
+const fProd = (over = {}) => ({ id: "p1", regCode: REG, ...over });
+
+test("rulesFeedReg：regCode 优先，老数据放 code 里也认，形态不对一律空", () => {
+  assert.equal(rulesFeedReg({ regCode: REG, code: "Z7002426000328" }), REG, "regCode 优先");
+  assert.equal(rulesFeedReg({ code: REG }), REG, "老数据把登记编码放在 code 里也要认");
+  ["z7008926000006", "Z700892600000", "Z70089260000066", "7008926000006", "", "EW4455D"]
+    .forEach(v => assert.equal(rulesFeedReg({ regCode: v, code: v }), "",
+      `不合规形态 ${v || "(空)"} 不能当登记编码`));
+  assert.equal(rulesFeedReg(null), "");
+  assert.equal(rulesFeedReg({}), "");
+  assert.equal(rulesFeedReg({ regCode: 12345 }), "");
+});
+
+test("applyRulesFeed：出处齐的五字段按登记编码落账，状态与出处由 applyAutoDisc 判", () => {
+  const d = fData(fProd());
+  const st = applyRulesFeed(d, fFeed({ [REG]: fEntry() }));
+  assert.equal(st.total, 1);
+  assert.equal(st.matched, 1);
+  assert.equal(st.filled, 5, "五项原本全空，全补上");
+  assert.equal(st.kept, 0);
+  const x = normDisc(d.products[0].disc);
+  assert.equal(x.lockDays, 7);
+  assert.equal(x.openRule, "每周二开放");
+  assert.equal(x.status, "auto");
+  assert.equal(x.source.url, SRC.url);
+  assert.equal(x.source.publishedAt, SRC.publishedAt);
+  assert.deepEqual(discGaps(x), [], "五项齐 + 有出处，一处缺口都不该剩");
+});
+
+test("applyRulesFeed：出处缺 publishedAt / url 不是 http / 整个为 null，一条都不写", () => {
+  for (const bad of [Object.assign({}, SRC, { publishedAt: "" }),
+                     Object.assign({}, SRC, { url: "ftp://x/y.pdf" }), null, {}]) {
+    const d = fData(fProd());
+    const st = applyRulesFeed(d, fFeed({ [REG]: fEntry({ source: bad }) }));
+    assert.equal(st.matched, 1);
+    assert.equal(st.badSource, 1);
+    assert.equal(st.filled, 0);
+    assert.deepEqual(normDisc(d.products[0].disc), normDisc(undefined),
+      "账面保持全空，不许留「有出处没内容」的半截账");
+    assert.deepEqual(st.quotes, {}, "出处不齐连摘录也不给展示层：没出处却摆一段原文更误导");
+  }
+});
+
+test("applyRulesFeed：手工录入的项不覆盖，状态仍是 manual", () => {
+  const manual = { status: "manual", lockDays: 180, openRule: "", feeRedeem: [],
+    assets: [], investScope: "", source: { url: "https://x/y.pdf", publishedAt: "2026-01-01", tier: "official" } };
+  const d = fData(fProd({ disc: manual }));
+  const st = applyRulesFeed(d, fFeed({ [REG]: fEntry() }));
+  assert.equal(st.kept, 1, "lockDays 被手工值挡下来");
+  assert.equal(st.filled, 4, "其余四项补上");
+  const x = normDisc(d.products[0].disc);
+  assert.equal(x.lockDays, 180);
+  assert.equal(x.status, "manual", "状态归 applyAutoDisc 判，页面不许自己改成 auto");
+});
+
+test("applyRulesFeed：跑第二遍不再写账（幂等）", () => {
+  const d = fData(fProd());
+  applyRulesFeed(d, fFeed({ [REG]: fEntry() }));
+  const snap = JSON.stringify(d);
+  const st2 = applyRulesFeed(d, fFeed({ [REG]: fEntry() }));
+  assert.equal(st2.filled, 0);
+  assert.equal(st2.kept, 5);
+  assert.equal(JSON.stringify(d), snap, "第二遍一个字节都不许改");
+});
+
+test("applyRulesFeed：原文摘录只进返回值，绝不写进 DATA", () => {
+  const d = fData(fProd());
+  const st = applyRulesFeed(d, fFeed({ [REG]: fEntry() }));
+  assert.equal(st.quotes[REG].lockDays, "需持有 7 个自然日");
+  assert.ok(!JSON.stringify(d).includes("需持有 7 个自然日"), "账本里不许出现摘录原文");
+  assert.ok(!JSON.stringify(d).includes("rawQuote"), "账本里不许出现 feed 的摘录字段");
+});
+
+test("applyRulesFeed：null 是未披露，不许被写成「0 天持有期」", () => {
+  const d = fData(fProd());
+  const e = fEntry(); e.rules.lockDays = null;
+  const st = applyRulesFeed(d, fFeed({ [REG]: e }));
+  assert.equal(st.filled, 4);
+  assert.equal(normDisc(d.products[0].disc).lockDays, null);
+});
+
+test("applyRulesFeed：无编码 / feed 无条目 / 坏形状都不炸且统计准确", () => {
+  const d = fData(
+    { id: "a", code: "EW4455D" },                          // 无标准登记编码
+    fProd({ id: "b", regCode: "Z7002426000328" }),         // 合规但 feed 里没这只
+    fProd({ id: "c" }),                                    // 匹配且有合格出处
+    null,                                                  // 坏产品
+  );
+  const st = applyRulesFeed(d, fFeed({ [REG]: fEntry() }));
+  assert.equal(st.total, 4);
+  assert.equal(st.skippedNoCode, 2, "一只没编码、一只 null");
+  assert.equal(st.skippedNoEntry, 1);
+  assert.equal(st.matched, 1);
+  assert.equal(st.filled, 5);
+  const empty = applyRulesFeed(fData(fProd()), null);
+  assert.equal(empty.matched, 0);
+  const arr = applyRulesFeed(fData(fProd()), { products: [] });
+  assert.equal(arr.matched, 0, "products 写成数组也不能当字典用");
+});
+
+test("v81 接线：feed 落账排在唯一一次 saveLocal 之前、摘录不写 DATA、卡片有折叠入口", () => {
+  const app = read("app.js");
+  const iFeed = app.indexOf("const feed = await fetchRulesFeed()");
+  const iApply = app.indexOf("applyRulesFeed(DATA, feed)");
+  const iSave = app.indexOf("saveLocal();", iApply);
+  assert.ok(iFeed > 0 && iApply > iFeed && iSave > iApply,
+    "feed 落账必须在 saveLocal() 之前，否则 DIRTY 复位会漏掉这批就地修改");
+  assert.ok(app.includes("RULES_QUOTES = rulesStat.quotes"), "摘录只进内存态");
+  assert.ok(!/RULES_QUOTES\s*=\s*DATA/.test(app), "摘录不许挂到账本上");
+  assert.ok(app.includes("<details") && app.includes("披露原文摘录"),
+    "卡片要有折叠的原文摘录入口，且不许新增内联 handler");
+  assert.ok(!/on\w+\s*=\s*"[^"]*quoteHtml|on\w+\s*=\s*"[^"]*RULES_QUOTES/.test(app),
+    "原文摘录不该挂内联事件，handlers.test.mjs 的桥接扫描会多出无人认领的入口名");
+  const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
+  assert.ok(imp && imp[1].includes("applyRulesFeed") && imp[1].includes("rulesFeedReg"));
 });
