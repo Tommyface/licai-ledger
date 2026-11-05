@@ -59,7 +59,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v79";
+const APP_VER = "v80";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -119,7 +119,19 @@ let DATA = { products: [], trades: [], settings: { hideAmount: false } };
 /* owner / repo 预填本台账的默认仓库（v46）：这是个人台账，不是给别人装的产品，
    首次配置真正缺的只有 Token 一格。换仓库 / 换文件路径的口子留在同步面板的
    「高级」里，没有删。 */
-let SYNC = { owner: "glorywork", repo: "licai-data", path: "licai-data.json", token: "", sha: "", auto: true };
+/* v80 · 队列 1 / 分叉 A1：GitHub Token 的两个住处，页面一个都不碰。
+   文档 §4.5 钉的洞：v79 把 PAT 明文放在 licai_ledger_sync_v1 的 JSON 值里，设置页还
+   回显进 input 的 value —— 磁盘可读、DevTools 一展开就是它，T3 / AixhubGuard /
+   LedgermeGuard 三条正则都抓不到（它们查的是键名，这个洞在 JSON 值里）。
+     · App 内 —— 值只在本机加密区第四槽（SecretStore.Slot.SYNC），由 NavBridge 独占读写；
+       页面只问得到「有没有」(ghHas)，每一发 GitHub 请求交给 gh() 代理，header 由 Java 拼。
+     · 网页版 —— 没有原生侧，只能每次打开重填；值只在 SYNC_MEM_TOKEN 这一份内存态，
+       刷新即失，不进 localStorage、不回显 DOM、不进任何日志。
+   老用户磁盘上那份明文键由 syncPurgeLegacy() 装载即删（只删不读、不拿去试请求）。
+   B1 窗口期：v80 页面先上线、新 APK 还没出时，v79 壳有 NativeNav 但不认识第四槽 ——
+   syncShellOld() 认出来给一句实话，绝不静默发一发空 token 请求。 */
+let SYNC = { owner: "glorywork", repo: "licai-data", path: "licai-data.json", sha: "", auto: true };
+let SYNC_MEM_TOKEN = "";   /* 网页版专用：只在内存里，绝不进 localStorage / DOM */
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳 */
 let NOTIFY = { on: false, lastCheck: 0 };
 /* 用户已忽略的抓取告警签名（按「失败集合」生成，集合一变就重新提示） */
@@ -197,6 +209,9 @@ function loadLocal() {
          （早期只要点过一次「保存配置」而仓库留空，localStorage 里就是三个空串） */
       for (const k of Object.keys(o)) {
         if (!o[k] && (k === "owner" || k === "repo" || k === "path")) continue;
+        /* v80：老键里那个明文 token 只删不读 —— 不许把它并回内存对象（铁律 #6）。
+           磁盘上那份由 syncPurgeLegacy() 在装载时抹掉，见 ghReq 前面那一节。 */
+        if (k === "token") continue;
         SYNC[k] = o[k];
       }
     }
@@ -211,7 +226,14 @@ function loadLocal() {
   } catch (e) { console.warn(e); }
 }
 function saveSync() {
-  try { localStorage.setItem(LS_SYNC, JSON.stringify(SYNC)); }
+  /* v80 · 队列 1：只挑非敏感字段落盘。v79 曾把整份 SYNC 序列化成 JSON 写进
+     licai_ledger_sync_v1，PAT 明文就夹在那一份里；现在值在加密区 / 内存态，这里一个都不写。 */
+  try {
+    localStorage.setItem(LS_SYNC, JSON.stringify({
+      owner: SYNC.owner, repo: SYNC.repo, path: SYNC.path,
+      sha: SYNC.sha, auto: SYNC.auto, branch: SYNC.branch
+    }));
+  }
   catch (e) { console.warn(e); /* 同步配置存不进去只影响下次免输入，不弹窗打扰 */ }
 }
 
@@ -1101,13 +1123,13 @@ function clearBdSearch() {
    每次推送成功 / 失败 / 重试排期变化都要调一次，别再学 v45 那样在成功那一刻
    硬写「已同步」三个字 —— 那句话曾经既不反映 DIRTY 也不反映时间。 */
 function syncStateView() {
-  const b = syncBadge(Object.assign({ cfgOk: !!(SYNC.owner && SYNC.repo && SYNC.token) }, SYNC_ST));
+  const b = syncBadge(Object.assign({ cfgOk: syncCfgOk() }, SYNC_ST));
   const e = $("syncState");
   if (e) { e.textContent = b.text; e.className = "sync-state" + (b.cls ? " " + b.cls : ""); }
   return b;
 }
 function renderSet() {
-  const ok = !!(SYNC.owner && SYNC.repo && SYNC.token);
+  const ok = syncCfgOk();
   const st = Object.assign({ cfgOk: ok }, SYNC_ST);
   const b = syncBadge(st);
   const cls = b.cls === "ok" ? "note g" : b.cls === "bad" ? "note r" : b.cls === "warn" ? "note" : "note b";
@@ -1117,7 +1139,7 @@ function renderSet() {
          <button class="btn gh" style="flex:1" onclick="syncPull(true)">↓ 从云端拉取</button>
          <button class="btn pri" style="flex:1" onclick="syncPush(true)">↑ 推送到云端</button>
        </div>`
-    : `<div class="note b">尚未连接云端：填好 Token 就能多设备共享同一份台账。仓库与数据文件已预填，改它们请在弹层「高级」里。</div>`;
+    : `<div class="note b">${esc(syncCardText())}${syncShellOld() ? "<br><b>这台机器的 App 还是旧壳（不认识本机加密区第四槽）：先更新 App，再用数据同步。</b>" : ""}<br>仓库与数据文件已预填，改它们请在弹层「高级」里。</div>`;
   syncStateView();
   syncAppOnly();
   renderAixhub();
@@ -3464,13 +3486,14 @@ function openSync() {
       数据存到你<b>自己的 GitHub 私有仓库</b>的一个 JSON 文件里，多设备打开即共享。
       请用<b>细粒度 Token</b>（Fine-grained PAT），<b>只授权那一个仓库</b>，权限：${scope}
     </div>
-    <div class="field"><label>细粒度 Token</label><input id="sToken" type="password" value="${esc(SYNC.token)}" placeholder="github_pat_..."></div>
+    <div class="field"><label>细粒度 Token${ghAvailable() ? "（本机加密区）" : ""}</label><input id="sToken" type="password" value="" placeholder="${ghAvailable() ? "已存过就留空；要换一个再粘" : "github_pat_..."}"></div>
+    <div class="note">${esc(syncCardText())}${syncShellOld() ? "<br><b>这台机器的 App 还是旧壳：先更新 App 再用同步。</b>" : ""}</div>
     <details class="adv"${advOpen ? " open" : ""}><summary>高级：仓库 / 数据文件路径</summary>
       <div class="field"><label>GitHub 用户名</label><input id="sOwner" value="${esc(SYNC.owner)}" placeholder="如 zhangsan"></div>
       <div class="field"><label>仓库名</label><input id="sRepo" value="${esc(SYNC.repo)}" placeholder="如 licai-data"></div>
       <div class="field"><label>数据文件路径</label><input id="sPath" value="${esc(SYNC.path)}" placeholder="licai-data.json"></div>
     </details>
-    <div class="note">Token 只保存在本机，不会上传到任何第三方；若泄露可随时在 GitHub 上吊销。<br>
+    <div class="note">Token 不落本页面：App 内进本机加密区，网页版只在内存里；若泄露可随时在 GitHub 上吊销。<br>
       改动会在一笔编辑后 1.5 秒自动推上去，顶栏那个胶囊说的就是「推上去没有」。</div>
     <div class="row-btn" style="margin-top:14px">
       <button class="btn gh" style="flex:1" onclick="saveSyncCfg()">保存配置</button>
@@ -3496,7 +3519,17 @@ function saveSyncCfg(test) {
   SYNC.owner = ($("sOwner").value || "").trim();
   SYNC.repo = ($("sRepo").value || "").trim();
   SYNC.path = ($("sPath").value || "licai-data.json").trim();
-  SYNC.token = ($("sToken").value || "").trim();
+  const el = $("sToken");
+  const v = el ? (el.value || "").trim() : "";
+  if (ghAvailable()) {
+    /* App 内：粘进来的这一回由页面直接交给原生侧先验后存（落第四槽），随后立刻清空输入框，
+       页面手里一份都不留。留空 = 沿用加密区里已存的那份，不覆盖、不清除。 */
+    if (v) ghSet(v);
+    if (el) el.value = "";
+  } else {
+    /* 网页版没有原生侧：只进内存态，刷新即失 —— 下一次打开还得重填（卡片上写清楚了）。 */
+    SYNC_MEM_TOKEN = v;
+  }
   saveSync(); renderSet(); renderHome();
   if (test) testConn();
 }
@@ -3511,11 +3544,109 @@ function utf8ToB64(s) {
   for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
   return btoa(bin);
 }
+/* ---------- v80 · 队列 1：GitHub 请求的双通道与布尔探针 ----------
+   ghReq 是 13 个调用点共用的唯一异步出口，所以只改这一处并按环境分叉，
+   13 个 await 调用点一行都不用动。错误文案 `HTTP ${status} ${body前120字}` 必须保留：
+   下游 409/422 冲突重试、404/401/403 判定全靠这段字符串。 */
+const _ghDone = {};
+window.__ghDone = function (id, res) {
+  const f = _ghDone[id]; if (!f) return;
+  delete _ghDone[id]; f(res);
+};
+function ghAvailable() {
+  /* 代理桥挂在 NativeNav 上：判「方法在不在」，不判「有没有值」—— 值和桥是两件事 */
+  try { return !!(window.NativeNav && typeof window.NativeNav.gh === "function"); }
+  catch (e) { return false; }
+}
+function syncCfgHas() {
+  /* 布尔探针：加密区第四槽里有没有值。页面永远拿不到值本身。 */
+  try {
+    const n = window.NativeNav;
+    if (!n || typeof n.ghHas !== "function") return false;
+    return !!n.ghHas();
+  } catch (e) { return false; }
+}
+function syncCfgOk() {
+  /* 判「这一刻能不能发 GitHub 请求」：仓库两项是公共前提，值按环境分开问。
+     网页版没有原生侧，就看内存态这一份；App 内只问布尔探针。 */
+  if (!SYNC.owner || !SYNC.repo) return false;
+  return ghAvailable() ? syncCfgHas() : !!SYNC_MEM_TOKEN;
+}
+function syncShellOld() {
+  /* 桥在、但不认识第四槽 = v79 及以前的壳（B1 窗口期）。照实说，别画成「再填一遍就好」 */
+  try { return nativeFetchAvailable() && !ghAvailable(); }
+  catch (e) { return false; }
+}
+function syncPurgeLegacy() {
+  /* 老键 licai_ledger_sync_v1 的 JSON 值里夹着明文 token：见到就删，不读不传不试请求。
+     只摘那一个键、其余配置照留；解析不了就整键删掉 —— 那份值反正不能留。 */
+  try {
+    const s = localStorage.getItem(LS_SYNC);
+    if (!s) return;
+    const o = JSON.parse(s);
+    if (o && typeof o === "object" && "token" in o) {
+      delete o.token;
+      localStorage.setItem(LS_SYNC, JSON.stringify(o));
+    }
+  } catch (e) {
+    try { localStorage.removeItem(LS_SYNC); } catch (_) { }
+  }
+}
+syncPurgeLegacy();
+function syncCardText() {
+  /* 卡片正面把 A1 的取舍一次说清：App 内免输入，网页版每次填，两边都不落盘、不回显。 */
+  return "App 内免输入：Token 存在本机加密区，重开也不用再填，页面一次都不碰值。"
+    + "网页版没有本机加密区，只能每次打开重填（只在内存里，刷新即失）；两边都不落盘、不回显。";
+}
+function ghSet(token) {
+  /* 粘贴那一回的唯一出口：交给原生侧先验后存。回话里只有 ok / message，绝不带 token；
+     存好就重画卡片，值在不在由 ghHas() 说实话。 */
+  if (!ghAvailable()) return;
+  const id = "gs" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const timer = setTimeout(() => { delete _ghDone[id]; }, 30000);
+  _ghDone[id] = r => {
+    clearTimeout(timer);
+    if (r && r.ok) { renderSet(); toast("Token 已存进本机加密区，以后不用再填", 3600); }
+    else toast("Token 没存上：" + String((r && r.message) || "本机校验没过"), 5200);
+  };
+  try { window.NativeNav.ghSet(id, token); }
+  catch (e) { clearTimeout(timer); delete _ghDone[id]; toast("存 Token 失败：" + String(e), 4200); }
+}
+function ghBridge(method, url, body) {
+  /* 仿 aixhubBridge / updBridge：异步回话走 window.__ghDone。
+     Java 那一侧返回归一形状 { ok, status, json, body }，Authorization 由 Java 拼。 */
+  return new Promise(resolve => {
+    if (!ghAvailable()) return resolve({ ok: false, status: 0, body: "本机 GitHub 代理桥不在" });
+    const id = "g" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _ghDone[id]; resolve(r || { ok: false, status: 0 }); };
+    const timer = setTimeout(() => finish({ ok: false, status: 0, body: "超时，请重试" }), 30000);
+    _ghDone[id] = r => { clearTimeout(timer); finish(r); };
+    try { window.NativeNav.gh(id, method, url, body ? JSON.stringify(body) : ""); }
+    catch (e) { clearTimeout(timer); finish({ ok: false, status: 0, body: String(e) }); }
+  });
+}
 async function ghReq(method, url, body) {
+  /* v80 · A1：App 内这一发走本机桥代理（Java 从第四槽取值、拼 Authorization），
+     页面手里没有值；网页版没有原生侧，只能用内存态那份（每次填、刷新即失）。 */
+  if (ghAvailable()) {
+    const r = await ghBridge(method, url, body);
+    /* 桥回话归一成和 fetch 一样的口径：非 2xx 抛同一句 HTTP 文案 ——
+       下游 409/422 冲突重试、404/401/403 判定全靠这段字符串，不许改口。 */
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${String(r.body || "").slice(0, 120)}`);
+    if (r.status === 204 || !r.body) return null;
+    /* 桥带回的是 GitHub 响应原文（字符串），在页面这一侧再解析成对象 ——
+       不把远端 JSON 当 JS 字面量拼进 evaluateJavascript 执行。 */
+    return JSON.parse(r.body);
+  }
+  if (syncShellOld()) {
+    /* B1 窗口期：v80 页面跑在 v79 壳上。不发空 token 请求，给一句实话。 */
+    throw new Error("HTTP 0 本机 App 还是旧壳（不认识加密区第四槽）：先更新 App 再用数据同步");
+  }
   const r = await fetch(url, {
     method,
     headers: {
-      "Authorization": "Bearer " + SYNC.token,
+      "Authorization": "Bearer " + SYNC_MEM_TOKEN,
       "Accept": "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28"
     },
@@ -3685,7 +3816,7 @@ async function collectManualResult() {
 async function triggerFetch() {
   /* App 内（WebView + 内置 CPython）走本机抓取；网页端仍然派发云端 Actions */
   if (nativeFetchAvailable()) return nativeFetchAll(true);
-  if (!SYNC.owner || !SYNC.repo || !SYNC.token) { toast("请先在「数据同步设置」里配置仓库与 Token"); return; }
+  if (!syncCfgOk()) { toast("请先在「数据同步设置」里配置仓库与 Token"); return; }
   const btn = $("btnFetchNow");
   if (btn) { if (btn.disabled) return; btn.disabled = true; btn.textContent = "触发中…"; }
   MANUAL = { state: "running", t0: Date.now(), runNo: "", runApiId: 0, dur: 0 };
@@ -4433,7 +4564,7 @@ window.__nativeAutoFetch = function (force) {
 };
 function syncMsg(html) { const e = $("syncMsg"); if (e) e.innerHTML = html; else toast(html.replace(/<[^>]+>/g, "")); }
 async function testConn() {
-  if (!SYNC.owner || !SYNC.repo || !SYNC.token) return toast("请先填完整配置");
+  if (!syncCfgOk()) return toast("请先填完整配置");
   syncMsg("测试连接中…");
   try {
     const repo = await ghReq("GET", `${GH}/repos/${SYNC.owner}/${SYNC.repo}`);
@@ -4444,7 +4575,7 @@ async function testConn() {
   } catch (e) { syncMsg(`<div class="note">连接失败：${esc(String(e).slice(0, 140))}</div>`); }
 }
 async function syncPull(manual) {
-  if (!SYNC.owner || !SYNC.repo || !SYNC.token) { if (manual) toast("请先配置同步"); return; }
+  if (!syncCfgOk()) { if (manual) toast("请先配置同步"); return; }
   /* v32 P0-2：本地还有没推上去的改动时，静默拉取一律先推后拉（拉回自己的改动+云端独有净值）；
      推送失败就放弃本次拉取 —— 绝不能用云端旧数据覆盖本地新编辑。
      手动拉取本身有「本地未同步的改动将丢失」确认弹窗，直接放行。 */
@@ -4483,7 +4614,7 @@ async function syncPull(manual) {
   }
 }
 async function syncPush(manual) {
-  if (!SYNC.owner || !SYNC.repo || !SYNC.token) { if (manual) toast("请先配置同步"); return; }
+  if (!syncCfgOk()) { if (manual) toast("请先配置同步"); return; }
   /* v46：一次只允许一发 PUT 在飞。autoPush 的 debounce、退避重试、拉取前的补推、
      手动按钮四条路径都会调到这里；两发用同一个 sha 先后发出去，第二发必然 409 ——
      与其把它当并发冲突重合并一遍，不如压根不让它们重叠。
@@ -4575,7 +4706,7 @@ async function syncPush(manual) {
 /* 自动推送（静默，失败不打扰） */
 let _pushTimer;
 function autoPush() {
-  if (!(SYNC.owner && SYNC.repo && SYNC.token)) return;
+  if (!syncCfgOk()) return;
   clearTimeout(_pushTimer);
   _pushTimer = setTimeout(() => syncPush(false), 1500);
 }
@@ -4601,7 +4732,7 @@ function scheduleRetry() {
 }
 function flushDirty() {
   if (!DIRTY) return Promise.resolve();
-  if (!(SYNC.owner && SYNC.repo && SYNC.token)) return Promise.resolve();
+  if (!syncCfgOk()) return Promise.resolve();
   return syncPush(false);
 }
 
@@ -4686,7 +4817,7 @@ async function latestRelease(owner, repo) {
 }
 async function checkApkUpdate(manual) {
   if (!nativeUpdateAvailable()) { if (manual) toast("更新检查只在 Android App 内提供"); return; }
-  if (!(SYNC.owner && SYNC.repo && SYNC.token)) { if (manual) toast("先在上面填好 GitHub Token 才能检查更新", 4600); return; }
+  if (!syncCfgOk()) { if (manual) toast("先在上面配好 Token 才能检查更新", 4600); return; }
   if (_updChecking) return;
   _updChecking = true;
   if (manual) renderUpdBox("正在检查…");
@@ -4719,8 +4850,8 @@ function applyApkUpdate() {
   const write = html => { const b = $("updBox"); if (b) b.innerHTML = html; };
   /* 40MB 在移动网络下要走几分钟，弹层可能被用户关掉、甚至被 WebView 回收：
      进度与结果都写向 updBox，但那个节点可能已经不在 —— write() 统一做判空。 */
-  write(`<div class="note b">正在下载 licai-ledger.apk…<br><span class="muted">约 ${(Math.round(total / 1048576 * 10) / 10) || "?"} MB，走的是带 Token 的 API 直链。</span></div>`);
-  updBridge("install", [download, SYNC.token], "下载", 600000).then(r => {
+  write(`<div class="note b">正在下载 licai-ledger.apk…<br><span class="muted">约 ${(Math.round(total / 1048576 * 10) / 10) || "?"} MB，Token 由安装桥从本机加密区取，页面不传值。</span></div>`);
+  updBridge("install", [download], "下载", 600000).then(r => {
     _updBusy = false;
     if (r && r.ok) {
       UPD = { at: Date.now(), state: "sent", version: version, size: total, text: "" };
@@ -4763,7 +4894,7 @@ function renderUpdBox(msg) {
    而新版本一周也未必有一次；用户真要点的是「有新包」那个按钮，不是每次都问网络。 */
 function maybeAutoUpdCheck() {
   if (!nativeUpdateAvailable()) return;
-  if (!(SYNC.owner && SYNC.repo && SYNC.token)) return;
+  if (!syncCfgOk()) return;
   if (UPD.state === "sent") return;   /* 装着新包的路上，别再提示 */
   if (Date.now() - (Number(UPD.at) || 0) < 12 * 3600 * 1000) return;
   setTimeout(() => { checkApkUpdate(false); }, 3000);
@@ -4931,7 +5062,7 @@ function notifyNewNav(delta, latest) {
 /* 后台轮询：只比对远端 sha，变了才真拉全量。
    15 分钟内不重复请求（GitHub API 有速率限制，而云端抓取本身一天只有两次）。 */
 async function checkCloudUpdate() {
-  if (!(SYNC.owner && SYNC.repo && SYNC.token)) return;
+  if (!syncCfgOk()) return;
   if (!NOTIFY.on) return;
   if (Date.now() - (NOTIFY.lastCheck || 0) < 15 * 60000) return;
   NOTIFY.lastCheck = Date.now(); saveNotify();
@@ -5011,7 +5142,7 @@ Object.assign(window, {
   if (migrated) notifyMigrate();
   /* 上次手动抓取若在系统回收时还没跑完，启动后接着追踪（12 分钟上限自动兜底） */
   ensureManualPolling();
-  const pullP = (SYNC.owner && SYNC.repo && SYNC.token) ? syncPull(false) : Promise.resolve();
+  const pullP = syncCfgOk() ? syncPull(false) : Promise.resolve();
   /* App 内每天几次地看一眼私有仓有没有新包（12 小时节流，见 maybeAutoUpdCheck） */
   maybeAutoUpdCheck();
   window.addEventListener("online", () => {

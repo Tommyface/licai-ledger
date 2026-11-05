@@ -1612,3 +1612,62 @@ test("v69 __llmDone 只经由 llmMetaOf 读元信息，那句兜底话不许当�
     "「原生侧没回元信息」又被当成文案：真没回是 120 秒超时那条路径说的，"
     + "这句盖住了「壳回的是对象」那一档（v69 拆开的正是它）");
 });
+
+
+/* ---------- 队列 1（v80 预备）：GitHub 同步 token 不许留在 localStorage（铁律 #6） ----------
+   交接文档 §4.5 末尾的已知漏洞：SYNC = { owner, repo, path, token, sha, auto }，
+   saveSync() 把整份 JSON 写进 LS_SYNC = "licai_ledger_sync_v1"，设置页还把
+   SYNC.token 回显进 <input id="sToken" value="...">。
+   现有两条门禁都抓不到：T3 只禁「键名里带 llm / apiKey 的 localStorage 键」，
+   AixhubGuard / LedgermeGuard 只禁「键名匹配 licai.*Token / licai.*Cookie」——
+   这个 token 是 JSON 值里的字段，键名不带 licai. 前缀，两条正则都漏。
+   按队列第一步「先补一条会红的」：现在源码就是坏的，这条必须红；等第四槽落地、
+   SYNC 去掉 token、DOM 不回显之后它才转绿。不许为了让门禁变绿删掉它。 */
+
+test("队列1（v80 预备）：同步配置里不许有 token 字段，GitHub 细粒度 token 只能待在本机加密区", () => {
+  /* 1) SYNC 的形状：非敏感字段随便留，token 这一格不许再有 */
+  const m = APP_SRC.match(/let SYNC = \{[^}]*\};/);
+  assert.ok(m, "SYNC 的初始化字面量找不到了：切片失败必须显式报错，不许静默放行");
+  assert.ok(!/\btoken\s*:/.test(m[0]),
+    "SYNC 里还有 token 字段：saveSync() 会把整份 JSON 写进 localStorage 的 licai_ledger_sync_v1");
+  /* 2) 落盘那一句不许再整份序列化（一份 JSON 里夹带 token 就是泄漏） */
+  const save = fnBody("saveSync");
+  assert.ok(!/JSON\.stringify\(\s*SYNC\s*\)/.test(save),
+    "saveSync() 还在把整份 SYNC 写进 localStorage：非敏感字段要挑着写");
+  /* 3) 设置页不许把值回显进 DOM */
+  assert.ok(!/value="\$\{esc\(SYNC\.token\)\}"/.test(APP_SRC),
+    "设置页仍把 SYNC.token 回显进 input 的 value");
+  /* 4) 键名不许改：迁移要靠原名把老键里那份明文 token 清掉（只删不读） */
+  assert.ok(/const LS_SYNC = "licai_ledger_sync_v1"/.test(APP_SRC),
+    "LS_SYNC 改名了：老用户磁盘上那份明文 token 就再也删不掉了");
+});
+
+/* ---------- 队列 1（v80 · A1）：GitHub 请求的双通道 ----------
+   文档 §4.5 + 分叉 A1：token 只待在本机加密区第四槽。App 内的 GitHub 请求
+   全部走原生桥代理（Java 拼 header，页面一次都不碰值）；网页版没有原生侧，
+   只能「每次填」——那份值只在内存态，绝不落 localStorage、绝不回显 DOM。
+   这条先于 v80 代码补下时是红的；代码落地后转绿，不许为了让门禁变绿删掉它。 */
+test("队列1（v80 · A1）：GitHub 请求 App 内走原生桥、网页版走内存态，token 不经页面拼 header", () => {
+  const gh = fnBody("ghReq");
+  /* 1) App 内分叉：有桥就走 ghBridge，页面不再拼 Authorization: SYNC.token */
+  assert.ok(/ghAvailable\(\)/.test(gh), "ghReq 没有「本机桥在不在」这个分叉");
+  assert.ok(/ghBridge\(/.test(gh), "App 内那一路没走原生代理 gh()");
+  /* 2) 网页版：header 用内存态，绝不从 localStorage 读回来 */
+  assert.ok(/"Authorization":\s*"Bearer "\s*\+\s*SYNC_MEM_TOKEN/.test(gh),
+    "网页版没用内存态 token 拼 header（或又写成从存储里读）");
+  /* 3) 旧壳（B1 窗口期）要有独立的一句实话，不许静默发空 token 请求 */
+  assert.ok(/syncShellOld\(\)/.test(gh), "ghReq 没处理「桥在但不认识第四槽」的旧壳");
+  /* 4) 整份 app.js 里 SYNC.token 一个都不许剩：值一次都不经过页面 */
+  assert.ok(!/SYNC\.token/.test(APP_SRC), "app.js 里还残留 SYNC.token 引用");
+  /* 5) 内存态变量在、但 saveSync 绝不写它（刷新即失 = 网页版每次填） */
+  assert.ok(/let SYNC_MEM_TOKEN = ""/.test(APP_SRC), "网页版内存态变量没了");
+  const sv = fnBody("saveSync");
+  assert.ok(!/SYNC_MEM_TOKEN/.test(sv), "saveSync 把内存态 token 写进 localStorage 了");
+  assert.ok(!/JSON\.stringify\(\s*SYNC\s*\)/.test(sv), "saveSync 又整份序列化 SYNC 了");
+  /* 6) 布尔探针 / 降级件套齐 */
+  for (const fn of ["syncCfgOk", "syncCfgHas", "syncShellOld", "syncPurgeLegacy", "syncCardText", "ghBridge", "ghAvailable"])
+    assert.ok(new RegExp("(?:async )?function " + fn + "\\(").test(APP_SRC), `缺 ${fn}()：v80 件套没落地`);
+  /* 7) 卡片正面写清「App 内免输入 / 网页版每次填」这个取舍（文档 §4.5 要求） */
+  const card = fnBody("syncCardText");
+  assert.ok(/免输入/.test(card) && /每次/.test(card), "卡片没把 A1 的取舍写清楚");
+});
