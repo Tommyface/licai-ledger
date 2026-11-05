@@ -86,3 +86,71 @@ export function syncLine(st) {
   }
   return s;
 }
+
+/* ============================================================
+   抓取失败的原因分类与告警标题（v84）
+
+   为什么要有这一档：`settings.lastFetch.items` 里每一行是抓取器写的
+   「产品名 — 数据源：原因」，而「原因」其实有三类完全不同的事：
+     · blocked —— 披露源把请求拦下了（风控 / 验证失败 / 频繁 / 受限 / 安全校验）；
+                  数据很可能存在，是我们这一轮取不到，等冷却即可，不该反复手动抓。
+     · refused —— 自家闸门拒取（份额类别对不上，宁可不填）；净值不缺，缺的是账本
+                  里那个代码字段，动作是去核对，不是去等披露。
+     · missing —— 其余（未披露、未取到、原因没写）。
+   告警条从前只有一句「有 N 只产品没拿到净值」，把前两类也说成「没拿到」——同一个
+   句子盖住三种病因，用户就会去做错的那一种：对着被拦的源反复点「立即抓取」，或者
+   去改本来填对了的代码。铁律 #10：降级要降得诚实，说不清就说不清，不许替源猜。
+   ============================================================ */
+
+/** 披露源侧的拦截特征。认「被限制」这件事本身，不认具体哪家风控的措辞。 */
+const FETCH_BLOCK_MARKS = /风控|验证失败|频繁|受限|拦截|安全校验/;
+/** 自家闸门拒取的特征（判据在 navsources/banks/chinawealth.py:_cw_pick_row）。 */
+const FETCH_REFUSE_MARKS = /份额类别对不上|宁可不填/;
+
+/**
+ * 一行失败原因 → "blocked" | "refused" | "missing"。
+ *
+ * 认不出来的一律退回 "missing"：把它升级成「被拦下」会骗人说源坏了，
+ * 降级成「没有数据」会骗人说产品没披露 —— 两边都是假话，宁可按原样。
+ * 一行里同时出现两类关键词时（多源原因用「；」并到一行）先判闸门拒取：
+ * 那是我们自己拦的，跟源的状态无关，说出来才是可行动的。
+ *
+ * @param {unknown} line lastFetch.items 里的一条
+ * @returns {"blocked"|"refused"|"missing"}
+ */
+export function fetchFailKind(line) {
+  const s = String(line || "");
+  if (FETCH_REFUSE_MARKS.test(s)) return "refused";
+  if (FETCH_BLOCK_MARKS.test(s)) return "blocked";
+  return "missing";
+}
+
+/**
+ * 首页告警条的标题（含「本机抓取 / 云端抓取」前缀）。
+ *
+ * 计数口径：`fail` 是失败产品数，`items` 只留前 20 条。分不出原因的那部分
+ * （fail 减掉已分类的条数）照实算进「这轮没拿到」，绝不因为前面有一条是
+ * 被拦下，就把整批说成被拦下。
+ *
+ * @param {{fail?:number, items?:unknown, source?:string}|null} lf settings.lastFetch
+ * @returns {string} 零失败时返回空串，由调用方决定不显示
+ */
+export function fetchAlertHeading(lf) {
+  const n = lf ? (Number(lf.fail) || 0) : 0;
+  const who = (lf && lf.source === "app") ? "本机抓取" : "云端抓取";
+  if (!n) return "";
+  const items = (lf && Array.isArray(lf.items)) ? lf.items : [];
+  let blocked = 0, refused = 0;
+  for (const it of items) {
+    const k = fetchFailKind(it);
+    if (k === "blocked") blocked++;
+    else if (k === "refused") refused++;
+  }
+  if (!blocked && !refused) return `${who}有 ${n} 只产品没拿到净值`;
+  const parts = [];
+  if (blocked) parts.push(`${blocked} 只是请求被披露源拦下、不是这些产品没有净值`);
+  if (refused) parts.push(`${refused} 只是份额类别对不上、宁可不填，核对后自动补上`);
+  const rest = Math.max(0, n - blocked - refused);
+  if (rest) parts.push(`${rest} 只这轮没拿到`);
+  return `${who}有 ${n} 只产品这轮没入账（${parts.join("；")}）`;
+}

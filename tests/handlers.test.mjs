@@ -49,3 +49,18 @@ test("桥接清单里没有多余/拼错的名字", () => {
   const extra = [...have].filter(n => !need.has(n));
   assert.deepEqual(extra, [], `桥接清单里有多余项（内联已不再引用，注意别是拼错了名字）:\n  ${extra.join("\n  ")}`);
 });
+/* ---- v84：告警标题的口径必须真的接上（写在模块里没人调用 = 没修） ---- */
+function body(src, name) {
+  const i = src.indexOf(`function ${name}(`);
+  assert.ok(i >= 0, `app.js 里找不到 ${name}`);
+  const j = src.indexOf("\nfunction ", i + 1);
+  return src.slice(i, j < 0 ? undefined : j);
+}
+
+test("renderAlert 的标题走 fetchAlertHeading，不许把三种病因写成一句「没拿到净值」", () => {
+  const b = body(app, "renderAlert");
+  assert.match(b, /fetchAlertHeading\(/, "标题又硬编回去了");
+  assert.doesNotMatch(b, /只产品没拿到净值/, "这句话盖住了「被拦下」和「闸门拒取」两种原因");
+  assert.match(app, /import \{[^}]*fetchAlertHeading[^}]*\} from "\.\/js\/domain\/syncstatus\.js"/,
+    "app.js 没 import 这个函数，浏览器里会静默 ReferenceError");
+});

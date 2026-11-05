@@ -23,7 +23,7 @@ import { ocrNavLines } from "./js/domain/ocr.js";
 import { configureCalendar, suggestTradeDates, tradeDaysBetween } from "./js/domain/calendar.js";
 import { normTomb, mergeTombs, purgeTombs, applyTombs as applyTombsIn } from "./js/domain/tomb.js";
 import { mergeForPush, stampMs } from "./js/domain/sync.js";
-import { syncBadge, syncLine } from "./js/domain/syncstatus.js";
+import { syncBadge, syncLine, fetchAlertHeading } from "./js/domain/syncstatus.js";
 import { readRelease, updateVerdict } from "./js/domain/update.js";
 import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
   boardCols, monthZeroDays, boardSort } from "./js/domain/board.js";
@@ -60,7 +60,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v83";
+const APP_VER = "v84";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -5098,7 +5098,7 @@ function renderAlert() {
   const more = n > 3 ? `<div class="sm">…另有 ${n - 3} 只，点「详情」看全部</div>` : "";
   bar.className = "alert warn show";
   bar.innerHTML = `<div class="tx">
-      <b>${lf.source === "app" ? "本机抓取" : "云端抓取"}有 ${n} 只产品没拿到净值</b>${lf.time ? `<span class="sm"> · ${esc(stampText(lf))}</span>` : ""}
+      <b>${esc(fetchAlertHeading(lf))}</b>${lf.time ? `<span class="sm"> · ${esc(stampText(lf))}</span>` : ""}
       ${items}${more}
       <div style="margin-top:4px"><span class="more" onclick="refreshNav()">详情与处理办法 ›</span></div>
     </div>
