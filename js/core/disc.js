@@ -402,3 +402,42 @@ export function applyRulesFeed(data, feed) {
   }
   return stat;
 }
+
+/* ---------- 队列 Q5（v83）：多份 feed 按优先级落账 ----------
+   云端现在写两份同形状的 feed：主源（中国理财网信披平台）产
+   product-rules.json，第二源（发行机构官网说明书下载口）产
+   official-rules.json。这里的「优先级」不是新判据，而是应用顺序：
+   前面的源先落，后面的源只能补前面没补上的空白 —— 因为 applyAutoDisc
+   本来就写着「已有值不覆盖、手工值优先」，两份 feed 走的是同一条入口，
+   一行判据都不重写（重写就会分叉，这是本项目反复犯过的错）。
+   摘录（rawQuote）按同一优先级：同一个登记编码，先到的那份说了算。
+   某一份读不到（404 / 坏 JSON / 没网 / 旧壳）只是那一份不参与，
+   绝不许把整次同步说成失败。
+
+   @param {any} data 账本对象 @param {Array<{name?:string, feed:any}>} feeds 按优先级从高到低
+   @returns {{applied:string[], total:number, matched:number, filled:number, kept:number,
+             skippedNoCode:number, skippedNoEntry:number, badSource:number,
+             quotes:Record<string, any>, per:Array<{name:string, stat:any}>}} */
+export function applyRulesFeeds(data, feeds) {
+  const out = { applied: [], total: 0, matched: 0, filled: 0, kept: 0,
+    skippedNoCode: 0, skippedNoEntry: 0, badSource: 0, quotes: {}, per: [] };
+  const products = (data && Array.isArray(data.products)) ? data.products : [];
+  out.total = products.length;
+  for (const item of Array.isArray(feeds) ? feeds : []) {
+    if (!item || !item.feed) continue;                  // 这份没读到：不参与，不报错
+    const stat = applyRulesFeed(data, item.feed);
+    const name = String(item.name || "");
+    out.applied.push(name);
+    out.per.push({ name, stat });
+    out.matched += stat.matched;
+    out.filled += stat.filled;
+    out.kept += stat.kept;
+    out.skippedNoCode += stat.skippedNoCode;
+    out.skippedNoEntry += stat.skippedNoEntry;
+    out.badSource += stat.badSource;
+    for (const reg of Object.keys(stat.quotes)) {
+      if (!out.quotes[reg]) out.quotes[reg] = stat.quotes[reg];   // 先来的源优先
+    }
+  }
+  return out;
+}

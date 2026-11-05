@@ -31,7 +31,7 @@ import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
   DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS,
-  applyRulesFeed, rulesFeedReg } from "./js/core/disc.js";
+  applyRulesFeeds, rulesFeedReg } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -60,7 +60,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v82";
+const APP_VER = "v83";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -136,8 +136,12 @@ let SYNC_MEM_TOKEN = "";   /* 网页版专用：只在内存里，绝不进 loca
 /* v81 第 4 步：云端规则 feed 的路径，与「披露原文摘录」的内存态。
    product-rules.json 是私有仓里 Update NAV 每天写的独立产物（第 1~3 步落地），
    页面只读不写。摘录只留内存、绝不进 DATA —— 进账本就会随整文件同步来回搬
-   这段低频大文本，还会把 schema 撑大；刷新即失，下次同步重建。 */
+   这段低频大文本，还会把 schema 撑大；刷新即失，下次同步重建。
+   v83 队列 Q5：云端多了第二源（发行机构官网说明书下载口，tier 同为 official），
+   产物是 official-rules.json，形状与主源同一份契约。两份都读，优先级由应用顺序
+   表达（主源先落、第二源只补空白），判据仍在 applyAutoDisc 那一个入口里。 */
 const RULES_FEED_PATH = "product-rules.json";
+const OFFICIAL_FEED_PATH = "official-rules.json";
 let RULES_QUOTES = {};
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳 */
 let NOTIFY = { on: false, lastCheck: 0 };
@@ -3683,17 +3687,19 @@ async function ghReq(method, url, body) {
    这是「附带信息」，不是账本本体：404（云端还没写过）、JSON 坏、网络失败、
    旧壳、没配 token —— 一律静默降级成 null，绝不把一次规则文件读取失败
    变成「拉取失败」。ghReq 是唯一出口，App 内走桥、网页版走 fetch，两条通道
-   共用一份，不在页面里另写一套鉴权。 */
-async function fetchRulesFeed() {
+   共用一份，不在页面里另写一套鉴权。
+   v83 队列 Q5：路径改成参数，主源与第二源共用这一个出口 —— 复制第二份
+   取数代码就等于第二处鉴权与降级口径，两边一定会分叉（本项目反复犯过的错）。 */
+async function fetchRulesFeed(path) {
   try {
-    const info = await ghReq("GET", `${GH}/repos/${SYNC.owner}/${SYNC.repo}/contents/${RULES_FEED_PATH}`);
+    const info = await ghReq("GET", `${GH}/repos/${SYNC.owner}/${SYNC.repo}/contents/${path}`);
     if (!info || typeof info.content !== "string") return null;
     const feed = JSON.parse(b64ToUtf8(info.content));
     if (!feed || typeof feed !== "object" || !feed.products
       || typeof feed.products !== "object" || Array.isArray(feed.products)) return null;
     return feed;
   } catch (e) {
-    console.warn("规则 feed 读取失败（不影响账本同步）：", String(e).slice(0, 120));
+    console.warn(`规则 feed ${path} 读取失败（不影响账本同步）：`, String(e).slice(0, 120));
     return null;
   }
 }
@@ -4639,12 +4645,16 @@ async function syncPull(manual) {
        落账必须排在唯一这一次 saveLocal() **之前**：feed 逐只就地改 disc，
        若另调一次 saveLocal，DIRTY 会被当成「用户改的」；若排在后面，
        这批修改就根本没落盘。判据全在 applyRulesFeed → applyAutoDisc 里，
-       这里只做配对与统计，出处不齐一条都不写。 */
-    const feed = await fetchRulesFeed();
+       这里只做配对与统计，出处不齐一条都不写。
+       v83 队列 Q5：两份 feed 都取，主源排在前面 —— 优先级就是应用顺序，
+       第二源只能补主源没补上的空白，读不到的那份自动不参与。 */
+    const feed = await fetchRulesFeed(RULES_FEED_PATH);
+    const offFeed = await fetchRulesFeed(OFFICIAL_FEED_PATH);
     DATA = Object.assign({ products: [], trades: [], settings: {} }, remote);
     let rulesStat = null;
-    if (feed) {
-      rulesStat = applyRulesFeed(DATA, feed);
+    if (feed || offFeed) {
+      rulesStat = applyRulesFeeds(DATA, [
+        { name: "信披主源", feed }, { name: "官网第二源", feed: offFeed }]);
       RULES_QUOTES = rulesStat.quotes;      /* 只给展示层，绝不写进 DATA */
     }
     saveLocal();

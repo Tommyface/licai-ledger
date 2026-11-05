@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import {
   DISC_TIERS, parseFeeLine, parseAssetLine, parseDiscForm, normDisc, discGaps, feeRateFor,
   discSourceOk, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS, DISC_GAP_LABEL,
-  applyRulesFeed, rulesFeedReg,
+  applyRulesFeed, applyRulesFeeds, rulesFeedReg,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -202,8 +202,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v82"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v82"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v83"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v83"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -393,9 +393,10 @@ test("注释不许和已经上线的行为相反：T1 那句旧口径必须改�
     "注释要说清这张卡有三条来路（手工 / T1b 本机桥 / v81 云端 feed），别只写两条");
   assert.ok(/两条自动来路都只经 applyAutoDisc\s+写这同一份 DATA/.test(app),
     "注释承诺两条自动来路都不另开写账通路 —— 这句话是 applyAutoDisc 唯一入口那条门禁的说明书");
-  /* v81：注释里点名的第三条来路，代码里必须真有路径常量与落账调用，不许只写许愿 */
+  /* v81：注释里点名的第三条来路，代码里必须真有路径常量与落账调用，不许只写许愿
+     （v83 队列 Q5 之后落账入口是复数形式 applyRulesFeeds：两份 feed 走同一个编排） */
   assert.ok(app.includes('const RULES_FEED_PATH = "product-rules.json"') &&
-    app.includes("applyRulesFeed(DATA, feed)"),
+    app.includes("applyRulesFeeds(DATA,"),
     "注释说有云端 feed 这条来路，代码里就得真有路径常量与落账调用");
   /* 注释里的每一句「前台会怎么说」都要真有对应的代码，不然就是许愿 */
   assert.ok(/请求带 mode:"rules"/.test(app) && /mode: "rules"/.test(app),
@@ -525,8 +526,8 @@ test("applyRulesFeed：无编码 / feed 无条目 / 坏形状都不炸且统计�
 
 test("v81 接线：feed 落账排在唯一一次 saveLocal 之前、摘录不写 DATA、卡片有折叠入口", () => {
   const app = read("app.js");
-  const iFeed = app.indexOf("const feed = await fetchRulesFeed()");
-  const iApply = app.indexOf("applyRulesFeed(DATA, feed)");
+  const iFeed = app.indexOf("fetchRulesFeed(RULES_FEED_PATH)");
+  const iApply = app.indexOf("applyRulesFeeds(DATA,");
   const iSave = app.indexOf("saveLocal();", iApply);
   assert.ok(iFeed > 0 && iApply > iFeed && iSave > iApply,
     "feed 落账必须在 saveLocal() 之前，否则 DIRTY 复位会漏掉这批就地修改");
@@ -538,4 +539,85 @@ test("v81 接线：feed 落账排在唯一一次 saveLocal 之前、摘录不写
     "原文摘录不该挂内联事件，handlers.test.mjs 的桥接扫描会多出无人认领的入口名");
   const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
   assert.ok(imp && imp[1].includes("applyRulesFeed") && imp[1].includes("rulesFeedReg"));
+});
+
+/* ============================================================
+   队列 Q5（v83）：页面读第二份 feed（发行官网 tier=official）
+   ------------------------------------------------------------
+   云端现在写两份 feed：主源（中国理财网信披平台）产 product-rules.json，
+   第二源（发行机构官网说明书下载口）产 official-rules.json。页面侧的规矩：
+     · 优先级由「应用顺序」表达 —— 主源先落，第二源只补主源没补上的空白
+       （判据仍是 applyAutoDisc 的「已有值不覆盖 / 手工值优先」，一行都不重写）；
+     · 摘录按同一优先级取，同一个登记编码不许后面的源盖掉前面的；
+     · 少一份 feed（404 / 坏 JSON / 没网）只让那一份不参与，绝不拖垮同步；
+     · 只有一个 fetchRulesFeed 出口，路径是参数 —— 复制一份取数代码就是
+       第二处实现，鉴权与降级口径一定会分叉。
+   ============================================================ */
+
+const SRC2 = { url: "https://www.boc.cn/xx.pdf", publishedAt: "2026-06-18", tier: "official" };
+
+test("Q5：两份 feed 按优先级落账 —— 主源先写，第二源只补主源没补上的空白", () => {
+  const primary = fFeed({ [REG]: fEntry({ rules: Object.assign(
+    JSON.parse(JSON.stringify(RULES)), { openRule: "" }) }) });
+  const second = fFeed({ [REG]: fEntry({
+    source: Object.assign({}, SRC2),
+    rules: JSON.parse(JSON.stringify(RULES)),
+    rawQuote: { openRule: "每个开放日均办理" } }) });
+  const d = fData(fProd());
+  const st = applyRulesFeeds(d, [{ name: "主源", feed: primary },
+                                 { name: "第二源", feed: second }]);
+  const x = normDisc(d.products[0].disc);
+  assert.equal(x.lockDays, 7, "主源有的项主源写");
+  assert.equal(x.openRule, "每周二开放", "主源空着 → 由第二源补，第二源的值要真落进账");
+  assert.equal(x.source.url, SRC.url, "出处记的是第一份把账填起来的源，不是后到的");
+  assert.equal(x.status, "auto");
+  assert.deepEqual(st.applied, ["主源", "第二源"]);
+  assert.equal(st.filled, 5, "主源 4 项 + 第二源 1 项（openRule 主源是空的）");
+  assert.equal(st.kept, 4, "第二源到场时主源写好的那 4 项全是 kept —— 已有值不覆盖，一条都不许重写");
+  assert.deepEqual(Object.keys(st.quotes), [REG]);
+  assert.equal(st.quotes[REG].lockDays, "需持有 7 个自然日",
+    "同一只产品的摘录按优先级取主源那份，第二源不许盖掉");
+});
+
+test("Q5：主源出处不齐、第二源出处齐 → 由第二源补上且出处记第二源", () => {
+  const primary = fFeed({ [REG]: fEntry({ source: Object.assign({}, SRC, { publishedAt: "" }) }) });
+  const second = fFeed({ [REG]: fEntry({ source: Object.assign({}, SRC2) }) });
+  const d = fData(fProd());
+  const st = applyRulesFeeds(d, [{ name: "主源", feed: primary }, { name: "第二源", feed: second }]);
+  assert.equal(st.badSource, 1, "主源出处不齐要如实计一次");
+  const x = normDisc(d.products[0].disc);
+  assert.equal(x.source.url, SRC2.url, "第二源的出处齐，账就该由它填、出处也该记它");
+  assert.equal(x.lockDays, 7);
+});
+
+test("Q5：两份 feed 都读不到时不写账、不报错，applied 为空", () => {
+  const d = fData(fProd());
+  const st = applyRulesFeeds(d, [{ name: "主源", feed: null }, { name: "第二源", feed: undefined }]);
+  assert.deepEqual(st.applied, []);
+  assert.equal(st.filled, 0);
+  assert.deepEqual(st.quotes, {});
+  assert.deepEqual(normDisc(d.products[0].disc), normDisc(undefined),
+    "两份都缺 → 账面一字不动，这轮就是没 feed 可读");
+  assert.deepEqual(applyRulesFeeds(d, []).applied, [], "空数组也要当「没有 feed」");
+  assert.equal(applyRulesFeeds(null, []).total, 0, "账本对象都不对时不许抛异常");
+});
+
+test("Q5 接线：两份 feed 各读各的路径、只有一个取数出口、主源排在第二源之前", () => {
+  const app = read("app.js");
+  assert.ok(app.includes('const RULES_FEED_PATH = "product-rules.json"'),
+    "主源路径常量还在");
+  assert.ok(app.includes('const OFFICIAL_FEED_PATH = "official-rules.json"'),
+    "第二源路径常量必须与云端写盘那份同名（private/.github/workflows/update_nav.yml 里 --out \"$OFFICIAL_FILE\"）");
+  const defs = app.match(/async function fetchRulesFeed\(/g) || [];
+  assert.equal(defs.length, 1, "取 feed 的出口只能有一个：路径当参数，别复制第二份鉴权与降级");
+  assert.ok(/async function fetchRulesFeed\(path\)/.test(app),
+    "fetchRulesFeed 要收路径参数，函数体内不许再点具体的文件名");
+  assert.ok(app.includes("contents/${path}"), "请求 URL 用参数拼，两份共用同一条降级路");
+  const iPrimary = app.indexOf("fetchRulesFeed(RULES_FEED_PATH)");
+  const iSecond = app.indexOf("fetchRulesFeed(OFFICIAL_FEED_PATH)");
+  assert.ok(iPrimary > 0 && iSecond > iPrimary,
+    "第二源必须在主源之后应用：优先级是靠应用顺序表达的，颠倒就等于让官网盖掉信披平台");
+  const imp = /import \{([^}]*)\} from "\.\/js\/core\/disc\.js";/.exec(app);
+  assert.ok(imp && imp[1].includes("applyRulesFeeds"),
+    "app.js 要导入 applyRulesFeeds：多源编排若在页面里重写一遍就会分叉");
 });
