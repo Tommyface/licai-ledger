@@ -575,3 +575,115 @@ export function applyRegCode(p, got) {
   p.code = one;
   return { changed: true, wrote: one, why: `已补齐登记编码 ${one}（下一次抓取就能按编码查披露）` };
 }
+
+/* ============================================================================
+   资产净值（产品规模）—— 2026-11-06 所有者提的「每只产品新增一个字段，抓取内容补充」。
+
+   判据与私有仓 navsources/merge.py 的 apply_asset_value **同构**（JS 一份、Python 一份，
+   改一边必须改另一边；两边规则一致才不会「手机写的和云端写的互相顶」）。四条：
+     ① 手工值优先：用户填过（manual）就再也不动，连「为什么没写」的记录都不许顶掉它；
+     ② 披露日新者胜、同日不重刷：写入的形状里**没有抓取时刻**，否则每天 3 跑
+        都会「内容变了」⇒ 刷一堆无意义的数据提交（与 regHints 同一策略）；
+     ③ null 是不知道、0 是知道且为零：0/负数/NaN/非数都不算值，
+        某次没披露也**绝不清空**已经写过的值；
+     ④ 没写入时把「为什么空着」记进同一格（why），别让人对着空格猜功能跑没跑。
+
+   ⚠️ 这个字段是钱，所以它只许出现在**数据展示**的位置，不许进任何结论文本
+   （持仓体检/换仓建议的 verdictText 里没有钱，v74/v75 立的口径）。
+   ========================================================================== */
+
+/** 这一折记录里的 v 是不是一个可用的规模数（>0 的有限数）。 */
+function isAssetNum(v) {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+/** 统一读法：全站只从这里读规模，别处不许再摸 p.assetValue.v（口径与 regCodeOf 同一条）。 */
+export function assetValueOf(p) {
+  const av = p && p.assetValue;
+  return av && typeof av === "object" && !Array.isArray(av) ? av : null;
+}
+
+/**
+ * 把抓取到的一折规模落进产品对象（就地改），并如实回答改没改、为什么没改。
+ *
+ * @param {any} p 产品对象
+ * @param {{v?:number, date?:string, sub?:string, via?:string, why?:string}|null} rec 桥/云端的一折记录
+ * @returns {{changed:boolean, why:string}}
+ */
+export function applyAssetValue(p, rec) {
+  if (!p || typeof p !== "object") return { changed: false, why: "没有这款产品" };
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return { changed: false, why: "" };
+  const cur = (p.assetValue && typeof p.assetValue === "object") ? p.assetValue : {};
+
+  if (cur.manual) return { changed: false, why: "规模已有手工值（手工值优先，不覆盖）" };
+
+  if (isAssetNum(rec.v)) {
+    const nd = str(rec.date);
+    if (isAssetNum(cur.v) && str(cur.date) >= nd) return { changed: false, why: "" };
+    p.assetValue = { v: Number(rec.v), date: nd, sub: str(rec.sub), via: str(rec.via) };
+    return { changed: true, why: `已补齐资产净值（披露日 ${nd || "-"}）` };
+  }
+
+  /* 这一折没有值：已有值 ⇒ 保持（null 是不知道，不是「规模没了」）；
+     没有值 ⇒ 只有带着理由才记，连理由都没有就当没这回事。 */
+  if (isAssetNum(cur.v)) return { changed: false, why: "" };
+  const why = str(rec.why).trim();
+  if (!why) return { changed: false, why: "" };
+  if (cur.why === why && str(cur.date) === str(rec.date)
+      && str(cur.sub) === str(rec.sub) && "v" in cur && cur.v === null) {
+    return { changed: false, why: "" };          // 同一条理由已经在册 ⇒ 不重刷
+  }
+  p.assetValue = { v: null, date: str(rec.date), sub: str(rec.sub), via: str(rec.via), why };
+  return { changed: true, why };
+}
+
+/** 出处标签：铁律 #3 —— 值后面必须跟着它从哪来。 */
+function assetViaLabel(av) {
+  if (av.manual) return "手工";
+  const via = str(av.via);
+  if (!via) return "未知";
+  return via === "chinawealth" ? "中国理财网" : via;
+}
+
+/**
+ * 展示串（唯一一份）：≥1 亿说亿、不足 1 亿说万元，一律带披露日与出处。
+ * 没有这一折 ⇒ 空串（调用处自己决定「不显示这一行」），**绝不显示 0 元**。
+ */
+export function assetValueText(p) {
+  const av = assetValueOf(p);
+  if (!av) return "";
+  if (!isAssetNum(av.v)) return str(av.why) || "还不知道（这一格没写入）";
+  const x = Number(av.v);
+  const amount = x >= 1e8 ? (x / 1e8).toFixed(2) + " 亿元" : (x / 1e4).toFixed(2) + " 万元";
+  const bits = [];
+  if (av.date) bits.push("披露日 " + str(av.date));
+  bits.push("来源：" + assetViaLabel(av));
+  return `${amount}（${bits.join("，")}）`;
+}
+
+/**
+ * 表单里那一栏「资产净值（元）」的落账判据（手工值优先的另一半）。
+ *
+ * 只收**元**为单位的正数，带「亿」「万」的一律拒收 —— 单位靠猜就会差四个数量级，
+ * 而这一格是给人看规模的，错比空着更糟。清空输入框**只撤手工那一折**：
+ * 云端/本机抓取写进来的那折不是用户手工填的，不能因为表单里没字就抹掉。
+ */
+export function setManualAssetValue(p, text) {
+  if (!p || typeof p !== "object") return { changed: false, why: "没有这款产品" };
+  const raw = str(text).replace(/[,\s]/g, "");
+  const cur = (p.assetValue && typeof p.assetValue === "object") ? p.assetValue : {};
+  if (!raw) {
+    if (!cur.manual) return { changed: false, why: "" };   // 不是手工的 ⇒ 不动它
+    delete p.assetValue;
+    return { changed: true, why: "已清空手工填写的规模，下一轮抓取会按披露重新补" };
+  }
+  if (/亿|万|[a-zA-Z]/.test(raw)) {
+    return { changed: false, why: "这一栏只收以「元」为单位的数字（例如 2962513986.74），带亿/万的不猜单位" };
+  }
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v <= 0) {
+    return { changed: false, why: "规模要填正的元数额（例如 2962513986.74）；0 与负数都不算" };
+  }
+  p.assetValue = { v, date: str(cur.date), sub: str(cur.sub), via: "手工", manual: true };
+  return { changed: true, why: "已记录手工填写的规模（抓取不再覆盖它）" };
+}
