@@ -204,8 +204,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v90"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v90"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v91"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v91"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -879,12 +879,28 @@ test("assetValueOf：只认带 v 的对象形状，别的形状一律「不知�
 
 test("assetValueText：亿 / 万两档换算，并带上披露日与出处（铁律 #3）", () => {
   const yi = { assetValue: AV(2962513986.74, "2026-11-04") };
-  assert.match(assetValueText(yi), /^29\.63 亿元（披露日 2026-11-04，来源：中国理财网）$/);
+  assert.match(assetValueText(yi), /^29\.63 亿元（披露日 2026-11-04，来源：中国理财网信披平台·逐日净值表 astNetVal）$/);
   const wan = { assetValue: AV(6284884.31, "2026-11-04") };
-  assert.match(assetValueText(wan), /^628\.49 万元（披露日 2026-11-04，来源：中国理财网）$/);
+  assert.match(assetValueText(wan), /^628\.49 万元（披露日 2026-11-04，来源：中国理财网信披平台·逐日净值表 astNetVal）$/);
   const hand = { assetValue: { v: 100000000, date: "", via: "手工", manual: true } };
   assert.match(assetValueText(hand), /1\.00 亿元/);
   assert.match(assetValueText(hand), /手工/);
+});
+
+/* v91：出处写全，防止「中国理财网」被读成发行机构官网的季度投资报告原文。
+   三样缺一不可：渠道（信披平台）、粒度（逐日净值表）、可回查的字段名（astNetVal）。
+   这条也是防「改回简写」的验收断言：把标签退回裸「中国理财网」这里必须红。 */
+test("v91 出处写全：信披平台 + 逐日净值表 + astNetVal，且不带季报字眼", () => {
+  const t = assetValueText({ assetValue: AV(2962513986.74, "2026-11-04") });
+  assert.match(t, /中国理财网信披平台/, "要写全渠道，不能退回裸「中国理财网」");
+  assert.match(t, /逐日净值表/, "要说清披露粒度是逐日净值表，不是报告期末时点");
+  assert.match(t, /astNetVal/, "要带可逐字回查的接口字段名");
+  assert.doesNotMatch(t, /季度|定期报告|投资报告|官网/,
+    "不许出现会被读成发行机构官网季报的字眼");
+  /* 手工值是用户自己填的，没有「信披平台」这一折，别把平台标签挂上去 */
+  const hand = { assetValue: { v: 100000000, date: "", via: "手工", manual: true } };
+  assert.match(assetValueText(hand), /来源：手工/);
+  assert.doesNotMatch(assetValueText(hand), /信披平台|astNetVal/);
 });
 
 test("assetValueText：空着就说清为什么空着，绝不显示 0 元", () => {

@@ -637,12 +637,18 @@ export function applyAssetValue(p, rec) {
   return { changed: true, why };
 }
 
-/** 出处标签：铁律 #3 —— 值后面必须跟着它从哪来。 */
+/** 出处标签：铁律 #3 —— 值后面必须跟着它从哪来。
+ *  v91：chinawealth 写全到「渠道 + 披露粒度 + 可回查的字段名」。只写「中国理财网」
+ *  会被误读成发行机构官网的季度投资报告原文（如北银理财「定期公告」栏目），
+ *  而这里取的是全国信披平台逐日净值表里、与份额净值同一行的 astNetVal 字段 ——
+ *  频率（逐交易日 vs 报告期末时点）、载体（结构化接口 vs PDF 原文）都不一样。
+ *  完整出处只在这里写一份：详情页资产净值栏、表格 title、表格下方说明共用
+ *  assetValueText，不在 app.js 里另拼一套。 */
 function assetViaLabel(av) {
   if (av.manual) return "手工";
   const via = str(av.via);
   if (!via) return "未知";
-  return via === "chinawealth" ? "中国理财网" : via;
+  return via === "chinawealth" ? "中国理财网信披平台·逐日净值表 astNetVal" : via;
 }
 
 /**
