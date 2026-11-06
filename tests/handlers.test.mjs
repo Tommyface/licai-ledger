@@ -126,11 +126,95 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
   assert.match(br, /code: regCodeOf\(p\)/, "看板按 Z 编码搜不到只填了别名的产品");
 });
 
-test("APP_VER 升到 v88 且 SHELL 不漏文件", () => {
+test("APP_VER 升到 v90 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v88"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v88"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v90"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v90"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }
+});
+
+/* ── 资产净值（规模）v87：接线测试 ─────────────────────────────────────────
+   判据在 js/core/disc.js 里已经有口径测试了；这里只盯「页面真的用了它」——
+   上一轮（v3.3）就是靠这类逐点断言才把「测试全绿但页面没接线」那种假绿抓出来。 */
+test("规模这一栏：抓取回写、表单初值、详情展示三处都真的走 disc.js 的判据", () => {
+  /* v90：多了 assetValueShort（历史净值表紧凑金额），仍是同一份 disc.js 判据，
+     不许在 app.js 里另写一套换算。 */
+  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort\s*\} from "\.\/js\/core\/disc\.js"/);
+  assert.ok(imp, "五个函数必须从 disc.js 导入，不许在 app.js 里另写一套");
+
+  /* ① 抓取回写：判据跑在 disc.js，这里只盯接线与它所在的位置 */
+  const all = body(app, "nativeFetchAll");
+  assert.ok(all.includes("applyAssetValue(p2, r.assetValue)"), "本机抓取要真的把规模落账");
+  /* 上面那句只盯字符串 —— 把守卫改成 if (false && r.assetValue) 照样全绿，
+     而那一折就永远不会落账。所以这里钉的是「结构」：调用必须直接挂在
+     r.assetValue 这个条件下面，中间不许插任何常量假守卫。 */
+  assert.match(all, /if \(r && r\.assetValue\) \{\s*\n\s*const av = applyAssetValue\(p2, r\.assetValue\);/,
+    "回写必须挂在 if (r && r.assetValue) 里，条件一旦被改成恒假（或整段注释掉）就是没接线");
+  assert.doesNotMatch(all, /if \(false\b/, "函数里不该有恒假分支，那是「代码在、事没做」的典型形状");
+  /* v3.4 实测缺口：原生侧闸门①拦下净值时回包 ok=false、但仍带着「规模这格为什么空着」。
+     落账若写在 ok 那一支里面，这类产品就永远是一格无声的空 —— 所以钉位置：
+     applyAssetValue 必须出现在 `if (r && r.ok)` 之前（两支之外）。
+     ⚠️ 取的是**那句代码**的位置，不是注释里第一次出现这个名字的地方：
+     上一版用 indexOf("applyAssetValue(") 命中了上面那段注释，窗口跟着跑偏，
+     「else fails.push」那个变异就是从这条缝里漏掉的。 */
+  const at = all.search(/const av = applyAssetValue\(p2, r\.assetValue\);/);
+  assert.ok(at >= 0, "落账那句调用本身不在了");
+  assert.ok(at < all.indexOf("if (r && r.ok)"),
+    "规模落账必须在 ok/失败两支之外：被闸门拦下的那一趟也要能把理由落下来");
+  assert.match(all, /if \(av\.changed\) \{ assetChanged = true; saveLocal\(\); \}/,
+    "改了本地账就得存盘 —— 净值那一支的 saveLocal 这条路根本不会走");
+  assert.doesNotMatch(all.slice(at, at + 400), /fails\.push/,
+    "规模没补齐不许被说成抓取失败（v84 三类口径同源）");
+  assert.ok(/assetNotes/.test(all) && /MANUAL\.asset/.test(all), "补齐结果要有单独一行归口，别混进净值那句");
+  assert.doesNotMatch(all.slice(all.indexOf("applyAssetValue"), all.indexOf("applyAssetValue") + 400),
+    /fails\.push/, "规模没补齐不许被说成抓取失败（v84 三类口径同源）");
+
+  /* ② 表单初值：只能回填手工那一折，抓取写的那一折留在提示里 */
+  const form = body(app, "assetFormValue");
+  assert.ok(/assetValueOf\(p\)/.test(form) && /av\.manual/.test(form),
+    "输入框初值必须只认 manual 那一折，否则用户清空输入框会连带抹掉云端值");
+
+  /* ③ 详情展示：走唯一那份 assetValueText，不许在页面里自己除 1e8 */
+  const det = body(app, "renderProdDetail");
+  assert.ok(/assetValueText\(p\)/.test(det), "详情页那一栏要用统一展示函数");
+  assert.doesNotMatch(app, /assetValue[\s\S]{0,40}\/\s*1e8/, "换算只许写在 disc.js 的 assetValueText 里");
+});
+
+test("规模是钱：结论文本（体检卡 / 换仓建议）里一个都不许引用它", () => {
+  for (const fn of ["adviceCard", "switchCard", "manStatusHtml"]) {
+    const b = body(app, fn);
+    assert.doesNotMatch(b, /assetValueText|assetValueOf/, `${fn} 里不许出现规模：结论文本里不写钱`);
+  }
+  /* 抓取状态那一行只许出现「披露日」，金额数字不进结论 */
+  const tip = app.match(/const assetLine = [\s\S]{0,120}/);
+  assert.ok(tip && /m\.asset/.test(tip[0]), "抓取框要有独立一行");
+});
+
+/* ── 版本号一致性（v3.4 补的闸）────────────────────────────────────────────
+   起因：v87 第一次推公开仓只带了「记得改的那几个文件」，tests/advice.test.mjs 与
+   tests/switchadv.test.mjs 里各钉了一份 CACHE/APP_VER，本地改了却没进推送清单，
+   CI 立刻红在「新增模块 = 外壳变了，CACHE 必须跟着升」。这类错的形状是
+   「改了的没推」，本地全绿照样看不见，所以要么每次推送前做整树字节比对，
+   要么让测试自己把该改的文件名单念出来。这里选后者：名单一旦漂了，
+   CI 的报错信息直接给出该看的文件，不用再去猜。 */
+test("版本号一致性：钉住版本的源码文件必须一个不缺、一个不改地全对上新版本", () => {
+  const sw = read("sw.js");
+  const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
+  const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
+  assert.equal(ver, cache, "APP_VER 与 CACHE 必须同版本");
+  /* 钉过的文件：源码两处，测试四处（都是 grep 出来的，别再靠记忆数） */
+  const PINS = ["app.js", "sw.js", "tests/advice.test.mjs", "tests/disc.test.mjs",
+                "tests/handlers.test.mjs", "tests/switchadv.test.mjs"];
+  const stale = [];
+  for (const f of PINS) {
+    const s = read(f);
+    if (/licai-ledger-v\d+/.test(s) && !s.includes(`licai-ledger-${cache}`)) stale.push(f);
+    if (/APP_VER = "v\d+"|"(?<![_A-Za-z])v\d+"/.test(s) && !new RegExp(`"${ver}"`).test(s)) stale.push(f);
+    /* 同一文件里若同时钉着新旧两个版本，也是没改干净 */
+    if (new RegExp(`licai-ledger-v\\d+`).test(s) &&
+        [...s.matchAll(/licai-ledger-v\d+/g)].some(m => m[0] !== `licai-ledger-${cache}`)) stale.push(f + "（新旧混钉）");
+  }
+  assert.deepEqual(stale, [], "这些文件里还钉着旧版本号：\n  " + stale.join("\n  "));
 });

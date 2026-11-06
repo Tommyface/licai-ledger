@@ -209,6 +209,9 @@ html:not(.inApp) .app-only{display:none}
 .navtbl th:first-child,.navtbl td:first-child{text-align:left}
 .navtbl td{padding:7px 4px;border-bottom:1px dashed var(--line);text-align:right}
 .navtbl tbody tr:last-child td{border-bottom:0}
+/* 资产净值列（v90）：金额窄格串不折行，空格一律显示「—」，别让 6 列把手机屏撑破 */
+.navtbl th:last-child,.navtbl td.assetcol{white-space:nowrap}
+.navtbl td.assetcol .muted{color:var(--ink3)}
 /* ---------- 持仓体检（v61 起）----------
    结论表复用 .navtbl，只加左边一条色带 + 档位词：两重编码。
    只靠颜色传达判定是不可接受的 —— 灰度截图、色觉障碍、深色模式低对比时全废。

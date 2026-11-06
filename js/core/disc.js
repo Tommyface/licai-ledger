@@ -646,6 +646,24 @@ function assetViaLabel(av) {
 }
 
 /**
+ * 金额换算（唯一一份）：≥1 亿说亿、不足 1 亿说万元。
+ * compact=true 给历史净值表用（「29.63亿」这种窄格串），false 给详情页完整串用。
+ * 换算只许写在这里 —— app.js 里除以 1e8 会被 handlers 门禁点名。
+ */
+function assetAmount(x, compact) {
+  return x >= 1e8
+    ? (x / 1e8).toFixed(2) + (compact ? "亿" : " 亿元")
+    : (x / 1e4).toFixed(2) + (compact ? "万" : " 万元");
+}
+
+/** 表格里的紧凑金额：没有有效值 ⇒ 空串（调用处自己画「—」），绝不显示 0 元。 */
+export function assetValueShort(p) {
+  const av = assetValueOf(p);
+  if (!av || !isAssetNum(av.v)) return "";
+  return assetAmount(Number(av.v), true);
+}
+
+/**
  * 展示串（唯一一份）：≥1 亿说亿、不足 1 亿说万元，一律带披露日与出处。
  * 没有这一折 ⇒ 空串（调用处自己决定「不显示这一行」），**绝不显示 0 元**。
  */
@@ -653,8 +671,7 @@ export function assetValueText(p) {
   const av = assetValueOf(p);
   if (!av) return "";
   if (!isAssetNum(av.v)) return str(av.why) || "还不知道（这一格没写入）";
-  const x = Number(av.v);
-  const amount = x >= 1e8 ? (x / 1e8).toFixed(2) + " 亿元" : (x / 1e4).toFixed(2) + " 万元";
+  const amount = assetAmount(Number(av.v), false);
   const bits = [];
   if (av.date) bits.push("披露日 " + str(av.date));
   bits.push("来源：" + assetViaLabel(av));

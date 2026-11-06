@@ -834,7 +834,8 @@ test("网页版可见的文案里不许出现「去设置 → 秒讯登录」这
 test("产品详情：历史净值表加一列万份收益，取的是 st.wan，不在表里另算一遍", () => {
   const body = fnBody("renderProdDetail");
   const heads = [...body.matchAll(/<th>([^<]+)<\/th>/g)].map(m => m[1]);
-  assert.deepEqual(heads, ["日期", "单位净值", "日涨跌", "万份收益", "7日年化"],
+  /* v90：最右新增「资产净值」第 6 列（口径 A：只在披露日那一行显示规模）。 */
+  assert.deepEqual(heads, ["日期", "单位净值", "日涨跌", "万份收益", "7日年化", "资产净值"],
     `表头漂了：${heads.join(" / ")}`);
   const tds = (body.match(/<tr>\s*\n\s*<td>/g) || []).length;
   assert.equal(tds, 1, "历史净值表的行模板被改散了（应是一段 <tr> 起头）");
@@ -846,6 +847,32 @@ test("产品详情：历史净值表加一列万份收益，取的是 st.wan，�
   assert.ok(/wan2\(w\)/.test(body), "列里没走 wan2（和产品收益表那个两位小数口径漂开）");
   assert.ok(!/\*\s*10000/.test(body), "详情里又算了一遍万份收益：口径要在 navStats 一处");
   assert.ok(/万份收益为折算口径/.test(body), "表头 hint 要说明这是折算口径，官方并不披露这一项");
+});
+
+/* ---------- v90：历史净值表最右「资产净值」列（口径 A） ---------- */
+test("v90 资产净值列：只在披露日那一行显示规模，其余行「—」，换算不落在页面", () => {
+  const body = fnBody("renderProdDetail");
+  /* ① 唯一的命中判据：行日期 === assetValue.date 且这一折有有效金额。
+        把同一个值铺满 20 行、或按日臆造序列，都会被这条钉住。 */
+  assert.ok(/const hit = !!\(avShort && avDate && st\.dates\[i\] === avDate\)/.test(body),
+    "命中判据必须同时要求：有有效金额 + 有披露日 + 行日期等于披露日");
+  assert.ok(/if \(hit\) avShown = true/.test(body), "命中要留给说明文案判断，别删");
+  /* ② 没命中那一格只能是「—」，绝不能显示 0 元或把规模重复贴上去 */
+  assert.ok(/const assetCell = hit\s*\?[^:]+:\s*`<span class="muted">—<\/span>`/.test(body),
+    "非披露日那一格必须是「—」：null 是不知道，0 是知道且为零，两回事");
+  /* ②b 表格真的引用了 assetCell —— 只留着定义、<td> 里却写 avShort || '—' 那种
+        「每行都铺同一个值」的写法会绕过上面的断言（假绿）。钉住实际输出位置。 */
+  assert.ok(/<td class="assetcol">\$\{assetCell\}<\/td>/.test(body),
+    "资产净值那一格必须输出 assetCell，不许绕过命中判据直接写 avShort");
+  /* ③ 金额换算走 disc.js 的 assetValueShort，页面不自己除 1e8（handlers 那条闸同样会看） */
+  assert.ok(/assetValueShort\(p\)/.test(body), "金额要用 disc.js 的紧凑串函数");
+  assert.doesNotMatch(body, /\/\s*1e8|\/\s*1e4/, "页面里不许自己除 1e8 / 1e4 换算规模");
+  /* ④ 无值/被闸门拦下的产品要把理由说出来，不能伪装成「没数据」 */
+  assert.ok(/资产净值这一格暂时空着/.test(body) && /esc\(avFull/.test(body),
+    "被拦下的产品要原样显示 why（口径 A 的后半句）");
+  /* ⑤ 表格下方有一句口径说明，解释「为什么只有一行有钱」 */
+  assert.ok(/assetCap/.test(body) && /不是每日序列/.test(body),
+    "要写明这是产品当前规模、不是每日序列，否则用户会当成漏列");
 });
 
 /* ---------- v68：万份收益口径统一（用户定：整段累计，不按自然日摊平） ---------- */
