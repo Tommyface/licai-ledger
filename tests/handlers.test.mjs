@@ -108,10 +108,28 @@ test("云端候选只展示不改账本（regHints）", () => {
   assert.doesNotMatch(b, /\.code\s*=|regCode\s*=/, "展示函数不许写账本");
 });
 
-test("APP_VER 升到 v85 且 SHELL 不漏文件", () => {
+test("登记编码这一栏的读法全站只有一种：屏幕上有「登记编码」的地方都走 regCodeOf", () => {
+  assert.match(app, /import \{[^}]*\bregCodeOf\b[^}]*\} from "\.\/js\/core\/orgs\.js"/,
+    "app.js 没 import regCodeOf，浏览器里就是静默 ReferenceError");
+  const lines = app.split("\n").filter(l => l.includes("登记编码 ${"));
+  assert.ok(lines.length >= 2, `展示点少了（${lines.length} 处），接线要一起核`);
+  for (const l of lines) {
+    assert.match(l, /regCodeOf\(/, "有一处只读 p.code，云端已知的编码会显示成「-」：" + l.trim().slice(0, 64));
+  }
+  /* 另外两处不是「登记编码」这句话，但同一格的读法必须一致，所以逐个点名：
+     表单① 是用户改这一栏的入口（显示成空 → 用户会再手工抄一遍，那正是要消掉的活）；
+     看板行是「按编码搜产品」的那一项。变异证明：把任一处换回 p.code，本条红。 */
+  const form = app.split("\n").filter(l => l.includes('id="pCode"'));
+  assert.equal(form.length, 1, "表单① 的结构变了，接线要一起核");
+  assert.match(form[0], /regCodeOf\(/, "编辑产品时登记编码显示成空 = 用户还得手工抄一次");
+  const br = body(app, "boardRows");
+  assert.match(br, /code: regCodeOf\(p\)/, "看板按 Z 编码搜不到只填了别名的产品");
+});
+
+test("APP_VER 升到 v86 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v85"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v85"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v86"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v86"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }

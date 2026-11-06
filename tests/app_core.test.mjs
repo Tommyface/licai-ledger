@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { fmtDate } from "../js/core/util.js";
 import { ORG_ALIAS, ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus,
-       isRegCode } from "../js/core/orgs.js";
+       isRegCode, regCodeOf, regCodeFromCloud } from "../js/core/orgs.js";
 import { parseProductInput } from "../js/core/paste.js";
 import { navSeries, latestNav, navOnOrBefore, navHit } from "../js/domain/nav.js";
 import { sharesOn, hasAnyTrade, computePosition } from "../js/domain/position.js";
@@ -1700,6 +1700,31 @@ test("prodCodeOf：登记编码形态不当产品代码", () => {
   assert.equal(prodCodeOf({ code: "NYJXLD1409G" }), "NYJXLD1409G",
     "历史账本里 code 存份额代码的写法不能一起改掉");
   assert.equal(prodCodeOf({ shareCode: "Z7001126000218" }), "");
+});
+
+/* 实测数据（私有仓 main @ b2258e3b）里就有这一格：安盈稳健日开7号A 的
+   `code` 是空串、`regCode` 是 Z7002426000328 —— 云端早就认得它的登记编码，
+   屏幕上却写「登记编码 -」。用户看到「-」就以为缺，于是手工去补，
+   这正是要消掉的那一步。读侧只有一种读法才算「先看见」：本机栏优先，空了才念云端别名。 */
+test("regCodeOf：本机栏优先，空了念云端别名", () => {
+  assert.equal(regCodeOf({ code: "Z7001126000218", regCode: "Z7002426000328" }), "Z7001126000218",
+    "用户自己填的那一栏优先，不能被别名盖住");
+  assert.equal(regCodeOf({ code: "", regCode: "Z7002426000328" }), "Z7002426000328",
+    "实测里安盈就是这一格：栏里空、云端有值");
+  assert.equal(regCodeOf({ code: "  ", regCode: "Z7002426000328" }), "Z7002426000328", "空白串也算没填");
+  assert.equal(regCodeOf({ code: "NYJXLD1409G" }), "NYJXLD1409G",
+    "历史账本里这一栏存过产品代码：照原样念，不替用户判对错");
+  assert.equal(regCodeOf({}), "");
+  assert.equal(regCodeOf(null), "");
+});
+
+test("regCodeFromCloud：只有别名有值时标出出处（铁律 #3）", () => {
+  assert.equal(regCodeFromCloud({ code: "", regCode: "Z7002426000328" }), true);
+  assert.equal(regCodeFromCloud({ code: "Z7001126000218", regCode: "Z7002426000328" }), false,
+    "本机栏有值就不是「云端来的」");
+  assert.equal(regCodeFromCloud({ code: "Z7001126000218" }), false);
+  assert.equal(regCodeFromCloud({}), false);
+  assert.equal(regCodeFromCloud(null), false);
 });
 
 test("fetchStatus：只填登记编码的产品仍然算「云端可抓」", () => {

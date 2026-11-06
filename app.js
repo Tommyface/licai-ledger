@@ -13,8 +13,8 @@
 import { $, pad, fmtDate, parseDate, today, money, signMoney, pct, cls, uid, esc, toast, dayDiff,
   maskMoney, maskTone }
   from "./js/core/util.js";
-import { ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus }
-  from "./js/core/orgs.js";
+import { ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus,
+  regCodeOf, regCodeFromCloud } from "./js/core/orgs.js";
 import { parseProductInput, rowAddable } from "./js/core/paste.js";
 import { navSeries, navAt, latestNav, navHit } from "./js/domain/nav.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
@@ -60,7 +60,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v85";
+const APP_VER = "v86";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -952,7 +952,7 @@ function renderProd() {
       const stale = navStaleInfo(p);
       return `<div class="pick" style="cursor:default">
         <div class="p1"><button class="link" onclick="openProdDetail('${p.id}')">${esc(prodLabel(p))}</button> <span class="wr" style="font-size:10.5px;color:var(--ink3)">${esc(p.inst || "")}</span></div>
-        <div class="p2">登记编码 ${esc(p.code || "-")} · 产品代码 <b>${esc(p.prodCode || "-")}</b></div>
+        <div class="p2">登记编码 ${esc(regCodeOf(p) || "-")}${regCodeFromCloud(p) ? '<span class="muted">（云端）</span>' : ""} · 产品代码 <b>${esc(p.prodCode || "-")}</b></div>
         <div class="p2" style="color:${st.ok ? "#0d7a52" : "#8a6300"}">${st.txt}</div>
         ${stale ? `<div class="p2" style="color:#8a6300">⏳ 净值停在 ${esc(stale.date)}，此后已过 ${stale.lag} 个交易日未更新</div>` : ""}
         <div class="p3">份额 ${shown(pos.shares.toFixed(2))} · 成本 ${shown(money(pos.cost))} · 市值 ${shown(money(pos.market))} · 浮盈 <b class="${tone(pos.profit)}">${shown(signMoney(pos.profit))}</b> · 净值 ${l ? l[1].toFixed(4) + " (" + l[0] + ")" : "无数据"}</div>
@@ -991,7 +991,7 @@ function boardRows() {
       name: prodLabel(p),
       inst: p.inst || "",
       ikey: instKey(p.inst),
-      code: p.code || "",
+      code: regCodeOf(p),          /* 看板搜「Z7…」也要搜得到：这一栏的读法全站只有一种 */
       prodCode: p.prodCode || "",
       lastDate: st.dates.length ? st.dates[st.dates.length - 1] : "",
       /* null = 没有可比的前值 / 样本不足，渲染成「—」，排序永远垫底 */
@@ -1254,7 +1254,7 @@ function openTrade(pickId) {
 }
 function renderPick() {
   const kw = ($("tSearch") ? $("tSearch").value : "").trim().toLowerCase();
-  const list = DATA.products.filter(p => !kw || (p.name + p.code + (p.prodCode || "")).toLowerCase().includes(kw));
+  const list = DATA.products.filter(p => !kw || (p.name + regCodeOf(p) + (p.prodCode || "")).toLowerCase().includes(kw));
   const box = $("pickBox");
   if (!list.length) { box.innerHTML = `<div class="empty" style="padding:14px">没有匹配的产品</div>`; $("tFormBox").innerHTML = ""; return; }
   box.innerHTML = list.map(p => {
@@ -1262,7 +1262,7 @@ function renderPick() {
     return `<div class="pick ${UI.activePick === p.id ? "on" : ""}" onclick="pickProduct('${p.id}')">
       <div class="p1">${esc(prodLabel(p))}</div>
       <div class="p2">${esc(p.inst || "")}${p.prodCode ? " · 产品代码 " + esc(p.prodCode) : ""}</div>
-      <div class="p3">登记编码 ${esc(p.code || "-")} · 最新净值 ${l ? l[1].toFixed(4) + "（" + l[0] + "）" : "无"}</div>
+      <div class="p3">登记编码 ${esc(regCodeOf(p) || "-")}${regCodeFromCloud(p) ? '<span class="muted">（云端）</span>' : ""} · 最新净值 ${l ? l[1].toFixed(4) + "（" + l[0] + "）" : "无"}</div>
     </div>`;
   }).join("");
   if (!UI.activePick && list.length) UI.activePick = list[0].id;
@@ -1423,8 +1423,9 @@ function prodForm(pid) {
       ② <b>产品代码</b> — 云端抓净值的依据（北银如 <code>YJ01251204A</code>，华夏如 <code>208212400701</code>，信银如 <code>AF251387C</code>，南银如 <code>NYYW000016</code>，民生如 <code>FBAG65601C</code>，徽银如 <code>PNHY260395A</code>）。信银要填<b>完整的份额代码</b>（含末位份额字母），去掉末位字母查不到；徽银同理，漏了字母只能按前缀猜，多个份额时会要求补全。
     </div>
     <div class="field"><label>① 产品登记编码</label>
-      <div class="actin"><input id="pCode" placeholder="如 Z7008926000006" value="${esc(p && p.code || "")}"><button class="btn pri" onclick="queryProduct()">查询</button></div>
-      <div class="tip">中国理财网信披平台的登记编码，形如 Z / C 开头</div>
+      <div class="actin"><input id="pCode" placeholder="如 Z7008926000006" value="${esc(regCodeOf(p))}"><button class="btn pri" onclick="queryProduct()">查询</button></div>
+      <div class="tip">中国理财网信披平台的登记编码，形如 Z / C 开头${p && regCodeFromCloud(p)
+        ? '；<b>这一条现在显示的是云端抓取时认的那个编码</b>，保存后才会写进本机这一栏（不对的话请直接改）' : ""}</div>
     </div>
     <div id="qResult"></div>
     <div class="field"><label>② 产品代码 <span class="muted">（云端抓净值依据，必填才能自动抓）</span></label>
@@ -2399,7 +2400,7 @@ function prodLabel(p) {
 function findDupProduct(r) {
   const c = String(r.code || "").toUpperCase(), pc = String(r.prodCode || "").toUpperCase();
   return DATA.products.find(p =>
-    (c && String(p.code || "").toUpperCase() === c) ||
+    (c && regCodeOf(p).toUpperCase() === c) ||
     (pc && String(p.prodCode || "").toUpperCase() === pc)) || null;
 }
 
@@ -2804,7 +2805,7 @@ function renderProdDetail() {
       <div class="pn" style="font-size:12.5px">${esc(p.inst || "未填发行机构")}</div>
       <div class="pv"></div>
       <div class="pk">
-        ${p.code ? `<i>登记编码 <b>${esc(p.code)}</b></i>` : ""}
+        ${regCodeOf(p) ? `<i>登记编码 <b>${esc(regCodeOf(p))}</b>${regCodeFromCloud(p) ? '<span class="muted">（云端）</span>' : ""}</i>` : ""}
         ${p.prodCode ? `<i>产品代码 <b>${esc(p.prodCode)}</b></i>` : ""}
         ${p.riskLevel ? `<i>风险等级 <b>${esc(p.riskLevel)}</b></i>` : ""}
         ${p.estDate ? `<i>成立日 <b>${esc(p.estDate)}</b></i>` : ""}

@@ -169,11 +169,6 @@ export function detectOrgByProdCode(code) {
 }
 
 /**
- * 云端抓取所需的产品代码（fetch_nav.py 的 get_prod_code：prodCode → code → shareCode）
- * @param {ProductLike | null | undefined} p
- * @returns {string}
- */
-/**
  * 是不是标准登记编码形态（Z + 12~14 位数字）。
  *
  * 判据只有这一份：Python 侧同名函数在 navsources/base.py:is_reg_code()，
@@ -187,6 +182,17 @@ export function isRegCode(v) {
   return /^Z\d{12,14}$/.test(String(v == null ? "" : v).trim().toUpperCase());
 }
 
+/**
+ * 云端抓取所需的产品代码（对齐 fetch_nav.py 的 get_prod_code：prodCode → code → shareCode）。
+ *
+ * 与云端唯一的差异是这里**跳过登记编码形态**：App 的「登记编码」栏就是 `code`，
+ * 老数据里不少人把 Z 编码填在了「产品代码」旁边那一栏，直接当产品代码交出去，
+ * 中国理财网会认为份额类别对不上而永久拒取 —— 症状是「这轮没拿到净值」，
+ * 真正的病因是这个字段串位。宁可不给产品代码（还有一条按编码查的路），
+ * 也不要给一个长得像登记编码的产品代码。
+ * @param {ProductLike | null | undefined} p
+ * @returns {string}
+ */
 export function prodCodeOf(p) {
   if (!p) return "";
   for (const k of ["prodCode", "code", "shareCode"]) {
@@ -194,6 +200,34 @@ export function prodCodeOf(p) {
     if (v && !isRegCode(v)) return v;      // 登记编码不是产品代码（见 isRegCode）
   }
   return "";
+}
+
+/**
+ * 登记编码这一栏「该显示什么」（v86）。
+ *
+ * 账本里同一件事有两个字段：App 自己写的是 `code`（表单①、列表、详情都读它），
+ * 云端抓净值时认的读侧别名是 `regCode`。只读 `code` 就会出现这种局面：
+ * 云端早就知道某只产品的登记编码，屏幕上却写「登记编码 -」，
+ * 用户据此以为缺东西、手工去补 —— 他要的「自动补齐」第一步其实是「先看见」。
+ * 读的时候 `code` 优先（那是用户自己填的那一栏），空了才念 `regCode`。
+ * @param {ProductLike | null | undefined} p
+ * @returns {string}
+ */
+export function regCodeOf(p) {
+  if (!p) return "";
+  const c = String(p.code == null ? "" : p.code).trim();
+  if (c) return c;
+  return String(p.regCode == null ? "" : p.regCode).trim();
+}
+
+/** 这一栏此刻显示的值是不是来自云端别名（而不是用户在本机填的那一栏）。
+    界面要用它补一句「（云端）」：同一个位置两种出处，不标出来就分不清。
+    @param {ProductLike | null | undefined} p
+    @returns {boolean} */
+export function regCodeFromCloud(p) {
+  if (!p) return false;
+  return !String(p.code == null ? "" : p.code).trim()
+    && !!String(p.regCode == null ? "" : p.regCode).trim();
 }
 
 /**
