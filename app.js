@@ -31,7 +31,8 @@ import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
   DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS,
-  applyRulesFeeds, rulesFeedReg, regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS } from "./js/core/disc.js";
+  applyRulesFeeds, rulesFeedReg, regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
+  assetValueOf, applyAssetValue, assetValueText, setManualAssetValue } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -60,7 +61,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v86";
+const APP_VER = "v87";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1432,6 +1433,10 @@ function prodForm(pid) {
       <input id="pProd" placeholder="如 YJ01251204A" value="${esc(p && p.prodCode || "")}" oninput="onProdCodeInput()">
       <div id="pProdTip" class="tip"></div>
     </div>
+    <div class="field"><label>资产净值（规模，单位：元） <span class="muted">（可留空）</span></label>
+      <input id="pAsset" inputmode="decimal" placeholder="如 2962513986.74" value="${esc(assetFormValue(p))}">
+      <div class="tip">${esc(assetFormTip(p))}</div>
+    </div>
     <div class="field"><label>③ 产品名称 *（建议带机构简称）</label>
       <input id="pName" placeholder="如 北银理财京华远见春系列诚享7天持有期29号理财产品" value="${esc(p && p.name || "")}" oninput="onProdCodeInput()">
     </div>
@@ -1446,6 +1451,20 @@ function prodForm(pid) {
       <button class="btn pri" style="flex:1" onclick="saveProduct('${pid || ""}')">${p ? "保存修改" : "保存产品"}</button>
     </div>`);
   onProdCodeInput();
+}
+/* 表单里这一栏的初值与提示：只有**手工那一折**才回填进输入框。
+   抓取补齐的那一折留在提示里说明，绝不假装成用户填的 —— 否则用户清空输入框
+   就会连带抹掉云端给的值，而「手工值优先」的前提是分清哪一份是手工的。 */
+function assetFormValue(p) {
+  const av = assetValueOf(p);
+  return (av && av.manual && typeof av.v === "number") ? String(av.v) : "";
+}
+function assetFormTip(p) {
+  const av = assetValueOf(p);
+  if (av && av.manual) return "已按你手工填的规模记录，抓取不会覆盖它；清空这一栏再保存 = 交回抓取补齐。";
+  if (av && typeof av.v === "number") return `当前由抓取补齐：${assetValueText(p)}。这一栏留空就保持自动；填了则以你填的为准（单位只收元）。`;
+  if (av && av.why) return `这一格暂时空着：${av.why}`;
+  return "留空则由抓取按披露补齐（份额类别对得上才写，单位：元）。";
 }
 function openProd() { prodForm(""); }
 function editProd(pid) { prodForm(pid); }
@@ -1538,6 +1557,13 @@ function saveProduct(pid) {
     target = Object.assign({ id: uid(), navHistory: UI.queriedNav || {}, createdAt: Date.now() }, patch);
     DATA.products.push(target);
     if (UI.activePick !== undefined) UI.activePick = target.id;
+  }
+  /* 规模这一栏：判据全在 disc.js 的 setManualAssetValue（只收元、留空只撤手工那一折）。
+     放在 fetchStatus 之前，让后面的提示看到的就是刚落账的状态。 */
+  const avEl = $("pAsset");
+  if (avEl) {
+    const av = setManualAssetValue(target, avEl.value);
+    if (!av.changed && av.why) return toast(av.why, 5000);
   }
   const st = fetchStatus(target);
   UI.queriedNav = null; UI.editProdId = "";
@@ -2809,6 +2835,7 @@ function renderProdDetail() {
         ${p.prodCode ? `<i>产品代码 <b>${esc(p.prodCode)}</b></i>` : ""}
         ${p.riskLevel ? `<i>风险等级 <b>${esc(p.riskLevel)}</b></i>` : ""}
         ${p.estDate ? `<i>成立日 <b>${esc(p.estDate)}</b></i>` : ""}
+        ${assetValueText(p) ? `<i>资产净值 <b>${esc(assetValueText(p))}</b></i>` : ""}
       </div>
     </div>
     ${src ? `<div class="tip" style="margin-top:8px">
@@ -3763,8 +3790,12 @@ function manStatusHtml() {
     /* 登记编码同样单独一行：补齐的是聚合源的查询键，缺它时症状是「抓不到净值」，
        病因和净值并不是一回事，合在一起说就会指错地方。 */
     const regLine = m.reg ? `<br>登记编码：${esc(m.reg)}` : "";
+    /* 规模同样单独一行，而且这一行里**只有日期没有金额**：
+       「结论文本里不写钱」是 v74/v75 立的口径，抓取状态属于结论那一侧，
+       数字要看就去详情页那一栏（那里是数据展示，不是结论）。 */
+    const assetLine = m.asset ? `<br>资产净值：${esc(m.asset)}` : "";
     return `<div class="note g"><b>✅ ${what}成功</b>
-      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}${ruleLine}${regLine}</div>${clear}</div>`;
+      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}${ruleLine}${regLine}${assetLine}</div>${clear}</div>`;
   }
   if (m.state === "fail")
     return `<div class="note"><b>❌ ${what}失败</b>${m.conclusion ? `（云端结论：${esc(m.conclusion)}）` : ""}
@@ -4562,7 +4593,8 @@ async function nativeFetchAll(forceExtra) {
   if (btn) { btn.disabled = true; btn.textContent = "本机抓取中…"; }
 
   let added = 0, fail = 0, last = "";
-  const fails = [], srcMap = {}, fetchedNavs = {}, ruleNotes = [], regNotes = [];
+  const fails = [], srcMap = {}, fetchedNavs = {}, ruleNotes = [], regNotes = [], assetNotes = [];
+  let assetChanged = false;
   const runOne = async p => {
     /* 已经有今天的净值就没必要再问秒讯，进一步减少请求 */
     const l0 = latestNav(p);
@@ -4586,6 +4618,15 @@ async function nativeFetchAll(forceExtra) {
         p2.navHistory = p2.navHistory || {};
         Object.assign(p2.navHistory, navs);
         if (r.meta) for (const k in r.meta) if (!p2[k] && r.meta[k]) p2[k] = r.meta[k];
+        /* 资产净值（规模）：判据全在 disc.js 的 applyAssetValue（手工值优先、
+           披露日新者胜、没披露不清空、类别对不上只留理由），这里只负责起那一趟。
+           它**不计入 fail**：净值拿到了就是拿到了，规模空着是另一件事（v84 的
+           三类口径同源 —— 别让「没补上规模」长得像「抓取失败」）。 */
+        if (r.assetValue) {
+          const av = applyAssetValue(p2, r.assetValue);
+          if (av.why) assetNotes.push(prodLabel(p2) + "：" + av.why);
+          if (av.changed) assetChanged = true;
+        }
         added += n;
         saveLocal(); renderHome(); renderProd();
       }
@@ -4661,6 +4702,14 @@ async function nativeFetchAll(forceExtra) {
     MANUAL.reg = regShown.length
       ? regShown.join(" ｜ ") + (regNotes.length - regShown.length > 0
         ? ` ｜ 另有 ${regNotes.length - regShown.length} 只没逐条列出，补齐的编码就写在该产品的「登记编码」栏` : "")
+      : "";
+    /* 资产净值那一行单独说：补齐没补齐与净值拿到没是两件事（v84 三类口径同源）。
+       「已补齐」这种顺利的一折不占版面，只在真出事（类别对不上/单位/没披露）时点名。 */
+    const assetHard = l => /对不上|没披露|不猜单位|没有产品代码|手工值/.test(l);
+    const assetShown = assetNotes.filter(assetHard).concat(assetNotes.filter(l => !assetHard(l))).slice(0, 3);
+    MANUAL.asset = assetShown.length
+      ? assetShown.join(" ｜ ") + (assetNotes.length - assetShown.length > 0
+        ? ` ｜ 另有 ${assetNotes.length - assetShown.length} 只没逐条列出，规模写在各产品详情页那一栏` : "")
       : "";
     saveManual(); renderManBox();
     /* 本机抓取也写一份与云端相同结构的 lastFetch：

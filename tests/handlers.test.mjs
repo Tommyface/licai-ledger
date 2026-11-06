@@ -126,11 +126,52 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
   assert.match(br, /code: regCodeOf\(p\)/, "看板按 Z 编码搜不到只填了别名的产品");
 });
 
-test("APP_VER 升到 v86 且 SHELL 不漏文件", () => {
+test("APP_VER 升到 v87 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v86"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v86"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v87"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v87"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }
+});
+
+/* ── 资产净值（规模）v87：接线测试 ─────────────────────────────────────────
+   判据在 js/core/disc.js 里已经有口径测试了；这里只盯「页面真的用了它」——
+   上一轮（v3.3）就是靠这类逐点断言才把「测试全绿但页面没接线」那种假绿抓出来。 */
+test("规模这一栏：抓取回写、表单初值、详情展示三处都真的走 disc.js 的判据", () => {
+  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue\s*\} from "\.\/js\/core\/disc\.js"/);
+  assert.ok(imp, "四个函数必须从 disc.js 导入，不许在 app.js 里另写一套");
+
+  /* ① 抓取回写：必须在净值入账那一段里，且不计入 fail */
+  const all = body(app, "nativeFetchAll");
+  assert.ok(all.includes("applyAssetValue(p2, r.assetValue)"), "本机抓取要真的把规模落账");
+  /* 上面那句只盯字符串 —— 把守卫改成 if (false && r.assetValue) 照样全绿，
+     而那一折就永远不会落账。所以这里钉的是「结构」：调用必须直接挂在
+     r.assetValue 这个条件下面，中间不许插任何常量假守卫。 */
+  assert.match(all, /if \(r\.assetValue\) \{\s*\n\s*const av = applyAssetValue\(p2, r\.assetValue\);/,
+    "回写必须挂在 if (r.assetValue) 里，条件一旦被改成恒假（或整段注释掉）就是没接线");
+  assert.doesNotMatch(all, /if \(false\b/, "函数里不该有恒假分支，那是「代码在、事没做」的典型形状");
+  assert.ok(/assetNotes/.test(all) && /MANUAL\.asset/.test(all), "补齐结果要有单独一行归口，别混进净值那句");
+  assert.doesNotMatch(all.slice(all.indexOf("applyAssetValue"), all.indexOf("applyAssetValue") + 400),
+    /fails\.push/, "规模没补齐不许被说成抓取失败（v84 三类口径同源）");
+
+  /* ② 表单初值：只能回填手工那一折，抓取写的那一折留在提示里 */
+  const form = body(app, "assetFormValue");
+  assert.ok(/assetValueOf\(p\)/.test(form) && /av\.manual/.test(form),
+    "输入框初值必须只认 manual 那一折，否则用户清空输入框会连带抹掉云端值");
+
+  /* ③ 详情展示：走唯一那份 assetValueText，不许在页面里自己除 1e8 */
+  const det = body(app, "renderProdDetail");
+  assert.ok(/assetValueText\(p\)/.test(det), "详情页那一栏要用统一展示函数");
+  assert.doesNotMatch(app, /assetValue[\s\S]{0,40}\/\s*1e8/, "换算只许写在 disc.js 的 assetValueText 里");
+});
+
+test("规模是钱：结论文本（体检卡 / 换仓建议）里一个都不许引用它", () => {
+  for (const fn of ["adviceCard", "switchCard", "manStatusHtml"]) {
+    const b = body(app, fn);
+    assert.doesNotMatch(b, /assetValueText|assetValueOf/, `${fn} 里不许出现规模：结论文本里不写钱`);
+  }
+  /* 抓取状态那一行只许出现「披露日」，金额数字不进结论 */
+  const tip = app.match(/const assetLine = [\s\S]{0,120}/);
+  assert.ok(tip && /m\.asset/.test(tip[0]), "抓取框要有独立一行");
 });
