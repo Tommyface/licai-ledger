@@ -648,7 +648,10 @@ function assetViaLabel(av) {
   if (av.manual) return "手工";
   const via = str(av.via);
   if (!via) return "未知";
-  return via === "chinawealth" ? "中国理财网信披平台·逐日净值表 astNetVal" : via;
+  if (via === "chinawealth") return "中国理财网信披平台·逐日净值表 astNetVal";
+  /* v92：发行机构官网直连源也回带当前值，同样写全到「渠道 + 披露粒度 + 字段名」。
+     与 assetHistoryViaLabel 同一套文案，出处只在 disc.js 这一处定义。 */
+  return assetHistoryViaLabel(via);
 }
 
 /**
@@ -667,6 +670,79 @@ export function assetValueShort(p) {
   const av = assetValueOf(p);
   if (!av || !isAssetNum(av.v)) return "";
   return assetAmount(Number(av.v), true);
+}
+
+/* ── v92：逐日资产净值序列 ────────────────────────────────────────────────
+ * 与 assetValue（产品级单一当前值）是两件事：assetValue 给详情页那一栏，
+ * assetHistory 给历史净值表最右列逐行显示。后端 navsources/merge.py 有同构的
+ * 「写」判据（pick_asset_history / apply_asset_history），这里是前端的「读」判据
+ * 与 App 桥落账判据 —— 两边口径必须一致，改一处要同步改另一处。
+ * 金额换算一律复用上面唯一一份 assetAmount，页面/这里都不自己除 1e8。
+ * ─────────────────────────────────────────────────────────────────────── */
+
+/** 逐日序列的统一读法：全站只从这里读 assetHistory，别处不许再摸。 */
+export function assetHistoryOf(p) {
+  const h = p && p.assetHistory;
+  return h && typeof h === "object" && !Array.isArray(h) ? h : {};
+}
+
+/** 序列出处档位（官网优先、聚合源兜底）—— 与后端 asset_source_rank 同值。 */
+export function assetHistoryRank(via) {
+  return String(via || "") === "chinawealth" ? 0 : 1;
+}
+
+/** 序列出处的展示标签（铁律 #3：值后面跟着它从哪来）。 */
+export function assetHistoryViaLabel(via) {
+  const v = String(via || "");
+  if (!v) return "未知";
+  if (v === "chinawealth") return "中国理财网信披平台·逐日净值表 astNetVal";
+  if (v === "bob") return "北银理财官网·逐日净值表 ASSET_VAL";
+  return `发行机构官网·逐日资产净值（${v}）`;
+}
+
+/**
+ * 某一净值日期当天的资产净值（紧凑金额串）；没披露 ⇒ 空串（调用处画「—」）。
+ * 只认 >0 的有限数，0/null/字符串/脏日期一律当「不知道」，绝不显示 0 元。
+ */
+export function assetValueAt(p, date) {
+  const h = assetHistoryOf(p);
+  const d = String(date || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return "";
+  const v = h[d];
+  return isAssetNum(v) ? assetAmount(Number(v), true) : "";
+}
+
+/**
+ * 把桥/云端回传的逐日序列并进产品（就地改），与后端 apply_asset_history 同构。
+ * 整条序列单一出处、官网优先、已有日期不覆盖、内容不变不落盘 —— 四条口径一致。
+ * @returns {{changed:boolean, added:number}}
+ */
+export function applyAssetHistory(p, series, via) {
+  if (!p || typeof p !== "object" || !series || typeof series !== "object"
+      || Array.isArray(series)) return { changed: false, added: 0 };
+  const clean = {};
+  for (const d of Object.keys(series)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d) && isAssetNum(series[d])) clean[d] = Number(series[d]);
+  }
+  const v = String(via || "");
+  if (!v || !Object.keys(clean).length) return { changed: false, added: 0 };
+  const cur = assetHistoryOf(p);
+  const curVia = String(p.assetHistoryVia || "");
+  const nRank = assetHistoryRank(v), cRank = assetHistoryRank(curVia || v);
+  let merged;
+  if (nRank > cRank) merged = clean;                 // 官网来了 ⇒ 整条替换兜底源
+  else if (nRank < cRank) return { changed: false, added: 0 };  // 兜底源不许盖官网
+  else {
+    merged = Object.assign({}, cur);                // 同档：已有日期不覆盖
+    for (const d of Object.keys(clean)) if (!(d in merged)) merged[d] = clean[d];
+  }
+  const before = Object.keys(cur).length, after = Object.keys(merged).length;
+  const same = curVia === v && before === after
+    && Object.keys(cur).every(d => cur[d] === merged[d]);
+  if (same) return { changed: false, added: 0 };     // 内容不变 ⇒ 不落盘
+  p.assetHistory = merged;
+  p.assetHistoryVia = v;
+  return { changed: true, added: after - before };
 }
 
 /**

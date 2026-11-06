@@ -32,7 +32,8 @@ import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
   DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS,
   applyRulesFeeds, rulesFeedReg, regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
-  assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort } from "./js/core/disc.js";
+  assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,
+  assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -61,7 +62,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v91";
+const APP_VER = "v92";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2844,24 +2845,26 @@ function renderProdDetail() {
   /* 历史净值表：末 20 行。万份收益直接取 st.wan[i] —— 和上面那张卡片的「万份收益（最新）」
      是同一个数组的末位，不在这儿另算一遍（v68 那条「整段累计、不摊平」的口径只允许存在一处：navStats）。
      间隔 >1 个自然日的那一行在后面标出跨几天，免得被读成当日收益。 */
-  /* 历史净值表「资产净值」列（v90 · 口径 A）：账本里的规模是**产品级单一当前值**
-     （products[].assetValue 带披露日 date），不是按日序列 —— 理财网接口虽每个净值日期
-     都有 astNetVal，但落账只留最新一折。所以只在该披露日对应的那一行显示金额，其余行
-     一律「—」：不臆造历史规模，也不把同一个值铺满 20 行（那会被读成「每天规模都一样」）。
-     换算一律走 disc.js 的 assetValueShort / assetValueText，页面不自己除 1e8。 */
+  /* 历史净值表「资产净值」列（v92 · 逐日序列）：每行读 assetHistory[该日]——
+     发行机构官网逐日净值表自带的 ASSET_VAL（官网优先），或中国理财网信披平台逐日
+     astNetVal（聚合兜底）；整条序列单一出处，标在 assetHistoryVia。
+     没披露那天显示「—」，绝不拿相邻日期的值铺过去、也绝不臆造。换算一律走
+     disc.js 的 assetValueAt / assetValueText，页面不自己除 1e8。 */
+  const ahRec = assetHistoryOf(p);
+  const ahVia = String(p.assetHistoryVia || "");
+  const ahLabel = assetHistoryViaLabel(ahVia);
   const avRec = assetValueOf(p);
-  const avDate = avRec && avRec.date ? String(avRec.date) : "";
-  const avShort = assetValueShort(p);
   const avFull = assetValueText(p);
-  let avShown = false;
+  const avShort = assetValueShort(p);
+  let avShown = 0;
   const rows = [];
   for (let i = n - 1; i >= 0 && rows.length < 20; i--) {
     const chg = i > 0 ? (st.vals[i] - st.vals[i - 1]) / st.vals[i - 1] : null;
     const w = st.wan[i];
-    const hit = !!(avShort && avDate && st.dates[i] === avDate);
-    if (hit) avShown = true;
-    const assetCell = hit
-      ? `<b title="${esc(avFull)}">${esc(avShort)}</b>`
+    const dayVal = assetValueAt(p, st.dates[i]);
+    if (dayVal) avShown++;
+    const assetCell = dayVal
+      ? `<b title="${esc(st.dates[i])} 资产净值 ${esc(dayVal)}（来源：${esc(ahLabel)}）">${esc(dayVal)}</b>`
       : `<span class="muted">—</span>`;
     rows.push(`<tr>
       <td>${esc(st.dates[i].slice(5))}</td>
@@ -2872,14 +2875,16 @@ function renderProdDetail() {
       <td class="assetcol">${assetCell}</td>
     </tr>`);
   }
-  /* 这一列的口径说明放表格下方：为什么只有一行有钱、为什么整列是「—」。
-     被闸门拦下（份额类别对不上）的产品把理由原样说出来，不伪装成「没数据」。 */
-  const assetCap = avShort
-    ? (avShown
-        ? `资产净值 ${esc(avFull)}；只标在披露日那一行，其余「—」为当日无规模数据（产品当前规模，不是每日序列）。`
-        : `资产净值 ${esc(avFull)}；披露日 ${esc(avDate)} 不在最近 ${Math.min(20, n)} 条内，故本页各行为「—」。`)
+  /* 表格下方的口径说明：逐日披露、出处、为什么有些行是「—」。
+     旧账本/匠心这类没抓到序列的产品优雅降级为整列「—」，并把 why 原样说出来。 */
+  const hasSeries = Object.keys(ahRec).length > 0;
+  const assetCap = hasSeries
+    ? `资产净值为当日披露规模（逐日序列，来源：${esc(ahLabel)}）；本页 ${avShown} 行有值，`
+      + `「—」为当日未披露规模，不是 0 元。`
     : (avRec
-        ? `资产净值这一格暂时空着：${esc(avFull || "还不知道（这一格没写入）")}`
+        ? (avShort
+            ? `尚未抓到逐日资产净值序列，本页各行为「—」；当前规模 ${esc(avFull)} 见上方。`
+            : `资产净值这一格暂时空着：${esc(avFull || "还不知道（这一格没写入）")}`)
         : "资产净值：尚未披露规模，本页各行为「—」。");
 
   const chartHtml = !n
@@ -4684,6 +4689,13 @@ async function nativeFetchAll(forceExtra) {
       const av = applyAssetValue(p2, r.assetValue);
       if (av.why) assetNotes.push(prodLabel(p2) + "：" + av.why);
       if (av.changed) { assetChanged = true; saveLocal(); }
+    }
+    /* v92：逐日资产净值序列。判据全在 disc.js 的 applyAssetHistory（与云端
+       merge.apply_asset_history 同构：官网优先、已有不覆盖、内容不变不落盘），
+       这里只负责把原生侧回传的那一整条序列起那一趟。同样写在 ok/失败两支之外。 */
+    if (r && r.assetHistory) {
+      const ah = applyAssetHistory(p2, r.assetHistory, r.assetHistoryVia);
+      if (ah.changed) { assetChanged = true; saveLocal(); }
     }
     if (r && r.ok) {
       const navs = r.navs || {}, n = Object.keys(navs).length;

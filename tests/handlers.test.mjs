@@ -126,10 +126,10 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
   assert.match(br, /code: regCodeOf\(p\)/, "看板按 Z 编码搜不到只填了别名的产品");
 });
 
-test("APP_VER 升到 v91 且 SHELL 不漏文件", () => {
+test("APP_VER 升到 v92 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v91"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v91"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v92"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v92"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }
@@ -139,10 +139,10 @@ test("APP_VER 升到 v91 且 SHELL 不漏文件", () => {
    判据在 js/core/disc.js 里已经有口径测试了；这里只盯「页面真的用了它」——
    上一轮（v3.3）就是靠这类逐点断言才把「测试全绿但页面没接线」那种假绿抓出来。 */
 test("规模这一栏：抓取回写、表单初值、详情展示三处都真的走 disc.js 的判据", () => {
-  /* v90：多了 assetValueShort（历史净值表紧凑金额），仍是同一份 disc.js 判据，
-     不许在 app.js 里另写一套换算。 */
-  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort\s*\} from "\.\/js\/core\/disc\.js"/);
-  assert.ok(imp, "五个函数必须从 disc.js 导入，不许在 app.js 里另写一套");
+  /* v90 多了 assetValueShort；v92 再多半套逐日序列读/落账函数 —— 仍是同一份
+     disc.js 判据，不许在 app.js 里另写一套换算。 */
+  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,\s*\n\s*assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory\s*\} from "\.\/js\/core\/disc\.js"/);
+  assert.ok(imp, "九个函数必须从 disc.js 导入，不许在 app.js 里另写一套");
 
   /* ① 抓取回写：判据跑在 disc.js，这里只盯接线与它所在的位置 */
   const all = body(app, "nativeFetchAll");
@@ -180,6 +180,20 @@ test("规模这一栏：抓取回写、表单初值、详情展示三处都真�
   const det = body(app, "renderProdDetail");
   assert.ok(/assetValueText\(p\)/.test(det), "详情页那一栏要用统一展示函数");
   assert.doesNotMatch(app, /assetValue[\s\S]{0,40}\/\s*1e8/, "换算只许写在 disc.js 的 assetValueText 里");
+});
+
+test("v92 逐日序列：App 桥真的把回包落账，且写在 ok/失败两支之外", () => {
+  const all = body(app, "nativeFetchAll");
+  assert.match(all, /if \(r && r\.assetHistory\) \{\s*\n\s*const ah = applyAssetHistory\(p2, r\.assetHistory, r\.assetHistoryVia\);/,
+    "逐日序列必须用 disc.js 的同构判据落账，且直接挂在 r.assetHistory 条件下");
+  assert.ok(all.indexOf("const ah = applyAssetHistory(") < all.indexOf("if (r && r.ok)"),
+    "序列落账同样要在两支之外：被闸门拦下净值的那一趟也可能带回序列");
+  assert.match(all, /if \(ah\.changed\) \{ assetChanged = true; saveLocal\(\); \}/,
+    "序列变了要存盘，否则这一轮抓到的逐日规模白抓");
+  /* 表格真的逐行读了序列，不是只把函数 import 进来摆着 */
+  const det = body(app, "renderProdDetail");
+  assert.ok(/assetValueAt\(p, st\.dates\[i\]\)/.test(det), "历史净值表要按行日期读逐日序列");
+  assert.ok(/assetHistoryOf\(p\)/.test(det), "序列读取统一走 assetHistoryOf");
 });
 
 test("规模是钱：结论文本（体检卡 / 换仓建议）里一个都不许引用它", () => {

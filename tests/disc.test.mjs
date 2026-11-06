@@ -16,6 +16,7 @@ import {
   applyRulesFeed, applyRulesFeeds, rulesFeedReg,
   regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
   assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,
+  assetHistoryOf, assetValueAt, assetHistoryViaLabel, assetHistoryRank, applyAssetHistory,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -204,8 +205,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v91"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v91"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v92"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v92"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -903,6 +904,22 @@ test("v91 出处写全：信披平台 + 逐日净值表 + astNetVal，且不带�
   assert.doesNotMatch(assetValueText(hand), /信披平台|astNetVal/);
 });
 
+/* v92：官网直连源也回带当前值，出处标签同样写全，且与逐日序列同源同文案 */
+test("v92 assetValueText：官网来源写全为渠道+粒度+字段名，手工值不受影响", () => {
+  const bob = { assetValue: { v: 3159486066.82, date: "2026-11-05",
+    sub: "YJ01251204A", via: "bob" } };
+  assert.match(assetValueText(bob),
+    /^31\.59 亿元（披露日 2026-11-05，来源：北银理财官网·逐日净值表 ASSET_VAL）$/);
+  /* 与逐日序列的出处文案同源：同一份 assetHistoryViaLabel，不许两处各写一套 */
+  assert.ok(assetValueText(bob).includes(assetHistoryViaLabel("bob")));
+  const cw = { assetValue: AV(2962513986.74, "2026-11-04") };
+  assert.match(assetValueText(cw), /中国理财网信披平台·逐日净值表 astNetVal/,
+    "v91 写全的聚合源出处不许被这次改动带偏");
+  const hand = { assetValue: { v: 1e8, date: "", via: "手工", manual: true } };
+  assert.match(assetValueText(hand), /来源：手工/);
+  assert.doesNotMatch(assetValueText(hand), /ASSET_VAL|astNetVal|信披平台/);
+});
+
 test("assetValueText：空着就说清为什么空着，绝不显示 0 元", () => {
   const why = { assetValue: { v: null, date: "", via: "chinawealth", why: "类别对不上：O≠G" } };
   assert.equal(assetValueText(why), "类别对不上：O≠G");
@@ -925,6 +942,87 @@ test("assetValueShort：紧凑金额与完整串同源换算，空值返回空�
   assert.equal(assetValueShort({}), "", "没有这一折 ⇒ 空串（表格画「—」）");
   assert.equal(assetValueShort({ assetValue: { v: 0 } }), "", "0 不当成有效规模");
   assert.equal(assetValueShort({ assetValue: { v: "2962513986" } }), "", "字符串不当成有效规模");
+});
+
+/* ── v92：逐日资产净值序列（读判据 + 前端同构落账）—— 与后端 merge.py 同口径 ── */
+const AH = () => ({
+  assetHistory: {
+    "2026-05-27": 2000278.89,
+    "2026-11-03": 4774840538.91,
+    "2026-11-04": 2962513986.74,
+    "2026-11-05": 3159486066.82,
+  },
+  assetHistoryVia: "bob",
+});
+
+test("assetHistoryOf / assetValueAt：按日期逐格取，没有就是空串，绝不显示 0 元", () => {
+  const p = AH();
+  assert.equal(Object.keys(assetHistoryOf(p)).length, 4);
+  assert.equal(assetValueAt(p, "2026-11-04"), "29.63亿", "≥1 亿说亿档");
+  assert.equal(assetValueAt(p, "2026-05-27"), "200.03万", "不足 1 亿说万档（同源换算：200.03 万元）");
+  assert.equal(assetValueAt(p, "2026-11-02"), "", "没披露那天 ⇒ 空串（表格画「—」）");
+  assert.equal(assetValueAt(p, "bad"), "", "脏日期 ⇒ 空串");
+  assert.equal(assetValueAt({}, "2026-11-04"), "", "旧账本没有序列 ⇒ 空串，优雅降级");
+  /* 0/null/字符串/负数/inf 都不是有效规模 */
+  for (const bad of [0, null, "2962513986", -1, Infinity, NaN, true]) {
+    const q = { assetHistory: { "2026-11-04": bad } };
+    assert.equal(assetValueAt(q, "2026-11-04"), "", `${String(bad)} 不许当成规模`);
+  }
+  assert.deepEqual(assetHistoryOf({ assetHistory: [1, 2] }), {}, "数组形状不当序列");
+});
+
+test("assetHistoryViaLabel / assetHistoryRank：出处写全，官网优先于聚合兜底", () => {
+  assert.match(assetHistoryViaLabel("bob"), /北银理财官网.*ASSET_VAL/, "官网逐日表要带可回查字段名");
+  assert.match(assetHistoryViaLabel("chinawealth"), /中国理财网信披平台.*astNetVal/);
+  assert.equal(assetHistoryViaLabel(""), "未知");
+  assert.ok(assetHistoryRank("bob") > assetHistoryRank("chinawealth"), "官网档位更高");
+  assert.equal(assetHistoryRank(""), assetHistoryRank("unknown"), "未知来源按兜底档");
+});
+
+test("applyAssetHistory：首次写入标出处，同档补新日期不覆盖已有", () => {
+  const p = {};
+  assert.deepEqual(applyAssetHistory(p, AH().assetHistory, "bob"), { changed: true, added: 4 });
+  assert.equal(p.assetHistoryVia, "bob");
+  const again = applyAssetHistory(p, { "2026-11-04": 999, "2026-11-06": 7 }, "bob");
+  assert.equal(again.added, 1);
+  assert.equal(p.assetHistory["2026-11-04"], 2962513986.74, "已有日期不覆盖");
+  assert.equal(p.assetHistory["2026-11-06"], 7, "新日期补进来");
+});
+
+test("applyAssetHistory：官网整条替换聚合源，聚合源不许盖官网", () => {
+  const p = { assetHistory: { "2026-11-04": 1 }, assetHistoryVia: "chinawealth" };
+  applyAssetHistory(p, AH().assetHistory, "bob");
+  assert.equal(p.assetHistoryVia, "bob");
+  assert.equal(Object.keys(p.assetHistory).length, 4);
+  const before = JSON.stringify(p);
+  assert.deepEqual(applyAssetHistory(p, { "2026-11-09": 1 }, "chinawealth"),
+    { changed: false, added: 0 }, "兜底源不许覆盖已有官网序列");
+  assert.equal(JSON.stringify(p), before);
+});
+
+test("applyAssetHistory：内容不变不落盘；空序列/官网升级带空序列都不清空", () => {
+  const p = AH();
+  const before = JSON.stringify(p);
+  assert.deepEqual(applyAssetHistory(p, AH().assetHistory, "bob"),
+    { changed: false, added: 0 }, "内容逐字节不变 ⇒ 不落盘（每天 3 跑不刷提交）");
+  assert.equal(JSON.stringify(p), before);
+  for (const bad of [{}, { "2026-11-04": 0 }, { bad: 1 }, null]) {
+    assert.deepEqual(applyAssetHistory(p, bad, "bob"), { changed: false, added: 0 });
+  }
+  assert.equal(JSON.stringify(p), before, "空/脏序列不许抹掉已有值");
+  /* 官网升级但序列为空：merged=clean={} 会清空 —— 必须被 not clean 短路挡住 */
+  const q = { assetHistory: { "2026-11-04": 1 }, assetHistoryVia: "chinawealth" };
+  assert.deepEqual(applyAssetHistory(q, {}, "bob"), { changed: false, added: 0 });
+  assert.equal(q.assetHistory["2026-11-04"], 1);
+  assert.equal(q.assetHistoryVia, "chinawealth", "连出处也不许跟着空序列漂移");
+});
+
+test("逐日序列与单一当前值互不干扰：assetValue 仍是详情页那一栏", () => {
+  const p = Object.assign({ assetValue: { v: 2962513986.74, date: "2026-11-04",
+    sub: "YJ01251204A", via: "chinawealth" } }, AH());
+  assert.equal(assetValueShort(p), "29.63亿", "详情页当前值读 assetValue");
+  assert.equal(assetValueAt(p, "2026-11-05"), "31.59亿", "历史表读 assetHistory（最新可到 11-05）");
+  assert.equal(assetValueAt(p, "2026-11-06"), "", "序列里没有的日子就是空");
 });
 
 test("setManualAssetValue：只收「元」为单位的正数，带亿/万的一律拒收并说清单位", () => {
