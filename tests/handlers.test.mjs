@@ -126,10 +126,10 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
   assert.match(br, /code: regCodeOf\(p\)/, "看板按 Z 编码搜不到只填了别名的产品");
 });
 
-test("APP_VER 升到 v92 且 SHELL 不漏文件", () => {
+test("APP_VER 升到 v93 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v92"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v92"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v93"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v93"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }

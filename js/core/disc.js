@@ -619,7 +619,16 @@ export function applyAssetValue(p, rec) {
 
   if (isAssetNum(rec.v)) {
     const nd = str(rec.date);
-    if (isAssetNum(cur.v) && str(cur.date) >= nd) return { changed: false, why: "" };
+    /* v93：与后端 merge.apply_asset_value 同构，复用序列判据 assetHistoryRank 这把尺子。
+       官网档（bob 等）的已有值不许被聚合兜底档（chinawealth）盖掉，否则云端/手机桥
+       每次只跑聚合源就会把详情页出处从「北银理财官网」改回「中国理财网」；
+       出处升级则即使同日也允许整条换成官网值。 */
+    const nRank = assetHistoryRank(rec.via);
+    if (isAssetNum(cur.v)) {
+      const cRank = assetHistoryRank(cur.via);
+      if (nRank < cRank) return { changed: false, why: "" };
+      if (nRank === cRank && str(cur.date) >= nd) return { changed: false, why: "" };
+    }
     p.assetValue = { v: Number(rec.v), date: nd, sub: str(rec.sub), via: str(rec.via) };
     return { changed: true, why: `已补齐资产净值（披露日 ${nd || "-"}）` };
   }

@@ -205,8 +205,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v92"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v92"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v93"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v93"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -867,6 +867,52 @@ test("applyAssetValue：rec 缺失或非对象时什么都不做", () => {
     assert.equal(applyAssetValue(p, got).changed, false);
   }
   assert.equal(p.assetValue.v, 1);
+});
+
+/* ── v93：当前值判据与序列判据同构，官网档不许被聚合兜底档回退 ──────────
+   2026-11-06 12:38 云端 `f0152f9eeda2` 只把诚享29 的 assetValue.via 从 bob
+   改回 chinawealth（值/日期/sub 一个没变）——根因是当前值只比披露日、不比出处。
+   App 桥与前端读判据必须与后端 merge.apply_asset_value 同一把尺子。 */
+test("v93 applyAssetValue：聚合兜底源不许盖掉已有官网值，日期更新也不行", () => {
+  const p = { assetValue: AV(3159486066.82, "2026-11-05", { via: "bob" }) };
+  const r = applyAssetValue(p, AV(3159486066.82, "2026-11-06"));
+  assert.equal(r.changed, false);
+  assert.equal(p.assetValue.via, "bob");
+  assert.equal(p.assetValue.date, "2026-11-05");
+});
+
+test("v93 回归：云端只改 via 的那笔提交现在落不进去", () => {
+  const before = AV(3159486066.82, "2026-11-05", { via: "bob" });
+  const p = { assetValue: Object.assign({}, before) };
+  assert.equal(applyAssetValue(p, AV(3159486066.82, "2026-11-05")).changed, false);
+  assert.deepEqual(p.assetValue, before);
+});
+
+test("v93 applyAssetValue：出处升级即使同日也允许整条换成官网值", () => {
+  const p = { assetValue: AV(628488431.41, "2026-11-05") };
+  const r = applyAssetValue(p, AV(841089969.95, "2026-11-05", { via: "bob" }));
+  assert.equal(r.changed, true);
+  assert.equal(p.assetValue.via, "bob");
+  assert.equal(p.assetValue.v, 841089969.95);
+});
+
+test("v93 applyAssetValue：同档仍按披露日，官网档之间日期新者胜", () => {
+  const p = { assetValue: AV(1, "2026-11-03", { via: "bob" }) };
+  assert.equal(applyAssetValue(p, AV(2, "2026-11-05", { via: "bob" })).changed, true);
+  assert.equal(p.assetValue.v, 2);
+  assert.equal(applyAssetValue(p, AV(3, "2026-11-05", { via: "bob" })).changed, false);
+});
+
+test("v93 判据唯一性：当前值与逐日序列共用 assetHistoryRank，不许另写一套", () => {
+  const s = read("js/core/disc.js");
+  const start = s.indexOf("export function applyAssetValue");
+  const end = s.indexOf("export function assetValueShort");
+  assert.ok(start > 0 && end > start, "要能从源码里切出 applyAssetValue 这一段");
+  const body = s.slice(start, end);
+  assert.match(body, /const nRank = assetHistoryRank\(rec\.via\)/);
+  assert.match(body, /const cRank = assetHistoryRank\(cur\.via\)/);
+  assert.match(body, /if \(nRank < cRank\) return \{ changed: false, why: "" \}/);
+  assert.match(body, /nRank === cRank && str\(cur\.date\) >= nd/);
 });
 
 test("assetValueOf：只认带 v 的对象形状，别的形状一律「不知道」", () => {
