@@ -309,6 +309,6 @@ test("陈旧措辞必须跟着上线的行为改掉（v73 那把刀延伸到这�
 test("离线清单里有 switchadv.js，版本跟着升（漏一个模块就是离线整页空白）", () => {
   const sw_js = read("sw.js");
   assert.ok(sw_js.includes('"./js/domain/switchadv.js"'), "switchadv.js 没进 sw.js 的 SHELL");
-  assert.ok(sw_js.includes('const CACHE = "licai-ledger-v88"'), "新增模块 = 外壳变了，CACHE 必须跟着升");
-  assert.ok(read("app.js").includes('const APP_VER = "v88"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw_js.includes('const CACHE = "licai-ledger-v87"'), "新增模块 = 外壳变了，CACHE 必须跟着升");
+  assert.ok(read("app.js").includes('const APP_VER = "v87"'), "APP_VER 要与 CACHE 同值");
 });

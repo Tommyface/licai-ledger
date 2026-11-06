@@ -15,7 +15,6 @@ import {
   discSourceOk, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS, DISC_GAP_LABEL,
   applyRulesFeed, applyRulesFeeds, rulesFeedReg,
   regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
-  assetValueOf, applyAssetValue, assetValueText, setManualAssetValue,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -204,8 +203,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v88"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v88"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v87"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v87"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -526,6 +525,81 @@ test("applyRulesFeed：无编码 / feed 无条目 / 坏形状都不炸且统计�
   assert.equal(arr.matched, 0, "products 写成数组也不能当字典用");
 });
 
+/* ============================================================
+   定期报告·持有资产实况（holdings）
+   ------------------------------------------------------------
+   holdings 是独立披露文件（定期投资报告），有它自己的 source，
+   **不与销售文件的 source 连坐**。bob 这类发行方没有销售文件但有定期报告时，
+   holdings 应当照常入账。守的规矩与五字段同源：
+     · 出处合格且本地没有时才补（手工值优先）；
+     · 出处不齐（holdings 自己的 source 不齐）一条都不写；
+     · 两块都空（assetClasses + topHoldings 都空）不写；
+     · 幂等：第二遍不再写账。
+   ============================================================ */
+
+const HOLDINGS_SRC = { url: "https://www.beijingbobwealth.com.cn/upload/pdf/dqgg.pdf",
+  publishedAt: "2026-09-30", tier: "official" };
+const HOLDINGS = () => ({
+  asOf: "2026-09-30", leveragePct: 101.42, custodian: "北京银行股份有限公司",
+  assetClasses: [{ category: "现金及银行存款", beforePct: 9.24, afterPct: 16.34 },
+    { category: "债券", beforePct: 0.0, afterPct: 37.49 },
+    { category: "资产管理产品", beforePct: 74.83, afterPct: 0.0 }],
+  topHoldings: [{ name: "现金及活期存款", amount: 695646678.82, pct: 9.24 }],
+  source: Object.assign({}, HOLDINGS_SRC),
+});
+
+test("applyRulesFeed：bob 场景——销售文件无出处但 holdings 有出处，holdings 照常落账", () => {
+  const e = fEntry({ source: null,
+    rules: { lockDays: null, openRule: "", feeRedeem: [], assets: [], investScope: "" },
+    rawQuote: {}, gaps: ["lockDays", "openRule", "feeRedeem", "assets", "investScope", "source"],
+    holdings: HOLDINGS() });
+  const d = fData(fProd());
+  const st = applyRulesFeed(d, fFeed({ [REG]: e }));
+  assert.equal(st.badSource, 0, "holdings 有独立出处，不该被销售文件出处不齐连坐");
+  assert.equal(st.holdings, 1, "holdings 落账计数");
+  const x = normDisc(d.products[0].disc);
+  assert.equal(x.holdings.asOf, "2026-09-30");
+  assert.equal(x.holdings.assetClasses.length, 3);
+  assert.equal(x.holdings.source.url, HOLDINGS_SRC.url);
+});
+
+test("applyRulesFeed：holdings 手工值优先——本地已有 holdings 时不覆盖", () => {
+  const existing = { asOf: "2026-06-30", leveragePct: 100.0, custodian: null,
+    assetClasses: [{ category: "现金及银行存款", beforePct: 50.0, afterPct: 50.0 }],
+    topHoldings: null, source: Object.assign({}, HOLDINGS_SRC, { publishedAt: "2026-06-30" }) };
+  const d = fData(fProd({ disc: { status: "manual", lockDays: null, openRule: "",
+    feeRedeem: [], assets: [], investScope: "", source: null, holdings: existing } }));
+  const st = applyRulesFeed(d, fFeed({ [REG]: fEntry({ holdings: HOLDINGS() }) }));
+  assert.equal(st.holdings, 0, "holdings 已有值，不该再写");
+  assert.equal(normDisc(d.products[0].disc).holdings.asOf, "2026-06-30", "手工 holdings 不被覆盖");
+});
+
+test("applyRulesFeed：holdings 自身出处不齐（source=null）时一条都不写", () => {
+  const e = fEntry({ holdings: { asOf: null, assetClasses: null, topHoldings: null,
+    leveragePct: null, custodian: null, source: null } });
+  const d = fData(fProd());
+  const st = applyRulesFeed(d, fFeed({ [REG]: e }));
+  const x = normDisc(d.products[0].disc);
+  assert.equal(x.holdings, null, "holdings 出处不齐不许落账");
+});
+
+test("applyRulesFeed：holdings 两块都空（assetClasses + topHoldings 都空）不写", () => {
+  const e = fEntry({ holdings: { asOf: "2026-09-30", assetClasses: [], topHoldings: [],
+    leveragePct: 101.42, custodian: null, source: Object.assign({}, HOLDINGS_SRC) } });
+  const d = fData(fProd());
+  applyRulesFeed(d, fFeed({ [REG]: e }));
+  assert.equal(normDisc(d.products[0].disc).holdings, null, "两块都空的 holdings 不许落账");
+});
+
+test("applyRulesFeed：holdings 幂等——第二遍不再写账", () => {
+  const d = fData(fProd());
+  applyRulesFeed(d, fFeed({ [REG]: fEntry({ holdings: HOLDINGS() }) }));
+  const snap = JSON.stringify(d);
+  const st2 = applyRulesFeed(d, fFeed({ [REG]: fEntry({ holdings: HOLDINGS() }) }));
+  assert.equal(st2.holdings, 0, "第二遍 holdings 已经写了，不该再写");
+  assert.equal(JSON.stringify(d), snap, "账本不变（幂等）");
+});
+
 test("v81 接线：feed 落账排在唯一一次 saveLocal 之前、摘录不写 DATA、卡片有折叠入口", () => {
   const app = read("app.js");
   const iFeed = app.indexOf("fetchRulesFeed(RULES_FEED_PATH)");
@@ -715,171 +789,4 @@ test("applyRegCode：被拦/没查到时把原因原样交出去，不许编一�
   const empty = applyRegCode(p, {});
   assert.equal(empty.changed, false);
   assert.equal(p.code, undefined);
-});
-
-/* ============================================================================
-   资产净值（产品规模）—— 2026-11-06 所有者提的「每只产品新增一个字段」。
-   判据与私有仓 navsources/merge.py 的 apply_asset_value 同构（一份 JS、一份 Python，
-   改一边必须改另一边）；这里管的是**本机写入与展示**那一半：
-     · 手工值优先（用户填过就不再自动动，连「为什么没写」的记录都不许顶掉它）；
-     · 披露日新者胜、同日不重刷（带时间戳或同日也写 ⇒ 每天 3 跑刷无意义提交）；
-     · null 是不知道、0 是知道且为零（0/负数/NaN/非数都不算值，且不清空已知值）；
-     · 展示串里必带出处与披露日（铁律 #3），并且**不进任何结论文本**。
-   ========================================================================== */
-const AV = (v, date, extra) => Object.assign({ v, date, sub: "YJ01251204A", via: "chinawealth" }, extra || {});
-
-test("applyAssetValue：首次写入带回话，且形状里没有第三方的时间戳", () => {
-  const p = {};
-  const r = applyAssetValue(p, AV(2962513986.74, "2026-11-05"));
-  assert.equal(r.changed, true);
-  assert.equal(p.assetValue.v, 2962513986.74);
-  assert.match(r.why, /2026-11-05/);
-  assert.deepEqual(Object.keys(p.assetValue).sort(), ["date", "sub", "v", "via"]);
-});
-
-test("applyAssetValue：手工值优先，抓取不再覆盖（也不清空）", () => {
-  const p = { assetValue: { v: 123, date: "2026-10-01", manual: true, via: "手工" } };
-  const r = applyAssetValue(p, AV(999, "2026-11-05"));
-  assert.equal(r.changed, false);
-  assert.equal(p.assetValue.v, 123);
-  assert.match(r.why, /手工/);
-});
-
-test("applyAssetValue：手工值也不被「为什么没写」的记录顶掉", () => {
-  const p = { assetValue: { v: 123, date: "2026-10-01", manual: true, via: "手工" } };
-  assert.equal(applyAssetValue(p, { v: null, why: "类别对不上" }).changed, false);
-  assert.equal(p.assetValue.v, 123);
-});
-
-test("applyAssetValue：披露日新者胜，同日与更旧的一折都不重刷", () => {
-  const p = { assetValue: AV(1, "2026-11-03") };
-  assert.equal(applyAssetValue(p, AV(2, "2026-11-05")).changed, true);
-  assert.equal(p.assetValue.v, 2);
-  assert.equal(applyAssetValue(p, AV(3, "2026-11-05")).changed, false, "同日不许重刷");
-  assert.equal(p.assetValue.v, 2);
-  assert.equal(applyAssetValue(p, AV(4, "2026-11-01")).changed, false, "更旧的不许盖更新的");
-  assert.equal(p.assetValue.v, 2);
-});
-
-test("applyAssetValue：某次没披露不清空已知值（null 是不知道）", () => {
-  const p = { assetValue: AV(5, "2026-11-04") };
-  assert.equal(applyAssetValue(p, { v: null, why: "这一行没披露资产净值" }).changed, false);
-  assert.equal(p.assetValue.v, 5);
-});
-
-test("applyAssetValue：0 / 负数 / NaN / 非数都不算值，也不算理由", () => {
-  for (const bad of [0, -1, NaN, Infinity, "abc", "", null, undefined]) {
-    const p = {};
-    const r = applyAssetValue(p, { v: bad, date: "2026-11-05", via: "chinawealth" });
-    assert.equal(r.changed, false, `v=${bad} 不该被当成规模写进账本`);
-    assert.equal(p.assetValue, undefined, "连记录都不该留下：没有 why 就是「没这回事」");
-  }
-});
-
-test("applyAssetValue：没有值但有理由时把「为什么空着」记下来，同一条理由不反复改", () => {
-  const p = {};
-  const r = applyAssetValue(p, { v: null, date: "2026-11-05", sub: "NYJXLD1409G", via: "chinawealth", why: "类别对不上：披露的是 O" });
-  assert.equal(r.changed, true);
-  assert.equal(p.assetValue.v, null);
-  assert.match(p.assetValue.why, /类别对不上/);
-  assert.equal(applyAssetValue(p, { v: null, date: "2026-11-05", sub: "NYJXLD1409G", via: "chinawealth", why: "类别对不上：披露的是 O" }).changed, false);
-});
-
-test("applyAssetValue：rec 缺失或非对象时什么都不做", () => {
-  const p = { assetValue: AV(1, "2026-11-01") };
-  for (const got of [null, undefined, "x", 42, []]) {
-    assert.equal(applyAssetValue(p, got).changed, false);
-  }
-  assert.equal(p.assetValue.v, 1);
-});
-
-test("assetValueOf：只认带 v 的对象形状，别的形状一律「不知道」", () => {
-  assert.equal(assetValueOf(null), null);
-  assert.equal(assetValueOf({}), null);
-  assert.equal(assetValueOf({ assetValue: 123 }), null);
-  assert.equal(assetValueOf({ assetValue: "123" }), null);
-  assert.equal(assetValueOf({ assetValue: { date: "2026-11-05" } }).date, "2026-11-05",
-    "没有 v 也算一折记录（那是「为什么空着」那一支）");
-});
-
-test("assetValueText：亿 / 万两档换算，并带上披露日与出处（铁律 #3）", () => {
-  const yi = { assetValue: AV(2962513986.74, "2026-11-04") };
-  assert.match(assetValueText(yi), /^29\.63 亿元（披露日 2026-11-04，来源：中国理财网）$/);
-  const wan = { assetValue: AV(6284884.31, "2026-11-04") };
-  assert.match(assetValueText(wan), /^628\.49 万元（披露日 2026-11-04，来源：中国理财网）$/);
-  const hand = { assetValue: { v: 100000000, date: "", via: "手工", manual: true } };
-  assert.match(assetValueText(hand), /1\.00 亿元/);
-  assert.match(assetValueText(hand), /手工/);
-});
-
-test("assetValueText：空着就说清为什么空着，绝不显示 0 元", () => {
-  const why = { assetValue: { v: null, date: "", via: "chinawealth", why: "类别对不上：O≠G" } };
-  assert.equal(assetValueText(why), "类别对不上：O≠G");
-  assert.equal(assetValueText({}), "", "没有这一折 ⇒ 空串，不许编一句「0 元」");
-  assert.doesNotMatch(assetValueText(why), /0 ?(元|亿|万)/);
-});
-
-test("setManualAssetValue：只收「元」为单位的正数，带亿/万的一律拒收并说清单位", () => {
-  const p = {};
-  assert.equal(setManualAssetValue(p, "29.63亿").changed, false);
-  assert.match(setManualAssetValue(p, "29.63亿").why, /带亿\/万的不猜单位/,
-    "必须走「单位」那句拒收；掉进通用那句正数报错，说明守卫被拆了、单位正在被猜");
-  assert.equal(p.assetValue, undefined);
-  for (const bad of ["0", "-5", "abc", "", "   ", "NaN"]) setManualAssetValue(p, bad);
-  assert.equal(p.assetValue, undefined, "无效输入一个都不许写字段");
-  const r = setManualAssetValue(p, " 2,962,513,986.74 ");
-  assert.equal(r.changed, true);
-  assert.equal(p.assetValue.v, 2962513986.74);
-  assert.equal(p.assetValue.manual, true);
-  assert.match(p.assetValue.via, /手工/);
-});
-
-/* 单位靠猜就是四个数量级，比空着更糟。上一版只断言了 changed=false，
-   把守卫改成「放过亿、照样交给 Number()」时 NaN 也会给出 changed=false —— 全绿是假绿。
-   这里钉两点：一是拒收文案必须来自单位那一句，二是任何情况下都不许落账。 */
-test("手工规模里带亿/万的：一律走单位那句拒收，绝不落账、绝不换算", () => {
-  for (const s of ["29.63亿", "2963万", "1.5万", "2亿", "29.63 亿元", "3E8"]) {
-    const p = { assetValue: AV(1, "2026-11-04") };
-    const r = setManualAssetValue(p, s);
-    assert.equal(r.changed, false, `${s} 不许落账`);
-    assert.equal(p.assetValue.v, 1, `${s} 不许连带改动已有的抓取值`);
-    assert.match(r.why, /带亿\/万的不猜单位|只收以「元」为单位/, `${s} 该由单位那句拦下`);
-  }
-});
-
-test("setManualAssetValue：清空输入框只撤手工那一折，不许顺手抹掉云端写的那一折", () => {
-  const hand = { assetValue: { v: 1, date: "", via: "手工", manual: true } };
-  assert.equal(setManualAssetValue(hand, "").changed, true);
-  assert.equal(hand.assetValue, undefined, "手工值撤掉后回到「不知道」，下一轮抓取会重新补");
-  const auto = { assetValue: AV(5, "2026-11-04") };
-  assert.equal(setManualAssetValue(auto, "").changed, false);
-  assert.equal(auto.assetValue.v, 5);
-});
-
-/* v3.4 实测缺口：闸门①在**列表**阶段就把净值拦下（理财网给 NYJXLD1409N，账本记 G），
-   detail 那一步根本没走到 —— 原生侧只能由闸门自己带回这一折理由。
-   页面这一侧必须照样把它显示出来，并且第二轮不许判定「有变化」（形状里没有时间点）。 */
-test("闸门理由（列表阶段就拦下）在页面这一侧同样只留理由、不重刷、不说成 0 元", () => {
-  const gate = (cls) => ({
-    v: null, date: "", sub: "NYJXLD1409G", via: "chinawealth",
-    why: `份额类别对不上：账本记的是 NYJXLD1409G，理财网该编码下的份额行是 ['${cls}'] `
-       + "—— 宁可不填，也不拿别类份额的净值入账（请在 App 内核对后把产品代码改成实际持有那一类）",
-  });
-  const p = {};
-  const first = applyAssetValue(p, gate("NYJXLD1409N"));
-  assert.equal(first.changed, true, "首轮要把理由落下来，页面才有话可说");
-  assert.equal(p.assetValue.v, null, "null 是不知道，不是知道且为零");
-  const text = assetValueText(p);
-  assert.match(text, /NYJXLD1409N/, "看到的类别要原样说出来，否则用户无从核对");
-  assert.doesNotMatch(text, /^\s*0|0\.00 (元|万|亿)/, "空着就是空着，绝不显示成 0 元");
-  assert.equal(applyAssetValue(p, gate("NYJXLD1409N")).changed, false,
-    "同一句话第二轮不许再判成变化 —— 否则每天三次跑就是三次无关提交");
-  /* 类别变了（用户核对后改成 N 类、理财网又给出别的类别）⇒ 这句旧话必须被换掉 */
-  assert.equal(applyAssetValue(p, gate("NYJXLD1409O")).changed, true,
-    "理由里的证据变了就要重写，旧的那句已经与账面不符");
-  assert.match(p.assetValue.why, /NYJXLD1409O/);
-  /* 手工值优先：用户自己填了规模，闸门的理由就不该再来顶 */
-  const hand = { assetValue: { v: 123456789, date: "", sub: "NYJXLD1409G", via: "手工", manual: true } };
-  assert.equal(applyAssetValue(hand, gate("NYJXLD1409N")).changed, false);
-  assert.equal(hand.assetValue.v, 123456789);
 });

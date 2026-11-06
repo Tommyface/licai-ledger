@@ -40,12 +40,60 @@ export const DISC_TIER_LABEL = {
 /* discGaps() 返回的字段名 → 给用户看的缺项名。同一条理由只留一份。 */
 export const DISC_GAP_LABEL = {
   lockDays: "最短持有 / 封闭天数", openRule: "开放赎回安排", feeRedeem: "赎回费分档",
-  assets: "底层资产配置", investScope: "投资范围", source: "出处链接"
+  assets: "底层资产配置", investScope: "投资范围", source: "出处链接",
+  holdings: "定期报告·持有资产"
 };
 
 /** 全 null 骨架：老数据、新产品的初始态都从这里出发。 */
 function emptyDisc() {
-  return { status: "none", lockDays: null, openRule: "", feeRedeem: [], assets: [], investScope: "", source: null };
+  return { status: "none", lockDays: null, openRule: "", feeRedeem: [], assets: [], investScope: "", source: null, holdings: null };
+}
+
+/* ---- 定期报告·持有资产实况（holdings）：可选块，与五字段互补 ----
+   这是「定期投资报告披露的报告期末持有资产情况」（穿透前/穿透后占比、前十项、
+   杠杆率、托管账户），是判断底层风险的主要依据。它**不在五字段清单里**，
+   所以不影响 discGaps 的「还缺 N 项」口径、也不进 T7 换仓建议的判定；
+   只在卡片上多展示一块。回填同样守「手工值优先、出处不齐不入账」两条铁律。 */
+
+/** holdings 出处合格：url + publishedAt 双全（与 discSourceOk 同一把尺子）。 */
+function holdingsOk(h) {
+  if (!h || typeof h !== "object") return false;
+  return discSourceOk(h.source);
+}
+
+/** 规范化一个 holdings 块：只认带合格出处的；否则 null（宁缺勿错）。 */
+function normHoldings(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const src = raw.source;
+  if (!discSourceOk(src)) return null;
+  const h = {
+    asOf: typeof raw.asOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.asOf) ? raw.asOf : null,
+    leveragePct: typeof raw.leveragePct === "number" && isFinite(raw.leveragePct) && raw.leveragePct >= 0 ? raw.leveragePct : null,
+    custodian: typeof raw.custodian === "string" ? raw.custodian : null,
+    assetClasses: Array.isArray(raw.assetClasses)
+      ? raw.assetClasses
+        .filter(x => x && typeof x === "object" && typeof x.category === "string" && x.category)
+        .map(x => ({ category: x.category,
+                     beforePct: isNum(x.beforePct) ? x.beforePct : null,
+                     afterPct: isNum(x.afterPct) ? x.afterPct : null }))
+      : null,
+    topHoldings: Array.isArray(raw.topHoldings)
+      ? raw.topHoldings
+        .filter(x => x && typeof x === "object" && typeof x.name === "string" && x.name)
+        .map(x => ({ name: x.name,
+                     amount: isNum(x.amount) ? x.amount : null,
+                     pct: isNum(x.pct) ? x.pct : null }))
+      : null,
+    source: { url: String(src.url || "").trim(), title: String(src.title || "").trim(),
+              publishedAt: String(src.publishedAt || "").trim(),
+              tier: DISC_TIERS.indexOf(String(src.tier || "")) >= 0 ? String(src.tier) : "official" },
+  };
+  if (src.fetchedAt) h.source.fetchedAt = String(src.fetchedAt);
+  // 两块都空 = 没内容却挂了块：与校验器同口径，判 null
+  const hasAc = Array.isArray(h.assetClasses) && h.assetClasses.length > 0;
+  const hasTh = Array.isArray(h.topHoldings) && h.topHoldings.length > 0;
+  if (!hasAc && !hasTh) return null;
+  return h;
 }
 
 /* 除出处外至少录了一项。录入页的「未录入 / 缺出处 / 手工录入」与体检页的
@@ -217,6 +265,7 @@ export function normDisc(raw) {
   } else {
     d.source = null;
   }
+  d.holdings = normHoldings(raw.holdings);
   const hasContent = discHasContent(d);
   if (!hasContent) d.source = null;          // 与 parseDiscForm 同一条规则：无内容即无出处
   d.status = !hasContent ? "none" : (d.source ? (raw.status === "auto" ? "auto" : "manual") : "none");
@@ -275,14 +324,28 @@ function hasField(d, k) {
  * p.rulesAt 由调用方写（那是「试过一次」的凭据，不是披露日期，别混进 disc）。
  * @param {any} p 产品对象（就地改 p.disc / p.regCode）
  * @param {any} got 壳的规则回包
- * @returns {{ok:boolean, filled:string[], kept:string[], gaps:string[], why:string}}
+ * @returns {{ok:boolean, filled:string[], kept:string[], gaps:string[], why:string,
+ *            holdingsFilled:boolean}}
  */
 export function applyAutoDisc(p, got) {
   const d = normDisc(p && p.disc);
-  const res = { ok: false, filled: [], kept: [], gaps: discGaps(d), why: "" };
+  const res = { ok: false, filled: [], kept: [], gaps: discGaps(d), why: "", holdingsFilled: false };
+
+  /* holdings 是独立披露文件（定期报告），有它自己的 source：**不与销售文件的 source
+     连坐**。先落 holdings（即使销售文件出处不齐，bob 这类没有销售文件但有定期报告的
+     产品，holdings 也应照常入账）。手工已有（哪怕只是另一期）一律不动 —— 与五字段同一条
+     「手工值优先」。 */
+  const gotH = normHoldings(got && got.holdings);
+  if (gotH && !d.holdings) { d.holdings = gotH; res.holdingsFilled = true; }
+
   const src = got && got.source;
   if (!discSourceOk(src)) {
     res.why = str(got && got.why) || "官网档案里没读到披露日期：没有出处就不入账，只记缺口";
+    // holdings 已经落了就算这一轮有产出；两样都没有 → 不动账面
+    res.ok = res.holdingsFilled;
+    if (!res.holdingsFilled) return res;
+    p.disc = d;
+    res.gaps = discGaps(d);
     return res;
   }
   const g = normDisc(got.rules);                 // 类型口径与手工录入共用同一套
@@ -291,7 +354,7 @@ export function applyAutoDisc(p, got) {
     if (hasField(g, k)) { d[k] = g[k]; res.filled.push(k); }
   });
   res.ok = true;
-  if (!res.filled.length) return res;            // 规矩 3：没补东西就不动账面
+  if (!res.filled.length && !res.holdingsFilled) return res;   // 规矩 3：两样都没补到就不动账面
   if (!d.source) {
     d.source = { url: str(src.url), title: str(src.title), publishedAt: str(src.publishedAt),
       /* fetchedAt 是我们自己的表（schema 里与 publishedAt 分开的就是这两个） */
@@ -374,12 +437,12 @@ export function rulesFeedReg(p) {
  * 把独立 feed 落进账本（就地改 data.products[].disc）。
  * @param {any} data 账本对象
  * @param {any} feed product-rules.json 解析后的对象
- * @returns {{total:number, matched:number, filled:number, kept:number,
+ * @returns {{total:number, matched:number, filled:number, kept:number, holdings:number,
  *            skippedNoCode:number, skippedNoEntry:number, badSource:number,
  *            quotes:Record<string, any>}}
  */
 export function applyRulesFeed(data, feed) {
-  const stat = { total: 0, matched: 0, filled: 0, kept: 0,
+  const stat = { total: 0, matched: 0, filled: 0, kept: 0, holdings: 0,
     skippedNoCode: 0, skippedNoEntry: 0, badSource: 0,
     /** @type {Record<string, any>} */ quotes: {} };
   const products = (data && Array.isArray(data.products)) ? data.products : [];
@@ -393,15 +456,16 @@ export function applyRulesFeed(data, feed) {
     const e = entries[reg];
     if (!e || typeof e !== "object") { stat.skippedNoEntry++; continue; }
     stat.matched++;
-    /* feed 条目已是 {rules, source, rawQuote, gaps, why}；applyAutoDisc 只认
-       got.rules / got.source / got.meta.regCode / got.why。原样透传，不在这里
-       另立空值语义、不自己拼 disc 对象、不判 status。 */
-    const got = { rules: e.rules, source: e.source,
+    /* feed 条目已是 {rules, source, rawQuote, gaps, why, holdings}；applyAutoDisc
+       只认 got.rules / got.source / got.holdings / got.meta.regCode / got.why。
+       原样透传，不在这里另立空值语义、不自己拼 disc 对象、不判 status。 */
+    const got = { rules: e.rules, source: e.source, holdings: e.holdings,
       meta: { regCode: e.regCode || reg }, why: e.why };
     const res = applyAutoDisc(p, got);
     if (!res.ok) { stat.badSource++; continue; }        // 出处不齐：一条都不写
     stat.filled += res.filled.length;
     stat.kept += res.kept.length;
+    if (res.holdingsFilled) stat.holdings++;
     if (e.rawQuote && typeof e.rawQuote === "object" && Object.keys(e.rawQuote).length)
       stat.quotes[reg] = e.rawQuote;                     // 只给展示层，不进 DATA
   }
@@ -424,7 +488,7 @@ export function applyRulesFeed(data, feed) {
              skippedNoCode:number, skippedNoEntry:number, badSource:number,
              quotes:Record<string, any>, per:Array<{name:string, stat:any}>}} */
 export function applyRulesFeeds(data, feeds) {
-  const out = { applied: [], total: 0, matched: 0, filled: 0, kept: 0,
+  const out = { applied: [], total: 0, matched: 0, filled: 0, kept: 0, holdings: 0,
     skippedNoCode: 0, skippedNoEntry: 0, badSource: 0, quotes: {}, per: [] };
   const products = (data && Array.isArray(data.products)) ? data.products : [];
   out.total = products.length;
@@ -437,6 +501,7 @@ export function applyRulesFeeds(data, feeds) {
     out.matched += stat.matched;
     out.filled += stat.filled;
     out.kept += stat.kept;
+    out.holdings += stat.holdings || 0;
     out.skippedNoCode += stat.skippedNoCode;
     out.skippedNoEntry += stat.skippedNoEntry;
     out.badSource += stat.badSource;
@@ -509,116 +574,4 @@ export function applyRegCode(p, got) {
   }
   p.code = one;
   return { changed: true, wrote: one, why: `已补齐登记编码 ${one}（下一次抓取就能按编码查披露）` };
-}
-
-/* ============================================================================
-   资产净值（产品规模）—— 2026-11-06 所有者提的「每只产品新增一个字段，抓取内容补充」。
-
-   判据与私有仓 navsources/merge.py 的 apply_asset_value **同构**（JS 一份、Python 一份，
-   改一边必须改另一边；两边规则一致才不会「手机写的和云端写的互相顶」）。四条：
-     ① 手工值优先：用户填过（manual）就再也不动，连「为什么没写」的记录都不许顶掉它；
-     ② 披露日新者胜、同日不重刷：写入的形状里**没有抓取时刻**，否则每天 3 跑
-        都会「内容变了」⇒ 刷一堆无意义的数据提交（与 regHints 同一策略）；
-     ③ null 是不知道、0 是知道且为零：0/负数/NaN/非数都不算值，
-        某次没披露也**绝不清空**已经写过的值；
-     ④ 没写入时把「为什么空着」记进同一格（why），别让人对着空格猜功能跑没跑。
-
-   ⚠️ 这个字段是钱，所以它只许出现在**数据展示**的位置，不许进任何结论文本
-   （持仓体检/换仓建议的 verdictText 里没有钱，v74/v75 立的口径）。
-   ========================================================================== */
-
-/** 这一折记录里的 v 是不是一个可用的规模数（>0 的有限数）。 */
-function isAssetNum(v) {
-  return typeof v === "number" && Number.isFinite(v) && v > 0;
-}
-
-/** 统一读法：全站只从这里读规模，别处不许再摸 p.assetValue.v（口径与 regCodeOf 同一条）。 */
-export function assetValueOf(p) {
-  const av = p && p.assetValue;
-  return av && typeof av === "object" && !Array.isArray(av) ? av : null;
-}
-
-/**
- * 把抓取到的一折规模落进产品对象（就地改），并如实回答改没改、为什么没改。
- *
- * @param {any} p 产品对象
- * @param {{v?:number, date?:string, sub?:string, via?:string, why?:string}|null} rec 桥/云端的一折记录
- * @returns {{changed:boolean, why:string}}
- */
-export function applyAssetValue(p, rec) {
-  if (!p || typeof p !== "object") return { changed: false, why: "没有这款产品" };
-  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return { changed: false, why: "" };
-  const cur = (p.assetValue && typeof p.assetValue === "object") ? p.assetValue : {};
-
-  if (cur.manual) return { changed: false, why: "规模已有手工值（手工值优先，不覆盖）" };
-
-  if (isAssetNum(rec.v)) {
-    const nd = str(rec.date);
-    if (isAssetNum(cur.v) && str(cur.date) >= nd) return { changed: false, why: "" };
-    p.assetValue = { v: Number(rec.v), date: nd, sub: str(rec.sub), via: str(rec.via) };
-    return { changed: true, why: `已补齐资产净值（披露日 ${nd || "-"}）` };
-  }
-
-  /* 这一折没有值：已有值 ⇒ 保持（null 是不知道，不是「规模没了」）；
-     没有值 ⇒ 只有带着理由才记，连理由都没有就当没这回事。 */
-  if (isAssetNum(cur.v)) return { changed: false, why: "" };
-  const why = str(rec.why).trim();
-  if (!why) return { changed: false, why: "" };
-  if (cur.why === why && str(cur.date) === str(rec.date)
-      && str(cur.sub) === str(rec.sub) && "v" in cur && cur.v === null) {
-    return { changed: false, why: "" };          // 同一条理由已经在册 ⇒ 不重刷
-  }
-  p.assetValue = { v: null, date: str(rec.date), sub: str(rec.sub), via: str(rec.via), why };
-  return { changed: true, why };
-}
-
-/** 出处标签：铁律 #3 —— 值后面必须跟着它从哪来。 */
-function assetViaLabel(av) {
-  if (av.manual) return "手工";
-  const via = str(av.via);
-  if (!via) return "未知";
-  return via === "chinawealth" ? "中国理财网" : via;
-}
-
-/**
- * 展示串（唯一一份）：≥1 亿说亿、不足 1 亿说万元，一律带披露日与出处。
- * 没有这一折 ⇒ 空串（调用处自己决定「不显示这一行」），**绝不显示 0 元**。
- */
-export function assetValueText(p) {
-  const av = assetValueOf(p);
-  if (!av) return "";
-  if (!isAssetNum(av.v)) return str(av.why) || "还不知道（这一格没写入）";
-  const x = Number(av.v);
-  const amount = x >= 1e8 ? (x / 1e8).toFixed(2) + " 亿元" : (x / 1e4).toFixed(2) + " 万元";
-  const bits = [];
-  if (av.date) bits.push("披露日 " + str(av.date));
-  bits.push("来源：" + assetViaLabel(av));
-  return `${amount}（${bits.join("，")}）`;
-}
-
-/**
- * 表单里那一栏「资产净值（元）」的落账判据（手工值优先的另一半）。
- *
- * 只收**元**为单位的正数，带「亿」「万」的一律拒收 —— 单位靠猜就会差四个数量级，
- * 而这一格是给人看规模的，错比空着更糟。清空输入框**只撤手工那一折**：
- * 云端/本机抓取写进来的那折不是用户手工填的，不能因为表单里没字就抹掉。
- */
-export function setManualAssetValue(p, text) {
-  if (!p || typeof p !== "object") return { changed: false, why: "没有这款产品" };
-  const raw = str(text).replace(/[,\s]/g, "");
-  const cur = (p.assetValue && typeof p.assetValue === "object") ? p.assetValue : {};
-  if (!raw) {
-    if (!cur.manual) return { changed: false, why: "" };   // 不是手工的 ⇒ 不动它
-    delete p.assetValue;
-    return { changed: true, why: "已清空手工填写的规模，下一轮抓取会按披露重新补" };
-  }
-  if (/亿|万|[a-zA-Z]/.test(raw)) {
-    return { changed: false, why: "这一栏只收以「元」为单位的数字（例如 2962513986.74），带亿/万的不猜单位" };
-  }
-  const v = Number(raw);
-  if (!Number.isFinite(v) || v <= 0) {
-    return { changed: false, why: "规模要填正的元数额（例如 2962513986.74）；0 与负数都不算" };
-  }
-  p.assetValue = { v, date: str(cur.date), sub: str(cur.sub), via: "手工", manual: true };
-  return { changed: true, why: "已记录手工填写的规模（抓取不再覆盖它）" };
 }
