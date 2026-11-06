@@ -175,3 +175,30 @@ test("规模是钱：结论文本（体检卡 / 换仓建议）里一个都不�
   const tip = app.match(/const assetLine = [\s\S]{0,120}/);
   assert.ok(tip && /m\.asset/.test(tip[0]), "抓取框要有独立一行");
 });
+
+/* ── 版本号一致性（v3.4 补的闸）────────────────────────────────────────────
+   起因：v87 第一次推公开仓只带了「记得改的那几个文件」，tests/advice.test.mjs 与
+   tests/switchadv.test.mjs 里各钉了一份 CACHE/APP_VER，本地改了却没进推送清单，
+   CI 立刻红在「新增模块 = 外壳变了，CACHE 必须跟着升」。这类错的形状是
+   「改了的没推」，本地全绿照样看不见，所以要么每次推送前做整树字节比对，
+   要么让测试自己把该改的文件名单念出来。这里选后者：名单一旦漂了，
+   CI 的报错信息直接给出该看的文件，不用再去猜。 */
+test("版本号一致性：钉住版本的源码文件必须一个不缺、一个不改地全对上新版本", () => {
+  const sw = read("sw.js");
+  const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
+  const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
+  assert.equal(ver, cache, "APP_VER 与 CACHE 必须同版本");
+  /* 钉过的文件：源码两处，测试四处（都是 grep 出来的，别再靠记忆数） */
+  const PINS = ["app.js", "sw.js", "tests/advice.test.mjs", "tests/disc.test.mjs",
+                "tests/handlers.test.mjs", "tests/switchadv.test.mjs"];
+  const stale = [];
+  for (const f of PINS) {
+    const s = read(f);
+    if (/licai-ledger-v\d+/.test(s) && !s.includes(`licai-ledger-${cache}`)) stale.push(f);
+    if (/APP_VER = "v\d+"|"(?<![_A-Za-z])v\d+"/.test(s) && !new RegExp(`"${ver}"`).test(s)) stale.push(f);
+    /* 同一文件里若同时钉着新旧两个版本，也是没改干净 */
+    if (new RegExp(`licai-ledger-v\\d+`).test(s) &&
+        [...s.matchAll(/licai-ledger-v\d+/g)].some(m => m[0] !== `licai-ledger-${cache}`)) stale.push(f + "（新旧混钉）");
+  }
+  assert.deepEqual(stale, [], "这些文件里还钉着旧版本号：\n  " + stale.join("\n  "));
+});
