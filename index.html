@@ -73,6 +73,17 @@ details.adv>summary{cursor:pointer;font-size:11.5px;color:var(--ink3);padding:4p
 details.adv>summary::-webkit-details-marker{display:none}
 details.adv>summary::before{content:"▸ ";}
 details.adv[open]>summary::before{content:"▾ ";}
+/* ---------- 设置页可折叠卡片（v88）---------- */
+details.set-collapse>summary{
+  cursor:pointer;list-style:none;padding:10px 14px;
+  display:flex;align-items:center;gap:6px;
+}
+details.set-collapse>summary::-webkit-details-marker{display:none}
+details.set-collapse>summary::before{content:"▸ ";color:var(--ink3);font-size:12px}
+details.set-collapse[open]>summary::before{content:"▾ "}
+details.set-collapse>summary h2{margin:0;font-size:14px;font-weight:650}
+details.set-collapse:not([open]){padding:0}
+details.set-collapse:not([open])>summary{margin:-1px}
 /* ---------- 卡片 ---------- */
 /* 真 blur 只给这一层和顶栏：逐帧模糊的成本按元素个数算，页面里 .card 只有个位数。
    边框两套都是 1px（不支持 blur 时是纯白描边），别让换材质把内容挤窄 2px。 */
@@ -609,32 +620,32 @@ html:not(.inApp) .app-only{display:none}
 
   <!-- ========== 设置 ========== -->
   <div class="page" id="pg-set">
-    <div class="card">
-      <div class="card-t"><h2>数据同步（GitHub 私有仓库）</h2></div>
+    <details class="card set-collapse">
+      <summary><h2>数据同步（GitHub 私有仓库）</h2></summary>
       <div id="setSyncBox"></div>
       <button class="btn gh full" style="margin-top:12px" onclick="openSync()">配置同步</button>
-    </div>
+    </details>
     <!-- 秒讯 / 净值账本：两个站都不给跨域许可（实测响应里没有 Access-Control-Allow-Origin，
          预检直接 501），只有 App 内的本机桥能发这个请求。网页版整节收掉 ——
          留个点了只会回「仅 App 可用」的按钮，等于让用户白跑一趟。
          v78 起秒讯的登录态存在 App 的本机加密区（Android Keystore），页面不再保存它；
          v79 起净值账本的 Cookie 同样进加密区（SecretStore 第三个槽）——
          浏览器里同样没有能安全放这种东西的地方，所以这两条路径只在 App 内成立。 -->
-    <div class="card app-only">
-      <div class="card-t"><h2>秒讯净值（可选）</h2></div>
+    <details class="card app-only set-collapse">
+      <summary><h2>秒讯净值（可选）</h2></summary>
       <div id="aixhubBox"></div>
-    </div>
-    <div class="card app-only">
-      <div class="card-t"><h2>净值账本（可选）</h2></div>
+    </details>
+    <details class="card app-only set-collapse">
+      <summary><h2>净值账本（可选）</h2></summary>
       <div id="ledgermeBox"></div>
-    </div>
+    </details>
     <!-- 模型接入（T3）：同样只在 App 里出现，理由比上面两节更硬 ——
          密钥只存在本机加密区（Android Keystore），浏览器里没有能放它的地方。
          所以网页版不是「能用但收起来」，而是根本没有这条路径：连一节都不画。 -->
-    <div class="card app-only">
-      <div class="card-t"><h2>模型接入（可选）</h2></div>
+    <details class="card app-only set-collapse">
+      <summary><h2>模型接入（可选）</h2></summary>
       <div id="llmBox"></div>
-    </div>
+    </details>
     <div class="card">
       <div class="card-t"><h2>新净值提醒</h2></div>
       <div id="notifyBox"></div>

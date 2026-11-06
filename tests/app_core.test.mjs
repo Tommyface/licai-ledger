@@ -779,7 +779,7 @@ test("秒讯/净值账本：网页版整节收掉，靠 <html>.inApp + CSS，不
   /* 卡片标题是 index.html 里的静态 HTML：藏必须发生在 CSS，等 JS 填内容再藏会闪 */
   assert.ok(/html:not\(\.inApp\) \.app-only\{display:none\}/.test(HTML55),
     "index.html 里没有 html:not(.inApp) .app-only 这条规则");
-  const cards = HTML55.match(/<div class="card app-only">[\s\S]{0,120}?id="(aixhubBox|ledgermeBox)"/g) || [];
+  const cards = HTML55.match(/<details class="card app-only[^"]*">[\s\S]{0,120}?id="(aixhubBox|ledgermeBox)"/g) || [];
   assert.equal(cards.length, 2, "两个 App 专属卡片没都带上 app-only 类");
 });
 
@@ -1250,7 +1250,7 @@ test("T3 铁律 #6：密钥与端点不落 localStorage，那一节只在 App �
   /* 再看整份文件：任何带 llm / apiKey 字样的 localStorage 键名都不许存在。 */
   const named = src.match(/(lsSet|lsGet|lsDel)\s*\(\s*["'`][^"'`]*(llm|apiKey|api_key)/gi) || [];
   assert.deepEqual(named, [], "有以 llm / apiKey 命名的 localStorage 键：" + named.join(" | "));
-  assert.ok(/<div class="card app-only">\s*<div class="card-t"><h2>模型接入/.test(html),
+  assert.ok(/<details class="card app-only[^"]*">\s*<summary><h2>模型接入/.test(html),
     "模型接入那张卡没标 app-only：网页版会看见一个用不了的小节");
 });
 
