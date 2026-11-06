@@ -126,10 +126,10 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
   assert.match(br, /code: regCodeOf\(p\)/, "看板按 Z 编码搜不到只填了别名的产品");
 });
 
-test("APP_VER 升到 v87 且 SHELL 不漏文件", () => {
+test("APP_VER 升到 v88 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v87"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v87"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v88"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v88"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }
@@ -142,15 +142,29 @@ test("规模这一栏：抓取回写、表单初值、详情展示三处都真�
   const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue\s*\} from "\.\/js\/core\/disc\.js"/);
   assert.ok(imp, "四个函数必须从 disc.js 导入，不许在 app.js 里另写一套");
 
-  /* ① 抓取回写：必须在净值入账那一段里，且不计入 fail */
+  /* ① 抓取回写：判据跑在 disc.js，这里只盯接线与它所在的位置 */
   const all = body(app, "nativeFetchAll");
   assert.ok(all.includes("applyAssetValue(p2, r.assetValue)"), "本机抓取要真的把规模落账");
   /* 上面那句只盯字符串 —— 把守卫改成 if (false && r.assetValue) 照样全绿，
      而那一折就永远不会落账。所以这里钉的是「结构」：调用必须直接挂在
      r.assetValue 这个条件下面，中间不许插任何常量假守卫。 */
-  assert.match(all, /if \(r\.assetValue\) \{\s*\n\s*const av = applyAssetValue\(p2, r\.assetValue\);/,
-    "回写必须挂在 if (r.assetValue) 里，条件一旦被改成恒假（或整段注释掉）就是没接线");
+  assert.match(all, /if \(r && r\.assetValue\) \{\s*\n\s*const av = applyAssetValue\(p2, r\.assetValue\);/,
+    "回写必须挂在 if (r && r.assetValue) 里，条件一旦被改成恒假（或整段注释掉）就是没接线");
   assert.doesNotMatch(all, /if \(false\b/, "函数里不该有恒假分支，那是「代码在、事没做」的典型形状");
+  /* v3.4 实测缺口：原生侧闸门①拦下净值时回包 ok=false、但仍带着「规模这格为什么空着」。
+     落账若写在 ok 那一支里面，这类产品就永远是一格无声的空 —— 所以钉位置：
+     applyAssetValue 必须出现在 `if (r && r.ok)` 之前（两支之外）。
+     ⚠️ 取的是**那句代码**的位置，不是注释里第一次出现这个名字的地方：
+     上一版用 indexOf("applyAssetValue(") 命中了上面那段注释，窗口跟着跑偏，
+     「else fails.push」那个变异就是从这条缝里漏掉的。 */
+  const at = all.search(/const av = applyAssetValue\(p2, r\.assetValue\);/);
+  assert.ok(at >= 0, "落账那句调用本身不在了");
+  assert.ok(at < all.indexOf("if (r && r.ok)"),
+    "规模落账必须在 ok/失败两支之外：被闸门拦下的那一趟也要能把理由落下来");
+  assert.match(all, /if \(av\.changed\) \{ assetChanged = true; saveLocal\(\); \}/,
+    "改了本地账就得存盘 —— 净值那一支的 saveLocal 这条路根本不会走");
+  assert.doesNotMatch(all.slice(at, at + 400), /fails\.push/,
+    "规模没补齐不许被说成抓取失败（v84 三类口径同源）");
   assert.ok(/assetNotes/.test(all) && /MANUAL\.asset/.test(all), "补齐结果要有单独一行归口，别混进净值那句");
   assert.doesNotMatch(all.slice(all.indexOf("applyAssetValue"), all.indexOf("applyAssetValue") + 400),
     /fails\.push/, "规模没补齐不许被说成抓取失败（v84 三类口径同源）");

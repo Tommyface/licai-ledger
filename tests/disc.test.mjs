@@ -204,8 +204,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v87"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v87"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v88"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v88"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -854,4 +854,32 @@ test("setManualAssetValue：清空输入框只撤手工那一折，不许顺手�
   const auto = { assetValue: AV(5, "2026-11-04") };
   assert.equal(setManualAssetValue(auto, "").changed, false);
   assert.equal(auto.assetValue.v, 5);
+});
+
+/* v3.4 实测缺口：闸门①在**列表**阶段就把净值拦下（理财网给 NYJXLD1409N，账本记 G），
+   detail 那一步根本没走到 —— 原生侧只能由闸门自己带回这一折理由。
+   页面这一侧必须照样把它显示出来，并且第二轮不许判定「有变化」（形状里没有时间点）。 */
+test("闸门理由（列表阶段就拦下）在页面这一侧同样只留理由、不重刷、不说成 0 元", () => {
+  const gate = (cls) => ({
+    v: null, date: "", sub: "NYJXLD1409G", via: "chinawealth",
+    why: `份额类别对不上：账本记的是 NYJXLD1409G，理财网该编码下的份额行是 ['${cls}'] `
+       + "—— 宁可不填，也不拿别类份额的净值入账（请在 App 内核对后把产品代码改成实际持有那一类）",
+  });
+  const p = {};
+  const first = applyAssetValue(p, gate("NYJXLD1409N"));
+  assert.equal(first.changed, true, "首轮要把理由落下来，页面才有话可说");
+  assert.equal(p.assetValue.v, null, "null 是不知道，不是知道且为零");
+  const text = assetValueText(p);
+  assert.match(text, /NYJXLD1409N/, "看到的类别要原样说出来，否则用户无从核对");
+  assert.doesNotMatch(text, /^\s*0|0\.00 (元|万|亿)/, "空着就是空着，绝不显示成 0 元");
+  assert.equal(applyAssetValue(p, gate("NYJXLD1409N")).changed, false,
+    "同一句话第二轮不许再判成变化 —— 否则每天三次跑就是三次无关提交");
+  /* 类别变了（用户核对后改成 N 类、理财网又给出别的类别）⇒ 这句旧话必须被换掉 */
+  assert.equal(applyAssetValue(p, gate("NYJXLD1409O")).changed, true,
+    "理由里的证据变了就要重写，旧的那句已经与账面不符");
+  assert.match(p.assetValue.why, /NYJXLD1409O/);
+  /* 手工值优先：用户自己填了规模，闸门的理由就不该再来顶 */
+  const hand = { assetValue: { v: 123456789, date: "", sub: "NYJXLD1409G", via: "手工", manual: true } };
+  assert.equal(applyAssetValue(hand, gate("NYJXLD1409N")).changed, false);
+  assert.equal(hand.assetValue.v, 123456789);
 });

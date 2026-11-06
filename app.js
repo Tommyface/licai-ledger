@@ -61,7 +61,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v87";
+const APP_VER = "v88";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -4608,25 +4608,27 @@ async function nativeFetchAll(forceExtra) {
         if (s.src === "ledgerme" && s.error) lgmErr = s.error;
       }
     }
+    /* 抓取是异步的：期间 syncPull 可能已经把 DATA 整体换成云端对象，
+       这里按 id 重新定位，避免把新净值写进已被替换掉的旧对象而丢失 */
+    const p2 = DATA.products.find(x => x.id === p.id) || p;
+    /* 资产净值（规模）：判据全在 disc.js 的 applyAssetValue（手工值优先、披露日新者胜、
+       没披露不清空、类别对不上只留理由），这里只负责起那一趟。
+       ⚠️ 它写在 ok/失败两支**之外**：原生侧被闸门①拦下净值时（份额类别对不上），
+       回包 ok=false 但照样带着「这一格为什么空着」的那一折 —— 口径 A 的后半句。
+       留在净值那一支里，手机上这种产品就永远是一格无声的空（2026-11-06 实测匠心）。
+       它也不计入 fail：净值没拿到是抓取失败，规模空着是另一件事（v84 三类口径同源）。 */
+    if (r && r.assetValue) {
+      const av = applyAssetValue(p2, r.assetValue);
+      if (av.why) assetNotes.push(prodLabel(p2) + "：" + av.why);
+      if (av.changed) { assetChanged = true; saveLocal(); }
+    }
     if (r && r.ok) {
-      /* 抓取是异步的：期间 syncPull 可能已经把 DATA 整体换成云端对象，
-         这里按 id 重新定位，避免把新净值写进已被替换掉的旧对象而丢失 */
-      const p2 = DATA.products.find(x => x.id === p.id) || p;
       const navs = r.navs || {}, n = Object.keys(navs).length;
       if (n) {
         fetchedNavs[p.id] = Object.assign(fetchedNavs[p.id] || {}, navs);
         p2.navHistory = p2.navHistory || {};
         Object.assign(p2.navHistory, navs);
         if (r.meta) for (const k in r.meta) if (!p2[k] && r.meta[k]) p2[k] = r.meta[k];
-        /* 资产净值（规模）：判据全在 disc.js 的 applyAssetValue（手工值优先、
-           披露日新者胜、没披露不清空、类别对不上只留理由），这里只负责起那一趟。
-           它**不计入 fail**：净值拿到了就是拿到了，规模空着是另一件事（v84 的
-           三类口径同源 —— 别让「没补上规模」长得像「抓取失败」）。 */
-        if (r.assetValue) {
-          const av = applyAssetValue(p2, r.assetValue);
-          if (av.why) assetNotes.push(prodLabel(p2) + "：" + av.why);
-          if (av.changed) assetChanged = true;
-        }
         added += n;
         saveLocal(); renderHome(); renderProd();
       }
