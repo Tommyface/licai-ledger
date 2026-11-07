@@ -127,22 +127,45 @@ export function shelfTags(rec) {
 }
 
 /**
- * 代销银行归并：静态索引里已带出处的 {name, via}[]，去重、保序。
+ * 代销银行归并：静态索引里已带出处的 {name, via}[]，按银行名去重、保序。
+ *
+ * v98 · 口径不丢：同一家银行若同时被「列表行」与「详情页」两种口径证实，
+ * 旧版只留第一个 via（seen.has(name) 直接 continue），等于悄悄丢掉一份证据。
+ * 现在把该银行的全部出处收进 vias[]，并把短标签 tags[] 一并算好，
+ * 渲染层据此分别标注两种口径、不混用（详情页是主渠道/直销说明，
+ * 列表行才是全部代销 —— 这是两个不同语义，不能拼成一句话）。
+ *
+ * 兼容：静态索引老结构 {name, via} 仍正常工作（vias 由单值派生）。
  * 没有代销证据 → 返回空数组（调用方据此显示「未披露代销渠道」，绝不臆造）。
- * @returns {AgentBank[]}
+ * @returns {Array<{name:string, via:string, vias:string[], tags:string[]}>}
  */
 export function agentBanks(rec) {
   const list = rec && Array.isArray(rec.agents) ? rec.agents : [];
-  const seen = new Set();
-  const out = [];
+  const byName = new Map();
   for (const a of list) {
     const name = a && typeof a.name === "string" ? a.name.trim() : "";
-    const via = a && typeof a.via === "string" ? a.via : "净值瞭望";
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    out.push({ name, via });
+    if (!name) continue;
+    // 新结构可能带 vias[]（同名多口径），老结构只有单个 via
+    const rawVias = a && Array.isArray(a.vias) ? a.vias : [a && typeof a.via === "string" ? a.via : "净值瞭望"];
+    if (!byName.has(name)) byName.set(name, { name, vias: [] });
+    const vias = byName.get(name).vias;
+    for (const v of rawVias) {
+      const s = typeof v === "string" && v.trim() ? v.trim() : "净值瞭望";
+      if (!vias.includes(s)) vias.push(s);               // 同名合并，不丢口径
+    }
   }
-  return out;
+  return [...byName.values()].map(b => ({
+    name: b.name,
+    via: b.vias[0],                                       // 兼容旧消费方
+    vias: b.vias.slice(),
+    tags: b.vias.map(agentViaTag),
+  }));
+}
+
+/** 出处短标签：仅去公共前缀，不改语义；判断收口在此，渲染层只 esc 输出 */
+export function agentViaTag(via) {
+  const s = String(via == null ? "" : via);
+  return s.startsWith("净值瞭望") ? s.slice("净值瞭望".length) || s : s;
 }
 
 /** 是否有代销证据（「若有代销银行」的那道闸） */
@@ -192,4 +215,48 @@ export function shelfMeta(shelf) {
     source_agents: m.source_agents || "",
     note: m.note || "",
   };
+}
+
+/* ---------- v98 · 快照新鲜度（判断收口在此，UI 与 CI 软哨兵共用） ----------
+   静态索引是「慢变字段快照」，会漂移。旧版只在页脚写死一个日期，
+   既不判断过期、也没有重跑后日期会更新的机制（生成脚本里 captured_at
+   是硬编码字符串，重跑永远显示 2026-11-07 → 永远"新鲜"，这是真漏洞）。
+   这里给出唯一判据：按自然日算天数，分三档；UI 显示徽标 + 过期引导，
+   CI 软哨兵只提示不阻断（退出码恒 0，不制造假红）。 */
+export const SHELF_FRESH_DAYS = 30;    // ≤30 天：新鲜
+export const SHELF_STALE_DAYS = 90;    // >90 天：过期（阈值是估算值，见实施报告）
+
+/**
+ * @param {any} shelf 静态索引
+ * @param {Date|string|number} [now] 注入当前时间，便于测试确定性；缺省 new Date()
+ * @returns {{level:"fresh"|"aging"|"stale"|"unknown", days:number|null,
+ *            captured_at:string, label:string, hint:string, stale:boolean}}
+ */
+export function shelfFreshness(shelf, now) {
+  const captured = shelfMeta(shelf).captured_at;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(captured));
+  if (!m) {
+    return { level: "unknown", days: null, captured_at: captured,
+      label: "快照日期缺失", hint: "无法确定快照日期，请重跑生成脚本补齐 captured_at。", stale: true };
+  }
+  const capDay = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  const d = now instanceof Date ? now : (now == null ? new Date() : new Date(now));
+  if (isNaN(d.getTime())) {
+    return { level: "unknown", days: null, captured_at: captured,
+      label: "快照日期无法校验", hint: "时间参数无效，不臆测新鲜度。", stale: true };
+  }
+  const curDay = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const days = Math.max(0, Math.floor((curDay - capDay) / 86400000));  // 未来日期钳到 0，不误报
+  if (days <= SHELF_FRESH_DAYS) {
+    return { level: "fresh", days, captured_at: captured,
+      label: `快照新鲜（${days} 天前）`, hint: "", stale: false };
+  }
+  if (days <= SHELF_STALE_DAYS) {
+    return { level: "aging", days, captured_at: captured,
+      label: `快照 ${days} 天前`, hint: "慢变字段可能已漂移，建议重跑生成脚本更新。", stale: false };
+  }
+  return { level: "stale", days, captured_at: captured,
+    label: `快照已过期（${days} 天前）`,
+    hint: "该快照超过 90 天，分类/代销等慢变字段可能已变化，请重跑 scripts/gen-webank-shelf.mjs 并随版本推送。",
+    stale: true };
 }

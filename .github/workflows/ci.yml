@@ -30,6 +30,12 @@ jobs:
       - name: 交易日历门禁
         run: node scripts/check-calendar.mjs
 
+      # v98 · 静态索引健康软哨兵：快照过期 / 体积膨胀只提示，退出码恒 0。
+      # 与 app.js 的 shelfFreshness() 共用同一判据（收口在 js/core/webank.js），
+      # 不会两处口径分叉；不设硬阈值，避免 90 天后把每个 PR 染成假红。
+      - name: 静态索引健康（软哨兵）
+        run: node scripts/check-shelf-freshness.mjs
+
       - name: 语法检查
         run: |
           node --check app.js

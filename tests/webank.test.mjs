@@ -17,6 +17,7 @@ import SHELF from "../js/core/webank-shelf.js";
 import {
   WEBANK_FIELDS, WEBANK_GROUPS, hasValue, normCode, matchShelf, shelfClass,
   shelfTags, agentBanks, hasAgents, renderableFields, groupedFields, shelfMeta,
+  agentViaTag, shelfFreshness, SHELF_FRESH_DAYS, SHELF_STALE_DAYS,
 } from "../js/core/webank.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -190,4 +191,110 @@ test("接线：sw.js 的 SHELL 收了两个新模块（版本号不在本文件�
   /* v97 · P1 收敛：APP_VER/CACHE 的版本号一致性只在 handlers.test.mjs 唯一总测 +
      scripts/check-version.sh 守。这里刻意不写 const APP_VER = "vNN" 之类的硬编码断言，
      免得发版时又多一处要同步的钉子（审查报告 P1 的核心教训）。 */
+});
+
+/* ================= v98 · 残留风险修复的回归测试 ================= */
+
+/* ---------- 10. 快照新鲜度判据（UI 与 CI 软哨兵共用同一处） ---------- */
+test("新鲜度：三档分界 + 注入 now 可测 + 边界当天", () => {
+  const cap = shelfMeta(SHELF).captured_at;                 // 2026-11-07
+  const at = iso => shelfFreshness(SHELF, iso);
+  assert.equal(withCap(cap, 0).level, "fresh", "当天=0 天，新鲜");
+  assert.equal(withCap(cap, SHELF_FRESH_DAYS).level, "fresh", "恰好 30 天仍是新鲜（闭区间）");
+  assert.equal(withCap(cap, SHELF_FRESH_DAYS + 1).level, "aging", "31 天进入提醒档");
+  assert.equal(withCap(cap, SHELF_STALE_DAYS).level, "aging", "恰好 90 天仍是提醒档");
+  assert.equal(withCap(cap, SHELF_STALE_DAYS + 1).level, "stale", "91 天判过期");
+  assert.equal(withCap(cap, 200).stale, true, "过期档 stale=true，UI 才显示引导");
+  assert.equal(withCap(cap, 0).hint, "", "新鲜档不打扰用户");
+  assert.match(withCap(cap, 200).hint, /gen-webank-shelf\.mjs/, "过期引导要给出重跑入口");
+  // 真实索引按真实时间也应落在新鲜档（本轮刚采集），防止快照日期被写死成未来
+  assert.equal(at(new Date().toISOString()).level === "unknown", false, "真实索引日期必须可解析");
+});
+/** 以快照日为基准，构造 N 天后的 ISO 时间 */
+function withCap(cap, days) {
+  const d = new Date(cap + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return shelfFreshness(SHELF, d.toISOString());
+}
+test("新鲜度：未来日期钳到 0、缺失/非法日期诚实降级为 unknown", () => {
+  assert.equal(withCap(shelfMeta(SHELF).captured_at, -5).days, 0, "时钟回拨不产生负天数");
+  assert.equal(withCap(shelfMeta(SHELF).captured_at, -5).level, "fresh");
+  const bad = shelfFreshness({ meta: { captured_at: "未知" } }, "2026-11-07T00:00:00Z");
+  assert.equal(bad.level, "unknown");
+  assert.equal(bad.stale, true, "日期缺失也要按「不新鲜」处理，不冒充新鲜");
+  const badTime = shelfFreshness(SHELF, "not-a-date");
+  assert.equal(badTime.level, "unknown", "无效时间参数不臆测");
+  assert.equal(badTime.days, null);
+});
+
+/* ---------- 11. 代销口径不丢、不混用（v98 真修复） ---------- */
+test("代销口径：同名银行多来源收进 vias[]，不再只留第一个 via", () => {
+  const rec = { agents: [
+    { name: "微众银行", via: "净值瞭望详情页" },
+    { name: "微众银行", via: "净值瞭望列表行" },
+    { name: "网商银行", via: "净值瞭望列表行" },
+  ] };
+  const banks = agentBanks(rec);
+  assert.deepEqual(banks.map(b => b.name), ["微众银行", "网商银行"], "仍按名去重保序");
+  assert.deepEqual(banks[0].vias, ["净值瞭望详情页", "净值瞭望列表行"], "两条口径都要留");
+  assert.deepEqual(banks[0].tags, ["详情页", "列表行"], "短标签供 UI 可见标注");
+  assert.equal(banks[0].via, "净值瞭望详情页", "兼容旧消费方：via 仍是主口径");
+});
+test("代销口径：新版静态索引真恢复了被旧脚本吞掉的多口径证据", () => {
+  // 旧生成脚本按名去重 → 同名第二个 via 被丢；v98 恢复。至少 6 条实证。
+  let multi = 0;
+  for (const r of Object.values(SHELF.byCode)) {
+    for (const b of agentBanks(r)) if (b.vias.length > 1) multi++;
+  }
+  assert.ok(multi >= 6, `静态索引里应有恢复的多口径银行，实测 ${multi}`);
+  const g = agentBanks(matchShelf(SHELF, "NYJXLD1409G").rec);
+  assert.ok(g.some(b => b.vias.includes("净值瞭望详情页") && b.vias.includes("净值瞭望列表行")),
+    "固收+ 样例应同时带两种口径证据");
+});
+test("口径短标签：只去公共前缀，不改语义", () => {
+  assert.equal(agentViaTag("净值瞭望列表行"), "列表行");
+  assert.equal(agentViaTag("净值瞭望详情页"), "详情页");
+  assert.equal(agentViaTag("其他来源"), "其他来源");
+  assert.equal(agentViaTag(""), "");
+});
+
+/* ---------- 12. 生成脚本：快照日期参数化（不再硬编码） ---------- */
+test("生成脚本：captured_at 不再写死字符串，改为可覆盖 + 证据推导", () => {
+  const g = read("scripts/gen-webank-shelf.mjs");
+  assert.doesNotMatch(g, /captured_at:\s*"20\d\d-\d\d-\d\d"/, "meta 里不许再硬编码日期");
+  assert.match(g, /--captured-at/, "要有显式覆盖参数");
+  assert.match(g, /resolveCapturedAt/, "要有日期推导函数");
+  assert.match(g, /validDay/, "要校验日历合法性（2026-02-30 不能过）");
+  assert.match(g, /dateFromEvidence/, "快照日期要来自证据文件 captured_at，不臆造");
+  const head = read("js/core/webank-shelf.js").split("\n").slice(0, 6).join("\n");
+  assert.doesNotMatch(head, /v\d+ ·/, "产物头注释不写版本号（避免每发一版同步假钉子）");
+});
+
+/* ---------- 13. 软哨兵接线：CI 与本地 check 都跑，且退出码恒 0 ---------- */
+test("软哨兵：脚本存在、接进 package.json 与 CI、且不阻断发布", () => {
+  const s = read("scripts/check-shelf-freshness.mjs");
+  assert.match(s, /process\.exit\(0\)/, "退出码必须恒 0（不制造假红）");
+  assert.doesNotMatch(s, /process\.exit\(1\)/, "不许把过期/膨胀做成硬失败");
+  assert.match(s, /shelfFreshness/, "必须复用同一判据，不另写一套日期逻辑");
+  assert.match(s, /gzipSync/, "要有体积护栏");
+  const pkg = JSON.parse(read("package.json"));
+  assert.match(pkg.scripts.check, /shelf-health/, "本地 npm run check 要跑软哨兵");
+  const ci = read(".github/workflows/ci.yml");
+  assert.match(ci, /check-shelf-freshness\.mjs/, "CI 要有软哨兵 step");
+});
+
+/* ---------- 14. app.js 接线：新鲜度徽标 + 代销口径可见标注 ---------- */
+test("接线：app.js 用 shelfFreshness 渲染徽标，代销口径从 title 升级为可见", () => {
+  const app = read("app.js");
+  assert.match(app, /shelfFreshness/, "要导入/使用新鲜度判据");
+  const blk = app.slice(app.indexOf("function webankBlock("), app.indexOf("function webankHintHtml("));
+  /* ★ 锚定模板插值而非函数体里的变量引用：只删 ${freshHtml} 挂点时，
+     函数体内 fresh.label 仍在 → 宽松正则会假绿（v97 接线测试踩过同款坑）。 */
+  assert.match(blk, /\$\{freshHtml\}/, "详情模板没挂新鲜度徽标区（要匹配插值，不是变量定义）");
+  assert.match(blk, /fresh\.label/, "详情区要渲染新鲜度标签");
+  assert.match(blk, /fresh\.hint/, "过期要显示重跑引导");
+  assert.match(blk, /b\.tags/, "代销银行要按口径可见标注（不再只藏 title）");
+  assert.match(blk, /两口径分别标注|不混用/, "要写明两口径不混用");
+  const hint = app.slice(app.indexOf("function webankHintHtml("), app.indexOf("function renderProdDetail("));
+  assert.match(hint, /fresh\.stale/, "录入提示在过期时也要提醒");
 });

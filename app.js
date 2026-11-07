@@ -44,10 +44,12 @@ import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
   llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr, LLM_CANCEL_TEXT } from "./js/domain/llm.js";
 /* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
-   只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。 */
+   只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。
+   v98：补 shelfFreshness（快照过期判据）与 agentViaTag（代销口径短标签），
+   仍全部收口在 js/core/webank.js，app.js 只渲染。 */
 import WEBANK_SHELF from "./js/core/webank-shelf.js";
 import { matchShelf, shelfTags, shelfClass, agentBanks, hasAgents, groupedFields,
-  shelfMeta } from "./js/core/webank.js";
+  shelfMeta, shelfFreshness } from "./js/core/webank.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -68,7 +70,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v97";
+const APP_VER = "v98";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2910,14 +2912,19 @@ function webankBlock(p) {
   const banks = agentBanks(rec);
   const groups = groupedFields(rec);
   const meta = shelfMeta(WEBANK_SHELF);
+  const fresh = shelfFreshness(WEBANK_SHELF);
   const tagHtml = tags.length
     ? `<div class="chips" style="margin:8px 0 2px">${tags.map(t =>
         `<span class="chip" style="cursor:default" title="出处：${esc(t.src)}">${esc(t.text)}</span>`).join("")}</div>`
     : "";
-  /* 「若有代销银行」：有则多值列出并各自标出处；无则诚实标注未披露，绝不臆造 */
+  /* 「若有代销银行」v98：口径不再只藏在 title —— 列表行是「全部代销」、
+     详情页 .tags 是「主渠道/直销说明」，两者语义不同，各自可见标注，不混成一句。
+     agentBanks 已把同一家银行的多口径收进 vias/tags，这里只 esc 渲染。 */
   const bankHtml = banks.length
     ? `<div class="sumline"><span class="k">代销银行（${banks.length} 家）</span><span style="text-align:right">${banks
-        .map(b => `<span title="出处：${esc(b.via)}">${esc(b.name)}</span>`).join(" · ")}</span></div>`
+        .map(b => `<span title="出处：${esc(b.vias.join(" / "))}">${esc(b.name)}${b.tags.map(t =>
+          `<span class="muted" style="font-size:10px">〔${esc(t)}〕</span>`).join("")}</span>`).join(" · ")}</span></div>` +
+      `<div class="muted" style="font-size:10px;margin-top:2px">〔〕内为证据口径：列表行=全部代销银行，详情页=主渠道/直销说明；两口径分别标注、不混用。</div>`
     : `<div class="sumline"><span class="k">代销银行</span><span class="muted">该渠道未披露代销信息</span></div>`;
   /* 动态字段：只渲染该产品真正有值的字段，按分组归拢；金额走 shown()，逐项标源字段出处 */
   const fieldHtml = groups.map(g =>
@@ -2929,11 +2936,15 @@ function webankBlock(p) {
         `<span style="text-align:right">${shownVal}</span></div>`;
     }).join("")).join("");
   const n = groups.reduce((s, g) => s + g.rows.length, 0);
+  /* v98 新鲜度徽标：慢变字段快照会漂移，过期必须让用户看见并知道怎么重跑 */
+  const freshHtml = `<div style="margin-top:6px"><span class="chip" style="cursor:default" title="快照 ${esc(fresh.captured_at)}">${esc(fresh.label)}</span></div>` +
+    (fresh.hint ? `<div class="muted" style="font-size:10.5px;margin-top:3px">${esc(fresh.hint)}</div>` : "");
   return `<div class="note b" style="margin-top:10px">
     <b>微众稳健货架</b> · 按产品代码 <b>${esc(m.code)}</b> 匹配到 <b>${n}</b> 项字段
     ${tagHtml}${bankHtml}
     <details style="margin-top:6px"><summary style="cursor:pointer;font-size:11.5px">展开 ${n} 项动态字段（${groups.length} 组）</summary>${fieldHtml}</details>
     <div class="muted" style="font-size:10.5px;margin-top:8px">数据来源：${esc(meta.source_we)}；代销：${esc(meta.source_agents)}。快照 ${esc(meta.captured_at)} · 货架 ${meta.shelf_rows} 只 · 仅慢变字段，净值与周期年化以云端抓取为准；枚举码无字典表，保留原值不臆造语义。</div>
+    ${freshHtml}
   </div>`;
 }
 /* 录入 / 粘贴 / 扫码预览里的即时提示：命中即可告知「能匹配到多少字段 + 代销银行」 */
@@ -2944,12 +2955,16 @@ function webankHintHtml(code) {
   const n = groupedFields(rec).reduce((s, g) => s + g.rows.length, 0);
   const banks = agentBanks(rec);
   const meta = shelfMeta(WEBANK_SHELF);
+  const fresh = shelfFreshness(WEBANK_SHELF);
   const cls = shelfClass(rec);
   const clsTxt = cls ? (cls.key === "plus" ? "活期+Plus" : cls.key === "fixplus" ? "固收+" : "普通稳健") : "";
   const bankLine = banks.length
     ? `代销银行：<b>${banks.map(b => esc(b.name)).join(" · ")}</b>（${banks.length} 家）`
     : `代销银行：<span class="muted">该渠道未披露代销信息</span>`;
-  return `<div class="note b" style="margin-top:8px">✓ 命中<b>微众稳健货架</b>${clsTxt ? " · " + esc(clsTxt) : ""}（快照 ${esc(meta.captured_at)}）：保存后产品详情可按匹配到的 <b>${n}</b> 项字段动态展示。<br>${bankLine}</div>`;
+  /* v98：录入即时提示也要带新鲜度，过期时别让用户以为刚匹配到的是实时数据 */
+  const freshLine = fresh.stale
+    ? `<br><span class="muted" style="font-size:10.5px">${esc(fresh.label)} · ${esc(fresh.hint)}</span>` : "";
+  return `<div class="note b" style="margin-top:8px">✓ 命中<b>微众稳健货架</b>${clsTxt ? " · " + esc(clsTxt) : ""}（快照 ${esc(meta.captured_at)} · ${esc(fresh.label)}）：保存后产品详情可按匹配到的 <b>${n}</b> 项字段动态展示。<br>${bankLine}${freshLine}</div>`;
 }
 
 function renderProdDetail() {

@@ -16,8 +16,17 @@
      --agents  净值瞭望列表行代销标签批量采集（按销售代码 ?q=）
                复验：GET https://bank.leyuw.com/?q=<销售代码> → 精确同代码行 <span class=chip> 以「代销」结尾者
      --detail  净值瞭望详情页「亦在…代销」证据（规范全称，取并集）
+     --captured-at  快照日期 YYYY-MM-DD（可省）
      --out     产物路径
      --mirror  等价 JSON 路径（可省）
+
+   v98 · 快照日期不再硬编码：旧版 meta.captured_at 写死 "2026-11-07"，
+   重跑永远显示「新鲜」，前端的新鲜度判据形同虚设（真漏洞）。现在：
+     ① 显式 --captured-at 优先；
+     ② 否则从 --agents / --detail 证据文件的 captured_at 推导日期部分；
+     ③ 都没有才回退到运行当天（北京时间 UTC+8）。
+   前两条都是「同一份输入 → 同一份产物」，确定性不变；重新采集证据后
+   日期会跟着变，shelfFreshness() 才会真正报出过期。
 
    纪律：
      · 只收「慢变」字段：身份 / 分类 / 风险码 / 持有期 / 起购规则 /
@@ -52,8 +61,41 @@ const P = {
   shelf: arg("--shelf", "/workspace/第8步-交付文件/webank_shelf_full.json"),
   agents: arg("--agents", "/workspace/第9步-交付文件/净值瞭望-代销chip-全量459.json"),
   detail: arg("--detail", "/workspace/第9步-交付文件/实施前-数据可行性证据.json"),
+  capturedAt: arg("--captured-at", ""),
   out: arg("--out", path.join(ROOT, "js/core/webank-shelf.js")),
   mirror: arg("--mirror", ""),
+};
+
+/* v98 · 快照日期：显式参数 > 证据文件 captured_at 的日期部分 > 运行当天(北京时间)。
+   不臆造：从证据里读到的日期才代表「这批数据是什么时候采的」。 */
+const readJsonSafe = f => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { return {}; } };
+const dateFromEvidence = f => {
+  const s = String((readJsonSafe(f) || {}).captured_at || "");
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  return m ? m[1] : "";
+};
+const todayCN = () => new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+/* 日历合法性：正则只管形状，2026-13-99 也会过 —— 必须回读年月日，
+   否则产出非法日期会让前端 shelfFreshness() 算出 NaN/误判。 */
+const validDay = s => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return false;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
+};
+const resolveCapturedAt = () => {
+  const explicit = P.capturedAt.trim();
+  if (explicit) {
+    if (!validDay(explicit)) {
+      console.error(`❌ --captured-at 应为合法日期 YYYY-MM-DD，收到：${explicit}`);
+      process.exit(2);
+    }
+    return explicit;
+  }
+  const fromEv = dateFromEvidence(P.agents) || dateFromEvidence(P.detail) || dateFromEvidence(P.shelf);
+  if (validDay(fromEv)) return fromEv;
+  console.warn("⚠️ 输入证据没有合法 captured_at，快照日期回退到运行当天（建议显式传 --captured-at 保持确定性）");
+  return todayCN();
 };
 
 /* 「不知道」判定：占位值不算值。与 disc.js:isAssetNum / fieldCoverage 同纪律。 */
@@ -105,13 +147,24 @@ let detailEv = { leyuw: { product_detail_tags: [], list_row_agents_note: {} } };
 try { detailEv = JSON.parse(fs.readFileSync(P.detail, "utf8")); } catch (e) { /* 同上 */ }
 
 /* 代销并集：详情页规范名优先，列表行 chip 补充，各自带 via。
-   详情页 .tags 是主渠道/直销说明，列表行才是全部代销 —— 两者取并集，不混用口径。 */
+   详情页 .tags 是主渠道/直销说明，列表行才是全部代销 —— 两者取并集，不混用口径。
+
+   v98 · 同名银行不再丢第二个口径：旧版 `some(name) → 跳过` 会悄悄丢掉
+   「同一家同时被两种口径证实」的证据。现在单口径保持旧结构 {name, via}
+   （产物逐字节不变），只有真出现多口径才升级为 {name, via, vias[]}；
+   判据层 agentBanks() 两种结构都认。 */
 const agentMap = {};
 const addAgent = (code, name, via) => {
   if (!code || !name) return;
   const key = String(code).toUpperCase();
   agentMap[key] = agentMap[key] || [];
-  if (!agentMap[key].some(x => x.name === name)) agentMap[key].push({ name, via });
+  const hit = agentMap[key].find(x => x.name === name);
+  if (!hit) { agentMap[key].push({ name, via }); return; }
+  if (hit.vias) {
+    if (!hit.vias.includes(via)) hit.vias.push(via);
+  } else if (hit.via !== via) {
+    hit.vias = [hit.via, via];
+  }
 };
 for (const x of (detailEv.leyuw && detailEv.leyuw.product_detail_tags) || []) {
   for (const b of x.agent_banks || []) addAgent(x.code, b, "净值瞭望详情页");
@@ -179,8 +232,9 @@ for (const r of shelf) {
   byCode[code] = rec;
 }
 
+const captured_at = resolveCapturedAt();
 const meta = {
-  captured_at: "2026-11-07",
+  captured_at,
   shelf_rows: Object.keys(byCode).length,
   agents_rows: Object.keys(agentMap).length,
   source_we: "微众稳健理财货架 query_std_fin_prod_list_no_auth（匿名 GET，5 页）",
@@ -189,9 +243,11 @@ const meta = {
 };
 const data = { meta, byCode };
 const json = JSON.stringify(data);
-const js = `/* v97 · 微众稳健货架静态索引 —— 由 scripts/gen-webank-shelf.mjs 确定性生成，请勿手改。
+const js = `/* 微众稳健货架静态索引 —— 由 scripts/gen-webank-shelf.mjs 确定性生成，请勿手改。
    快照 ${meta.captured_at} · ${meta.shelf_rows} 只 · 仅慢变字段。
-   判断（命中 / 字段字典 / 标签 / 代销归并 / 空值语义）收口在 js/core/webank.js。 */
+   判断（命中 / 字段字典 / 标签 / 代销归并 / 空值语义 / 新鲜度）收口在 js/core/webank.js。
+   头部不写版本号：它只是数据快照，版本由 app.js APP_VER / sw.js CACHE 管，
+   免得每发一版都要回来同步一处假钉子（P1 收敛同向）。 */
 export default ${json};
 `;
 
