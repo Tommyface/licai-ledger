@@ -20,7 +20,7 @@
 /* 登记编码形态与 Python 侧 navsources/base.is_reg_code 同一条（Z + 12~14 位数字），
    判据只在 js/core/orgs.js 写一处，这里复用。注意别跟本文件的 FEED_REG 混起来：
    FEED_REG 是「云端规则 feed 里认的那一种（Z + 13 位）」，窄一档，改它要另做判断。 */
-import { isRegCode } from "./orgs.js";
+import { isRegCode, regCodeOf } from "./orgs.js";
 
 /* 来源分级（铁律 3）。只有这四档，schema 里也是这四档的 enum：
    official  = 发行机构官网 / 中国理财网信披平台的原始披露文件
@@ -841,4 +841,37 @@ export function applyBench(p, rec) {
   const at = str(src.at);
   if (via || at) p.benchSrc = { via, at };
   return { changed: true };
+}
+
+/* ============================================================
+   v96 · A1 字段覆盖率：每个关键口径字段「几只知道 · 几只不知道」。
+   判断只留这一处：ok 谓词全部走各字段自己的取值口径
+   （登记编码走 regCodeOf，资产净值走 assetValueOf），不许在渲染层另写一套。
+   语义沿用本文件铁律 1：不知道就是不知道，绝不冒充 0 —— 所以返回的是
+   ok / unknown 两个计数，而不是「填充率百分比」那种把缺失摊进分母的数。
+   ============================================================ */
+
+/**
+ * @param {any[]} products
+ * @returns {{total: number, rows: Array<{key:string, label:string, ok:number, unknown:number}>}}
+ */
+export function fieldCoverage(products) {
+  const list = Array.isArray(products) ? products : [];
+  /** @type {Array<[string, string, (p:any) => boolean]>} */
+  const defs = [
+    ["regCode", "登记编码", p => !!regCodeOf(p)],
+    ["riskLevel", "风险等级", p => !!(p && typeof p.riskLevel === "string" && p.riskLevel.trim())],
+    ["estDate", "成立日", p => !!(p && typeof p.estDate === "string" && p.estDate.trim())],
+    ["assetValue", "资产净值", p => {
+      const av = assetValueOf(p);
+      return !!(av && Number.isFinite(Number(av.v)) && String(av.v).trim() !== "");
+    }],
+    ["benchmark", "业绩基准", p => !!(p && typeof p.benchmark === "string" && p.benchmark.trim())],
+  ];
+  const rows = defs.map(([key, label, ok]) => {
+    let n = 0;
+    for (const p of list) { try { if (ok(p)) n++; } catch (e) { /* 谓词异常按不知道计 */ } }
+    return { key, label, ok: n, unknown: list.length - n };
+  });
+  return { total: list.length, rows };
 }

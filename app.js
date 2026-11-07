@@ -34,7 +34,7 @@ import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateF
   applyRulesFeeds, rulesFeedReg, regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
   assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,
   assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,
-  benchViaLabel, applyBench } from "./js/core/disc.js";
+  benchViaLabel, applyBench, fieldCoverage } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -63,7 +63,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v95";
+const APP_VER = "v96";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -593,6 +593,29 @@ function renderHome() {
   $("statCnt").textContent = pf.rows.length; $("statCnt").className = "v";
   if ($("appVer")) $("appVer").textContent = `版本 ${APP_VER}`;
   renderCal(); renderDetail();
+  renderBrief();
+}
+
+/* ---------- v96 · 每日口径简报（云端抓取脚本写进 settings.dailyBrief，本机只读） ---------- */
+function renderBrief() {
+  const box = $("briefBox"); if (!box) return;
+  const db = DATA.settings && DATA.settings.dailyBrief;
+  /* 云端还没写过（老云端 / 没跑过新抓取脚本）就不渲染 —— 不装作有简报 */
+  if (!db || typeof db.text !== "string" || !db.text.trim()) { box.innerHTML = ""; return; }
+  const lines = String(db.text).split("\n").map(l => esc(l)).join("<br>");
+  box.innerHTML = `<div class="note"><b>每日口径简报</b>` +
+    (db.time ? ` · <span class="muted">更新于 ${esc(stampText(db.time))}</span>` : "") +
+    `<br>${lines}</div>`;
+}
+
+/* ---------- v96 · A1 字段覆盖率（判断在 disc.js:fieldCoverage，这里只渲染） ---------- */
+function renderCoverage() {
+  const box = $("covBox"); if (!box) return;
+  if (!DATA.products.length) { box.innerHTML = ""; return; }
+  const c = fieldCoverage(DATA.products);
+  box.innerHTML = `<div class="note" style="margin-top:8px"><b>字段覆盖率</b>（${c.total} 只产品，「不知道」不冒充 0）：<br>` +
+    c.rows.map(r => `· ${esc(r.label)} <b>${r.ok}/${c.total}</b>` +
+      (r.unknown ? `<span style="color:#8a6300">（${r.unknown} 只不知道）</span>` : "（齐）")).join("<br>") + `</div>`;
 }
 function setStat(id, v, isMoney, isPct) {
   const e = $(id);
@@ -982,6 +1005,7 @@ function renderProd() {
      （添加 / 编辑 / 删除 / 补录净值 / 抓取）都会调 renderProd()，
      顺带刷一次表 —— 否则在详情弹层里抓完净值、关掉后表还是旧数字。 */
   renderBoard();
+  renderCoverage();
 }
 
 /* ---------- 产品页：收益对比表（v45 新增） ---------- */

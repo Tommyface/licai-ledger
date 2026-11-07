@@ -171,7 +171,9 @@ export function mergeForPush(local, remote, opts) {
 
   payload.settings = objOf(payload.settings);
   const rs = objOf(r.settings);
-  for (const k of ["lastNavSync", "lastFetch"]) {
+  /* v96：dailyBrief（云端抓取脚本写的每日口径简报）同规则骑行 ——
+     本机从不编辑它，云端有更新的就取更新的；text 不变时不换 time，不制造额外提交。 */
+  for (const k of ["lastNavSync", "lastFetch", "dailyBrief"]) {
     const a = rs[k], b = payload.settings[k];
     const ta = a ? String(a.time || a) : "";
     const tb = b ? String(b.time || b) : "";

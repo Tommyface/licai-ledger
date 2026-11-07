@@ -128,8 +128,8 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
 
 test("APP_VER 升到 v93 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v95"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v95"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v96"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v96"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }
@@ -139,9 +139,10 @@ test("APP_VER 升到 v93 且 SHELL 不漏文件", () => {
    判据在 js/core/disc.js 里已经有口径测试了；这里只盯「页面真的用了它」——
    上一轮（v3.3）就是靠这类逐点断言才把「测试全绿但页面没接线」那种假绿抓出来。 */
 test("规模这一栏：抓取回写、表单初值、详情展示三处都真的走 disc.js 的判据", () => {
-  /* v90 多了 assetValueShort；v92 再多半套逐日序列读/落账函数；v94 又多基准两件 ——
-     仍是同一份 disc.js 判据，不许在 app.js 里另写一套换算。 */
-  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,\s*\n\s*assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,\s*\n\s*benchViaLabel, applyBench\s*\} from "\.\/js\/core\/disc\.js"/);
+  /* v90 多了 assetValueShort；v92 再多半套逐日序列读/落账函数；v94 又多基准两件；
+     v96 再多 fieldCoverage（A1 覆盖率）—— 仍是同一份 disc.js 判据，
+     不许在 app.js 里另写一套换算。 */
+  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,\s*\n\s*assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,\s*\n\s*benchViaLabel, applyBench, fieldCoverage\s*\} from "\.\/js\/core\/disc\.js"/);
   assert.ok(imp, "资产与基准的判据函数必须从 disc.js 导入，不许在 app.js 里另写一套");
 
   /* ① 抓取回写：判据跑在 disc.js，这里只盯接线与它所在的位置 */
@@ -281,4 +282,29 @@ test("v94：AI 快照带上基准三件（白名单在 llm.js，app.js 只供字
 test("v94：benchRule 进了同步字段表，benchSrc 随规则5整键同步", () => {
   assert.ok(app.includes('"benchmark", "benchRule", "lastNavSync"]'),
     "MERGE_FIELDS 少了 benchRule —— 云端补的确认规则到不了另一台设备");
+});
+
+/* ---- v96 · C3 每日口径简报 + A1 覆盖率面板：页面侧接线 ----
+   简报是云端写的（settings.dailyBrief），本机只读、诚实降级：云端没写就不渲染，
+   不装作有简报。覆盖率判断在 disc.js:fieldCoverage，页面只渲染 —— 判断不许抄第二份。 */
+test("v96 简报与覆盖率：挂点、诚实降级、判断收口、settings 骑行", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  /* 挂点必须存在且各自被渲染函数喂 */
+  assert.ok(html.includes('id="briefBox"'), "台账页缺简报挂点 briefBox");
+  assert.ok(html.includes('id="covBox"'), "产品页缺覆盖率挂点 covBox");
+  assert.ok(app.includes('const box = $("briefBox")') && app.includes("renderBrief();\n}"),
+    "renderBrief 必须实现并在 renderHome 收尾调用");
+  assert.ok(app.includes("renderCal(); renderDetail();\n  renderBrief();"), "renderHome 末尾要刷简报");
+  assert.ok(app.includes("renderBoard();\n  renderCoverage();"), "renderProd 末尾要刷覆盖率");
+  /* 诚实降级：云端没写简报（老云端/没跑过新抓取）就不渲染，不许放空壳 */
+  assert.ok(app.includes('if (!db || typeof db.text !== "string" || !db.text.trim()) { box.innerHTML = ""; return; }'),
+    "简报缺失时必须整块隐藏（诚实降级），不许渲染空壳");
+  /* 判断只留一处：页面不许自带覆盖率谓词 */
+  assert.ok(app.includes("fieldCoverage(DATA.products)"), "覆盖率取数必须走 disc.js:fieldCoverage");
+  assert.ok(!/function\s+fieldCoverage/.test(app), "fieldCoverage 不许在 app.js 里再抄一份");
+  assert.ok(read("js/domain/sync.js").includes('"dailyBrief"'),
+    "settings 骑行清单必须含 dailyBrief，否则本地一推就把云端简报冲掉");
+  /* 铁律：结论文本里不写钱 —— 简报是云端口径文本原样展示，页面不做任何金额加工 */
+  assert.ok(!app.includes("signMoney(db.text") && !app.includes("shownMoney(db"), "简报文本不许过金额格式化");
 });

@@ -17,7 +17,7 @@ import {
   regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
   assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,
   assetHistoryOf, assetValueAt, assetHistoryViaLabel, assetHistoryRank, applyAssetHistory,
-  benchViaLabel, applyBench,
+  benchViaLabel, applyBench, fieldCoverage,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -206,8 +206,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v95"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v95"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v96"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v96"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -1198,4 +1198,33 @@ test("benchViaLabel：档位标签与所有者定的顺序一致", () => {
   assert.equal(benchViaLabel("手工"), "手工");
   assert.equal(benchViaLabel("bob"), "发行方官网");
   assert.equal(benchViaLabel(""), "");
+});
+
+/* ---- v96 · A1 字段覆盖率：判断只此一处，空值语义是「知道/不知道」，不是 0/空 ---- */
+test("fieldCoverage：逐字段统计知道几只、不知道几只，谓词走各自取值口径", () => {
+  const prods = [
+    { id: "a", regCode: "Z700040001", riskLevel: "中低风险", estDate: "2021-06-18", benchmark: "中债指数×60%", assetValue: { v: 1.2, date: "2026-11-06" }, navHistory: { "2026-11-06": 1.01 } },
+    { id: "b", prodCode: "NYJXLD1409G", riskLevel: "中风险", navHistory: { "2026-11-06": 1.02 } },
+    { id: "c", regCode: "  Z700040002  ", navHistory: {} },
+  ];
+  const c = fieldCoverage(prods);
+  assert.equal(c.total, 3);
+  const by = Object.fromEntries(c.rows.map(r => [r.key, r]));
+  assert.equal(by.regCode.ok, 2);    /* c 带空白也认得（regCodeOf 负责裁） */
+  assert.equal(by.regCode.unknown, 1);
+  assert.equal(by.riskLevel.ok, 2);
+  assert.equal(by.estDate.ok, 1);    /* 只有 a 填了成立日；其余是「不知道」，不冒充 */
+  assert.equal(by.estDate.unknown, 2);
+  assert.equal(by.assetValue.ok, 1); /* 只有 a 有一折资产净值 */
+  assert.equal(by.benchmark.ok, 1);
+});
+
+test("fieldCoverage：空入参/脏入参不炸，谓词异常按「不知道」计", () => {
+  const empty = fieldCoverage([]);
+  assert.equal(empty.total, 0);
+  for (const r of empty.rows) { assert.equal(r.ok, 0); assert.equal(r.unknown, 0); }
+  assert.equal(fieldCoverage(null).total, 0);
+  const c = fieldCoverage([{ id: "x", get riskLevel() { throw new Error("boom"); } }]);
+  assert.equal(c.rows.find(r => r.key === "riskLevel").unknown, 1);
+  assert.equal(c.rows.find(r => r.key === "riskLevel").ok, 0);
 });
