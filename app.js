@@ -33,7 +33,8 @@ import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateF
   DISC_TIER_LABEL, DISC_GAP_LABEL, applyAutoDisc, rulesDue, RULES_COOLDOWN_DAYS,
   applyRulesFeeds, rulesFeedReg, regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
   assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,
-  assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory } from "./js/core/disc.js";
+  assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,
+  benchViaLabel, applyBench } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -62,7 +63,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v93";
+const APP_VER = "v94";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -299,7 +300,7 @@ function applyTombs(d) {
    false = 保留「保留方」的原有值（与云端「已有净值不覆盖」同口径） */
 const MIGRATE_PREFER_PRECISE_NAV = true;
 
-const MERGE_FIELDS = ["name", "inst", "code", "prodCode", "riskLevel", "manager", "orgName", "estDate", "benchmark", "lastNavSync"];
+const MERGE_FIELDS = ["name", "inst", "code", "prodCode", "riskLevel", "manager", "orgName", "estDate", "benchmark", "benchRule", "lastNavSync"];
 
 function navCount(p) { return Object.keys((p && p.navHistory) || {}).length; }
 function hasTrade(p) { return DATA.trades.some(t => t.prodId === p.id); }
@@ -1438,6 +1439,13 @@ function prodForm(pid) {
       <input id="pAsset" inputmode="decimal" placeholder="如 2962513986.74" value="${esc(assetFormValue(p))}">
       <div class="tip">${esc(assetFormTip(p))}</div>
     </div>
+    <div class="field"><label>业绩比较基准 <span class="muted">（可留空；抓到/抓不到都会显示在产品页）</span></label>
+      <input id="pBench" placeholder="如 中证1000指数收益率×45%+活期存款利率×10%" value="${esc(p && p.benchmark || "")}">
+      <div class="tip">${esc(benchFormTip(p))}</div>
+    </div>
+    <div class="field"><label>确认规则 <span class="muted">（可留空）</span></label>
+      <input id="pBenchRule" placeholder="如 最短持有期" value="${esc(p && p.benchRule || "")}">
+    </div>
     <div class="field"><label>③ 产品名称 *（建议带机构简称）</label>
       <input id="pName" placeholder="如 北银理财京华远见春系列诚享7天持有期29号理财产品" value="${esc(p && p.name || "")}" oninput="onProdCodeInput()">
     </div>
@@ -1466,6 +1474,15 @@ function assetFormTip(p) {
   if (av && typeof av.v === "number") return `当前由抓取补齐：${assetValueText(p)}。这一栏留空就保持自动；填了则以你填的为准（单位只收元）。`;
   if (av && av.why) return `这一格暂时空着：${av.why}`;
   return "留空则由抓取按披露补齐（份额类别对得上才写，单位：元）。";
+}
+/* v94：基准栏的提示。与规模栏同一纪律 —— 回填进输入框的只有手工填的那份，
+   抓取补齐的写在提示里，绝不假装成用户填的（否则清空保存就连带抹掉抓取值）。 */
+function benchFormTip(p) {
+  const via = benchViaLabel((p && p.benchSrc && p.benchSrc.via) || "");
+  const at = (p && p.benchSrc && p.benchSrc.at) || "";
+  if (p && p.benchmark && (!via || via === "手工")) return "已按你手工填的记录，抓取不会覆盖它；清空这一栏再保存 = 交回抓取补齐。";
+  if (p && p.benchmark) return `当前由抓取补齐（${via}${at ? " · " + at : ""}）。这一栏留空就保持自动；填了则以你填的为准。`;
+  return "留空则由抓取多端补齐（中国理财网 / 发行方官网 / 微众接口 / 净值瞭望，只填空白）。";
 }
 function openProd() { prodForm(""); }
 function editProd(pid) { prodForm(pid); }
@@ -1546,16 +1563,30 @@ function saveProduct(pid) {
     code: ($("pCode").value || "").trim(),
     prodCode: ($("pProd").value || "").trim(),
     name,
-    inst: ($("pInst").value || "").trim()
+    inst: ($("pInst") && $("pInst").value || "").trim()
   };
+  /* v94：基准/确认规则。表单里填了 ⇒ 手工值（benchSrc 标「手工」，抓取端只填空白
+     所以永远不会再覆盖）；留空 ⇒ 原样抹掉这一栏 = 交回抓取补齐（与登记编码栏同一语义）。 */
+  const benchEl = $("pBench"), benchRuleEl = $("pBenchRule");
+  if (benchEl) patch.benchmark = (benchEl.value || "").trim();
+  if (benchRuleEl) patch.benchRule = (benchRuleEl.value || "").trim();
   let target;
   if (pid) {
     target = DATA.products.find(x => x.id === pid);
     if (!target) return toast("产品不存在，请刷新后重试");
+    const benchChanged = patch.benchmark !== undefined &&
+      String(target.benchmark || "").trim() !== patch.benchmark;
     Object.assign(target, patch);
+    /* 手工改了基准 ⇒ benchSrc 标「手工」；没动基准这一栏就不碰出处（保留原档位） */
+    if (benchChanged && patch.benchmark) {
+      target.benchSrc = { via: "手工", at: new Date().toISOString().slice(0, 16).replace("T", " ") };
+    }
     if (UI.queriedNav) target.navHistory = Object.assign(target.navHistory || {}, UI.queriedNav);
   } else {
     target = Object.assign({ id: uid(), navHistory: UI.queriedNav || {}, createdAt: Date.now() }, patch);
+    if (patch.benchmark) {
+      target.benchSrc = { via: "手工", at: new Date().toISOString().slice(0, 16).replace("T", " ") };
+    }
     DATA.products.push(target);
     if (UI.activePick !== undefined) UI.activePick = target.id;
   }
@@ -2082,6 +2113,10 @@ function llmSnapItems() {
     const pos = position(p);
     return {
       name: p.name, inst: p.inst, code: p.prodCode || p.code || p.regCode || "",
+      /* v94：业绩比较基准 + 出处档位 + 确认规则 —— 模型分析产品的主要依据之一。
+         文本与档位标签都是披露里的公开信息，跟随「隐藏金额」与金额无关。 */
+      benchmark: p.benchmark || "", benchRule: p.benchRule || "",
+      benchVia: benchViaLabel((p.benchSrc && p.benchSrc.via) || ""),
       risk: p.riskLevel, nav: pos.lastNav, navDate: pos.lastDate,
       shares: pos.shares, cost: pos.cost, holdDays: pos.holdDays,
       state: pos.inTransit ? "在途（份额未确认）"
@@ -2905,6 +2940,17 @@ function renderProdDetail() {
         ${assetValueText(p) ? `<i>资产净值 <b>${esc(assetValueText(p))}</b></i>` : ""}
       </div>
     </div>
+    ${(() => {
+      /* v94：业绩比较基准一节。抓到就带出处档位；没抓到也如实说「未披露」，
+         不装没有 —— 这一栏是「这只产品对标什么」的口径，AI 问一句时也读它。 */
+      const bVia = benchViaLabel((p.benchSrc && p.benchSrc.via) || "");
+      const bAt = (p.benchSrc && p.benchSrc.at) || "";
+      return `<div class="tip" style="margin-top:8px">📐 <b>业绩比较基准</b>：${p.benchmark ? esc(p.benchmark)
+        : "未披露（官方源与第三方都还没给，可在「编辑」里手工补）"}${p.benchRule
+          ? `<br>确认规则：${esc(p.benchRule)}` : ""}${bVia
+            ? `<br><span class="muted">出处：${esc(bVia)}${bAt ? " · 更新于 " + esc(bAt) : ""}${bVia === "手工" ? " · 抓取不会再覆盖" : ""}</span>`
+            : (p.benchmark ? `<br><span class="muted">出处：未记录</span>` : "")}</div>`;
+    })()}
     ${src ? `<div class="tip" style="margin-top:8px">
       🔀 最新净值取自 <b>${esc(src.via)}·${esc(src.label)}</b>（${esc(src.latest)}）${esc(src.why ? "—— " + src.why : "")}
       ${(src.sources || []).length > 1
@@ -4696,6 +4742,13 @@ async function nativeFetchAll(forceExtra) {
     if (r && r.assetHistory) {
       const ah = applyAssetHistory(p2, r.assetHistory, r.assetHistoryVia);
       if (ah.changed) { assetChanged = true; saveLocal(); }
+    }
+    /* v94：业绩比较基准/确认规则。判据全在 disc.js 的 applyBench（只填空白=手工值
+       优先、出处必带），这里只负责起那一趟。写在 ok/失败两支之外：基准瞭望这类
+       只带基准的源不依赖净值成功，净值没抓到基准照样入账。 */
+    if (r && (r.benchmark || r.benchRule)) {
+      const bb = applyBench(p2, { benchmark: r.benchmark, benchRule: r.benchRule, benchSrc: r.benchSrc });
+      if (bb.changed) { saveLocal(); renderProd(); }
     }
     if (r && r.ok) {
       const navs = r.navs || {}, n = Object.keys(navs).length;

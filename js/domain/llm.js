@@ -167,15 +167,16 @@ function num(v, dp) {
 
 /**
  * 把本机台账压成一段文本，作为「这一轮给模型看的依据」（v66）。
- * ★ 白名单出字段：只写 name / inst / code / risk / nav / navDate / shares / cost /
- *   holdDays / state 这十个。入参里就算混着 token、secret、仓库路径、任何别的键，
+ * ★ 白名单出字段：只写 name / inst / code / risk / benchmark / benchVia /
+ *   benchRule / nav / navDate / shares / cost / holdDays / state 这些。
+ *   入参里就算混着 token、secret、仓库路径、任何别的键，
  *   一个字都不会出来 —— 这段文本是要出这台机器的，白名单比黑名单可靠。
  * ★ 缺就如实写缺：没净值写「无净值」，日期不明写「日期不明」。
  *   猜一个数进去，模型会把它当本机台账的真数引用，那比空着坏得多。
  * ★ 本机开着「隐藏金额」时，份额与成本都不出机器 —— 屏幕上被你藏掉的数，
  *   不许从这条路上漏出去。产品名 / 代码 / 风险级 / 单位净值 / 日期照旧带着，
  *   那些本来就是披露里的公开信息，藏了反而什么问题都答不上。
- * @param {Array<{name?:string,inst?:string,code?:string,risk?:any,nav?:number,navDate?:string,shares?:number,cost?:number,holdDays?:number,state?:string}>|null} items
+ * @param {Array<{name?:string,inst?:string,code?:string,risk?:any,benchmark?:string,benchVia?:string,benchRule?:string,nav?:number,navDate?:string,shares?:number,cost?:number,holdDays?:number,state?:string}>|null} items
  * @param {{hide?: boolean, today?: string}} [opts]
  * @returns {string}
  */
@@ -197,6 +198,10 @@ export function llmSnapshot(items, opts) {
       oneLine(it.inst, 40) || "机构未填",
       "代码 " + (oneLine(it.code, 40) || "未填"),
       "风险 " + (oneLine(it.risk, 24) || "未填"),
+      // v94：业绩比较基准（多端抓取，出处档位随行标注）—— 模型分析产品
+      // 「这只对标什么、靠什么赢」的主要依据；没抓到就如实写「未披露」。
+      "基准 " + (oneLine(it.benchmark, 90) || "未披露")
+        + (it.benchVia ? "（出处：" + oneLine(it.benchVia, 20) + "）" : ""),
       "净值 " + (isFinite(Number(it.nav)) && Number(it.nav) > 0 ? num(it.nav, 4) : "无净值")
         + "（" + (/^\d{4}-\d{2}-\d{2}$/.test(String(it.navDate || "")) ? it.navDate : "日期不明") + "）",
       hide ? "份额 " + LLM_SNAPSHOT_MASKED : "份额 " + num(it.shares, 2),
@@ -204,6 +209,7 @@ export function llmSnapshot(items, opts) {
       "持有 " + (isFinite(Number(it.holdDays)) && Number(it.holdDays) > 0 ? Math.round(Number(it.holdDays)) + " 天" : "不足 1 天或未起算"),
     ];
     if (it.state) bits.push("状态 " + oneLine(it.state, 24));
+    if (it.benchRule) bits.push("确认规则 " + oneLine(it.benchRule, 40));
     const line = bits.join(" · ");
     if (lines.length && used + line.length + 1 > LLM_SNAPSHOT_MAX_CHARS) { cutByChars = cap - i; break; }
     lines.push(line);

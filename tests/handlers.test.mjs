@@ -128,8 +128,8 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
 
 test("APP_VER 升到 v93 且 SHELL 不漏文件", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v93"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v93"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(sw.includes('const CACHE = "licai-ledger-v94"'), "外壳字节变了 CACHE 必须跟着升");
+  assert.ok(app.includes('const APP_VER = "v94"'), "APP_VER 要与 CACHE 同值");
   for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }
@@ -139,10 +139,10 @@ test("APP_VER 升到 v93 且 SHELL 不漏文件", () => {
    判据在 js/core/disc.js 里已经有口径测试了；这里只盯「页面真的用了它」——
    上一轮（v3.3）就是靠这类逐点断言才把「测试全绿但页面没接线」那种假绿抓出来。 */
 test("规模这一栏：抓取回写、表单初值、详情展示三处都真的走 disc.js 的判据", () => {
-  /* v90 多了 assetValueShort；v92 再多半套逐日序列读/落账函数 —— 仍是同一份
-     disc.js 判据，不许在 app.js 里另写一套换算。 */
-  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,\s*\n\s*assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory\s*\} from "\.\/js\/core\/disc\.js"/);
-  assert.ok(imp, "九个函数必须从 disc.js 导入，不许在 app.js 里另写一套");
+  /* v90 多了 assetValueShort；v92 再多半套逐日序列读/落账函数；v94 又多基准两件 ——
+     仍是同一份 disc.js 判据，不许在 app.js 里另写一套换算。 */
+  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,\s*\n\s*assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,\s*\n\s*benchViaLabel, applyBench\s*\} from "\.\/js\/core\/disc\.js"/);
+  assert.ok(imp, "资产与基准的判据函数必须从 disc.js 导入，不许在 app.js 里另写一套");
 
   /* ① 抓取回写：判据跑在 disc.js，这里只盯接线与它所在的位置 */
   const all = body(app, "nativeFetchAll");
@@ -231,4 +231,54 @@ test("版本号一致性：钉住版本的源码文件必须一个不缺、一�
         [...s.matchAll(/licai-ledger-v\d+/g)].some(m => m[0] !== `licai-ledger-${cache}`)) stale.push(f + "（新旧混钉）");
   }
   assert.deepEqual(stale, [], "这些文件里还钉着旧版本号：\n  " + stale.join("\n  "));
+});
+
+/* ─────────────── v94 · 业绩比较基准的页面接线 ───────────────
+   少挂一个 id / 少接一条回包字段，就是「抓到了却看不见」。 */
+
+test("v94：基准表单两栏 id 与保存路径对上，手工值带 benchSrc=手工", () => {
+  assert.ok(app.includes('id="pBench"') && app.includes('id="pBenchRule"'),
+    "产品表单里没有基准/确认规则两栏");
+  assert.ok(app.includes('patch.benchmark = (benchEl.value || "").trim()'),
+    "保存路径没读基准栏");
+  assert.ok(app.includes('target.benchSrc = { via: "手工"'),
+    "手工填基准必须标 benchSrc=手工（抓取端只填空白，标了才不会被覆盖）");
+  assert.ok(app.includes("function benchFormTip(p)"),
+    "基准栏的提示函数没接上（抓取补齐与手工值在提示里必须分清）");
+});
+
+test("v94：抓取回包的基准三件在 ok/失败两支之外落账", () => {
+  /* 净值瞭望这类源恒不带净值 —— 落账写在 ok 分支里，净值失败的产品基准就永远进不来 */
+  const i = app.indexOf("if (r && r.assetHistory) {");
+  const bench = app.indexOf("if (r && (r.benchmark || r.benchRule)) {");
+  const okBranch = app.indexOf("if (r && r.ok) {", i);
+  assert.ok(i > 0 && bench > i, "app.js 没接基准落账");
+  assert.ok(bench < okBranch, "基准落账必须写在净值 ok/失败两支之外（与 applyAssetValue 同一纪律）");
+  assert.ok(app.includes("applyBench(p2, { benchmark: r.benchmark, benchRule: r.benchRule, benchSrc: r.benchSrc })"),
+    "落账必须走 disc.js 的 applyBench，不许在 app.js 里另立一套判据");
+});
+
+test("v94：产品详情有基准一节，没抓到也显示「未披露」", () => {
+  assert.ok(app.includes("业绩比较基准</b>：${p.benchmark ? esc(p.benchmark)"), "详情页基准行没接上");
+  assert.ok(app.includes("未披露（官方源与第三方都还没给，可在「编辑」里手工补）"),
+    "空值必须如实写「未披露」，不许装没有");
+  assert.ok(app.includes('benchViaLabel((p.benchSrc && p.benchSrc.via) || "")'),
+    "出处档位标签必须走 benchViaLabel 一份口径");
+});
+
+test("v94：AI 快照带上基准三件（白名单在 llm.js，app.js 只供字段）", () => {
+  assert.ok(app.includes("benchmark: p.benchmark || \"\", benchRule: p.benchRule || \"\","),
+    "llmSnapItems 没供基准字段 —— 模型分析产品就没有对标依据");
+  assert.ok(app.includes("benchVia: benchViaLabel((p.benchSrc && p.benchSrc.via) || \"\")"),
+    "快照出处档位必须走 benchViaLabel");
+  const llm = read("js/domain/llm.js");
+  assert.ok(llm.includes('"基准 " + (oneLine(it.benchmark, 90) || "未披露")'),
+    "快照白名单没有基准行（或没写「未披露」降级）");
+  assert.ok(llm.includes('if (it.benchRule) bits.push("确认规则 " + oneLine(it.benchRule, 40));'),
+    "快照白名单没有确认规则行");
+});
+
+test("v94：benchRule 进了同步字段表，benchSrc 随规则5整键同步", () => {
+  assert.ok(app.includes('"benchmark", "benchRule", "lastNavSync"]'),
+    "MERGE_FIELDS 少了 benchRule —— 云端补的确认规则到不了另一台设备");
 });

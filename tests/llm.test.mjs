@@ -531,3 +531,33 @@ test("这一组读法里任何一条都不许产出「原生侧没回元信息�
     assert.ok(!/原生侧没回元信息/.test(msg), JSON.stringify(c) + " 读出来还是那句兜底话：" + msg);
   }
 });
+
+/* ─────────────── v94 · 快照白名单新增基准三件 ───────────────
+   「基准能够为 ai 产品分析所提供数据支撑」—— 模型要知道这只产品对标什么、
+   出处是哪一档、确认规则是什么。没抓到就如实写「未披露」，不猜。 */
+
+const BENCH_ITEM = Object.assign({}, SNAP_ITEM, {
+  benchmark: "中证1000指数收益率×45%+活期存款利率×10%",
+  benchVia: "中国理财网",
+  benchRule: "最短持有期",
+});
+
+test("快照：基准与出处档位出机器，确认规则跟着带", () => {
+  const s = llmSnapshot([BENCH_ITEM], { today: "2026-11-07" });
+  assert.match(s, /基准 中证1000指数收益率×45%\+活期存款利率×10%/);
+  assert.match(s, /出处：中国理财网/);
+  assert.match(s, /确认规则 最短持有期/);
+});
+
+test("快照：没抓到基准如实写「未披露」，不猜不编", () => {
+  const s = llmSnapshot([SNAP_ITEM], { today: "2026-11-07" });
+  assert.match(s, /基准 未披露/);
+  assert.ok(!s.includes("确认规则"), "没有确认规则就不许出现这一行：" + s);
+});
+
+test("快照：出处档位没抓到就不标，不冒充官方", () => {
+  const s = llmSnapshot([Object.assign({}, SNAP_ITEM, { benchmark: "只有文本" })],
+    { today: "2026-11-07" });
+  assert.match(s, /基准 只有文本/);
+  assert.ok(!s.includes("出处："), "没有 benchVia 就不许写出处行：" + s);
+});

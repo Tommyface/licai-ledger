@@ -17,6 +17,7 @@ import {
   regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
   assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,
   assetHistoryOf, assetValueAt, assetHistoryViaLabel, assetHistoryRank, applyAssetHistory,
+  benchViaLabel, applyBench,
 } from "../js/core/disc.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -205,8 +206,8 @@ test("详情页有这张卡，且两个入口都挂回了 window", () => {
   /* 离线清单必须有新模块，漏一个就是装完 App 离线打开整页空白 */
   const shell = read("sw.js");
   assert.ok(shell.includes('"./js/core/disc.js"'), "disc.js 没进 sw.js 的 SHELL");
-  assert.ok(shell.includes('const CACHE = "licai-ledger-v93"'), "SHELL 变了 CACHE 就得跟着升");
-  assert.ok(app.includes('const APP_VER = "v93"'), "APP_VER 要与 CACHE 同值");
+  assert.ok(shell.includes('const CACHE = "licai-ledger-v94"'), "SHELL 变了 CACHE 就得跟着升");
+  assert.ok(app.includes('const APP_VER = "v94"'), "APP_VER 要与 CACHE 同值");
 });
 
 test("有内容但出处无效：内容照留，状态与缺口要如实反映缺出处", () => {
@@ -1134,4 +1135,67 @@ test("闸门理由（列表阶段就拦下）在页面这一侧同样只留理�
   const hand = { assetValue: { v: 123456789, date: "", sub: "NYJXLD1409G", via: "手工", manual: true } };
   assert.equal(applyAssetValue(hand, gate("NYJXLD1409N")).changed, false);
   assert.equal(hand.assetValue.v, 123456789);
+});
+
+/* ─────────────── v94 · 业绩比较基准 / 确认规则 ───────────────
+   与云端 merge.apply_benchmark / bench_via_label 同构的那一半。
+   四条口径：只填空白（手工值优先）、内容不变不落盘、出处必带、
+   档位标签不许把未知来源标成官方。 */
+
+test("applyBench：空白产品写入基准与规则，出处必带", () => {
+  const p = {};
+  const r = applyBench(p, { benchmark: "中证1000指数收益率×45%", benchRule: "最短持有期",
+    benchSrc: { via: "chinawealth", at: "2026-11-06 16:37" } });
+  assert.equal(r.changed, true);
+  assert.equal(p.benchmark, "中证1000指数收益率×45%");
+  assert.equal(p.benchRule, "最短持有期");
+  assert.deepEqual(p.benchSrc, { via: "chinawealth", at: "2026-11-06 16:37" });
+});
+
+test("applyBench：已有值（手工值优先）一律不覆盖", () => {
+  const p = { benchmark: "手工填的基准", benchRule: "手工规则" };
+  const r = applyBench(p, { benchmark: "官方基准", benchRule: "官方规则" });
+  assert.equal(r.changed, false);
+  assert.equal(p.benchmark, "手工填的基准");
+  assert.equal(p.benchSrc, undefined);
+});
+
+test("applyBench：只补空着的那一格", () => {
+  const p = { benchmark: "已有基准" };
+  const r = applyBench(p, { benchmark: "抓来的基准", benchRule: "最短持有期" });
+  assert.equal(r.changed, true);
+  assert.equal(p.benchmark, "已有基准");
+  assert.equal(p.benchRule, "最短持有期");
+});
+
+test("applyBench：两格都已非空 ⇒ 连 benchSrc 都不碰（内容不变不落盘）", () => {
+  const p = { benchmark: "基准", benchRule: "规则", benchSrc: { via: "chinawealth", at: "a" } };
+  const r = applyBench(p, { benchmark: "基准", benchRule: "规则", benchSrc: { via: "leyuw", at: "b" } });
+  assert.equal(r.changed, false);
+  assert.deepEqual(p.benchSrc, { via: "chinawealth", at: "a" });
+});
+
+test("applyBench：空折 / 非法入参一律不动", () => {
+  const p = {};
+  assert.equal(applyBench(p, null).changed, false);
+  assert.equal(applyBench(p, {}).changed, false);
+  assert.equal(applyBench(p, { benchmark: "  ", benchRule: "" }).changed, false);
+  assert.equal(applyBench(null, { benchmark: "x" }).changed, false);
+});
+
+test("applyBench：没有出处时允许写值但不出 benchSrc（出处由后续轮补）", () => {
+  const p = {};
+  const r = applyBench(p, { benchmark: "只有文本" });
+  assert.equal(r.changed, true);
+  assert.equal(p.benchmark, "只有文本");
+  assert.equal(p.benchSrc, undefined);
+});
+
+test("benchViaLabel：档位标签与所有者定的顺序一致", () => {
+  assert.equal(benchViaLabel("chinawealth"), "中国理财网");
+  assert.equal(benchViaLabel("leyuw"), "净值瞭望（第三方转述）");
+  assert.equal(benchViaLabel("webank"), "微众银行接口");
+  assert.equal(benchViaLabel("手工"), "手工");
+  assert.equal(benchViaLabel("bob"), "发行方官网");
+  assert.equal(benchViaLabel(""), "");
 });

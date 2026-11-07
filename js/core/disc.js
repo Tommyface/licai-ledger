@@ -795,3 +795,50 @@ export function setManualAssetValue(p, text) {
   p.assetValue = { v, date: str(cur.date), sub: str(cur.sub), via: "手工", manual: true };
   return { changed: true, why: "已记录手工填写的规模（抓取不再覆盖它）" };
 }
+
+/* ─────────────── v94 · 业绩比较基准 / 确认规则 ───────────────
+   多端获取的落账与展示判据（云端 merge.apply_benchmark / bench_via_label 同构，
+   改这里必须同步改那边）。来源档位与所有者 2026-11-07 拍板的顺序一致：
+   中国理财网 > 发行方官网 > 渠道官方接口（微众等）> 净值瞭望（第三方转述）。 */
+
+const BENCH_VIA_LABELS = {
+  手工: "手工",
+  chinawealth: "中国理财网",
+  webank: "微众银行接口",
+  zxdc: "中信代销渠道",
+  jxwm: "建行渠道",
+  oldox: "oldox 渠道",
+  leyuw: "净值瞭望（第三方转述）",
+};
+
+/** via → 展示标签；官网直连源（bob/citic/nongyin…）统一叫「发行方官网」。 */
+export function benchViaLabel(via) {
+  const v = str(via);
+  if (!v) return "";
+  return BENCH_VIA_LABELS[v] || "发行方官网";
+}
+
+/**
+ * 抓取回包里的基准折落进产品。四条口径与云端同构：
+ * ① 只填空白（=手工值优先：表单里填过的值字段已非空，天然碰不到）；
+ * ② 挑哪份是云端 merge.pick_benchmark 的事，这里只收已挑好的那份；
+ * ③ 内容不变 ⇒ 不落盘（benchSrc 也在内）；
+ * ④ 出处必带：写了值就带 benchSrc {via, at}，有数没出处不许出门。
+ */
+export function applyBench(p, rec) {
+  if (!p || typeof p !== "object" || !rec || typeof rec !== "object") {
+    return { changed: false };
+  }
+  const b = str(rec.benchmark).trim();
+  const rule = str(rec.benchRule).trim();
+  if (!b && !rule) return { changed: false };
+  let changed = false;
+  if (b && !str(p.benchmark).trim()) { p.benchmark = b; changed = true; }
+  if (rule && !str(p.benchRule).trim()) { p.benchRule = rule; changed = true; }
+  if (!changed) return { changed: false };
+  const src = (rec.benchSrc && typeof rec.benchSrc === "object") ? rec.benchSrc : {};
+  const via = str(src.via);
+  const at = str(src.at);
+  if (via || at) p.benchSrc = { via, at };
+  return { changed: true };
+}
