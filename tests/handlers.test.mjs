@@ -126,11 +126,13 @@ test("登记编码这一栏的读法全站只有一种：屏幕上有「登记�
   assert.match(br, /code: regCodeOf\(p\)/, "看板按 Z 编码搜不到只填了别名的产品");
 });
 
-test("APP_VER 升到 v93 且 SHELL 不漏文件", () => {
+test("SHELL 不漏关键模块（版本一致性见下方唯一总测）", () => {
   const sw = read("sw.js");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v96"'), "外壳字节变了 CACHE 必须跟着升");
-  assert.ok(app.includes('const APP_VER = "v96"'), "APP_VER 要与 CACHE 同值");
-  for (const m of ["./js/core/orgs.js", "./js/core/disc.js"]) {
+  /* v97 · P1 收敛：这里只守 SHELL 结构；APP_VER/CACHE 的版本号一致性
+     由本文件下方「版本钉子总测」+ scripts/check-version.sh 两处权威守卫负责，
+     不再在每个测试文件里各钉一份硬编码版本号（发版时漏改一处就假红）。 */
+  for (const m of ["./js/core/orgs.js", "./js/core/disc.js",
+                   "./js/core/webank.js", "./js/core/webank-shelf.js"]) {
     assert.ok(sw.includes(m), `SHELL 里必须有 ${m}`);
   }
 });
@@ -207,31 +209,28 @@ test("规模是钱：结论文本（体检卡 / 换仓建议）里一个都不�
   assert.ok(tip && /m\.asset/.test(tip[0]), "抓取框要有独立一行");
 });
 
-/* ── 版本号一致性（v3.4 补的闸）────────────────────────────────────────────
-   起因：v87 第一次推公开仓只带了「记得改的那几个文件」，tests/advice.test.mjs 与
-   tests/switchadv.test.mjs 里各钉了一份 CACHE/APP_VER，本地改了却没进推送清单，
-   CI 立刻红在「新增模块 = 外壳变了，CACHE 必须跟着升」。这类错的形状是
-   「改了的没推」，本地全绿照样看不见，所以要么每次推送前做整树字节比对，
-   要么让测试自己把该改的文件名单念出来。这里选后者：名单一旦漂了，
-   CI 的报错信息直接给出该看的文件，不用再去猜。 */
-test("版本号一致性：钉住版本的源码文件必须一个不缺、一个不改地全对上新版本", () => {
+/* ── 版本钉子总测（v97 · P1 收敛后全仓唯一一处版本守卫）──────────────────
+   历史：v87 那次「改了没推」催生了「每个测试文件各钉一份 CACHE/APP_VER」的
+   重复守卫 —— 结果每发一版要人肉同步 12+ 处，v94 / v96 两次实测踩雷（审查报告 P1）。
+   v97 收敛：4 个测试文件里的硬编码版本断言全部删除，只留这一条总测 +
+   scripts/check-version.sh（后者已做 APP_VER↔CACHE + SHELL + 引用清单 + import 闭包四重门禁）。
+   本总测不再硬编码文件名清单（名单会漂），改为按目录扫 tests/*.mjs，
+   只要任何测试里再出现「硬编码版本号」就红 —— 既防「改了没推」，也防「钉子又长回来」。 */
+test("版本钉子总测：APP_VER 与 CACHE 同版本，且测试里不许再钉硬编码版本号", () => {
   const sw = read("sw.js");
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
-  assert.equal(ver, cache, "APP_VER 与 CACHE 必须同版本");
-  /* 钉过的文件：源码两处，测试四处（都是 grep 出来的，别再靠记忆数） */
-  const PINS = ["app.js", "sw.js", "tests/advice.test.mjs", "tests/disc.test.mjs",
-                "tests/handlers.test.mjs", "tests/switchadv.test.mjs"];
-  const stale = [];
-  for (const f of PINS) {
-    const s = read(f);
-    if (/licai-ledger-v\d+/.test(s) && !s.includes(`licai-ledger-${cache}`)) stale.push(f);
-    if (/APP_VER = "v\d+"|"(?<![_A-Za-z])v\d+"/.test(s) && !new RegExp(`"${ver}"`).test(s)) stale.push(f);
-    /* 同一文件里若同时钉着新旧两个版本，也是没改干净 */
-    if (new RegExp(`licai-ledger-v\\d+`).test(s) &&
-        [...s.matchAll(/licai-ledger-v\d+/g)].some(m => m[0] !== `licai-ledger-${cache}`)) stale.push(f + "（新旧混钉）");
+  assert.equal(ver, cache, "APP_VER 与 CACHE 必须同版本（scripts/check-version.sh 也会查）");
+  /* 扫全部测试文件：收敛后它们只许出现「动态读版本」的正则，不许出现写死的版本号。
+     只查两种曾经散落的形态：licai-ledger-vNN / const APP_VER = "vNN"（断言里）. */
+  const offenders = [];
+  for (const f of fs.readdirSync(path.join(root, "tests")).filter(x => x.endsWith(".mjs"))) {
+    const s = read("tests/" + f);
+    if (/licai-ledger-v\d+/.test(s)) offenders.push(`${f}: 硬编码 licai-ledger-vNN`);
+    if (/includes\(['"]const APP_VER = "v\d+"|includes\(['"]const CACHE = "licai-ledger-v\d+/.test(s))
+      offenders.push(`${f}: 硬编码版本断言`);
   }
-  assert.deepEqual(stale, [], "这些文件里还钉着旧版本号：\n  " + stale.join("\n  "));
+  assert.deepEqual(offenders, [], "版本钉子已收敛到一处，别再把版本号写回测试：\n  " + offenders.join("\n  "));
 });
 
 /* ─────────────── v94 · 业绩比较基准的页面接线 ───────────────

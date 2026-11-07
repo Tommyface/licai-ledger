@@ -306,9 +306,8 @@ test("陈旧措辞必须跟着上线的行为改掉（v73 那把刀延伸到这�
   assert.ok(app.includes("v75 起另有一张卡"), "T7a 的块注释要交代跨产品比较落在哪");
 });
 
-test("离线清单里有 switchadv.js，版本跟着升（漏一个模块就是离线整页空白）", () => {
+test("离线清单里有 switchadv.js（漏一个模块就是离线整页空白）", () => {
   const sw_js = read("sw.js");
   assert.ok(sw_js.includes('"./js/domain/switchadv.js"'), "switchadv.js 没进 sw.js 的 SHELL");
-  assert.ok(sw_js.includes('const CACHE = "licai-ledger-v96"'), "新增模块 = 外壳变了，CACHE 必须跟着升");
-  assert.ok(read("app.js").includes('const APP_VER = "v96"'), "APP_VER 要与 CACHE 同值");
+  /* v97 · P1 版本钉子收敛：版本一致性只在 handlers.test.mjs 总测留一处。 */
 });

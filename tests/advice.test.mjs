@@ -234,9 +234,9 @@ test("产品详情把这张卡挂在底层配置卡之后，钱走 shown()，费
   assert.ok(body.includes("ANA_LEVEL_TEXT"), "档位词必须是字，色带只是辅助");
 });
 
-test("离线清单里有 advice.js，版本跟着升（漏一个模块就是离线整页空白）", () => {
+test("离线清单里有 advice.js（漏一个模块就是离线整页空白）", () => {
   const sw = read("sw.js");
   assert.ok(sw.includes('"./js/domain/advice.js"'), "advice.js 没进 sw.js 的 SHELL");
-  assert.ok(sw.includes('const CACHE = "licai-ledger-v96"'), "新增模块 = 外壳变了，CACHE 必须跟着升");
-  assert.ok(read("app.js").includes('const APP_VER = "v96"'), "APP_VER 要与 CACHE 同值");
+  /* v97 · P1 版本钉子收敛：APP_VER/CACHE 一致性由 handlers.test.mjs 的唯一总测 +
+     scripts/check-version.sh 守，这里只守「本模块进了 SHELL」这一件结构事实。 */
 });

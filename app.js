@@ -43,6 +43,11 @@ import { switchAdvice } from "./js/domain/switchadv.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
   llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr, LLM_CANCEL_TEXT } from "./js/domain/llm.js";
+/* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
+   只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。 */
+import WEBANK_SHELF from "./js/core/webank-shelf.js";
+import { matchShelf, shelfTags, shelfClass, agentBanks, hasAgents, groupedFields,
+  shelfMeta } from "./js/core/webank.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -63,7 +68,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v96";
+const APP_VER = "v97";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1536,6 +1541,10 @@ function onProdCodeInput() {
       ? `代码形态未识别，将按名称/机构判定的「${ORG_NAME[explicit]}」抓取`
       : "代码形态未识别，请填完整产品名（含发行方，如「广银理财…」）或 Z 开头登记编码";
   }
+  /* v97：代码一旦命中微众稳健货架，即时预告可匹配字段与代销银行（与机构识别解耦）。
+     用 innerHTML 追加，避免覆盖上面的识别结论；未命中返回空串，什么都不加。 */
+  const hint = webankHintHtml(code);
+  if (hint) tip.innerHTML += hint;
 }
 async function queryProduct() {
   const code = ($("pCode").value || "").trim();
@@ -2651,6 +2660,8 @@ function previewLink() {
               : "⚠️ 机构栏还空着：请在下方「发行机构」填理财公司全名（如「华夏理财」），"
                 + "或补登记编码（Z 开头）—— 两个都没有，云端会以「无法识别机构」跳过这只。")))}
     </div>`;
+    /* v97：单行录入/扫码命中微众货架 → 预告可匹配字段与代销银行（未命中返回空串） */
+    box.innerHTML += webankHintHtml(r.prodCode || r.code || "");
     setLinkSave(canAdd ? 1 : 0, dup ? "已在台账里" : "先填发行机构");
     return;
   }
@@ -2661,11 +2672,15 @@ function previewLink() {
   const manualM = (instEl || {}).value ? String(instEl.value).trim() : "";
   const nAdd = rows.filter(x => x.status === "add" && rowAddable(x.r, manualM)).length;
   const nBlocked = rows.filter(x => x.status === "add").length - nAdd;
+  /* v97：多行粘贴里统计命中微众稳健货架的只数（只做汇总，不逐行塞卡片） */
+  const wbHits = rows.filter(x => matchShelf(WEBANK_SHELF, x.key || "").hit).length;
+  const wbLine = wbHits
+    ? `<br><span style="color:var(--brand)">其中 ${wbHits} 只命中微众稳健货架，保存后产品详情可动态显示匹配字段与代销银行</span>` : "";
   box.innerHTML = `<div class="note${nAdd ? " g" : ""}" style="margin-bottom:12px">
       <b style="color:var(--brand)">${nAdd}</b> 只可添加&nbsp;&nbsp;
       <b style="color:var(--ink3)">${c.dup}</b> 只已存在&nbsp;&nbsp;
       <b style="color:var(--gold)">${c.bad}</b> 行无法识别
-      ${nBlocked ? `&nbsp;&nbsp;<b style="color:var(--gold)">${nBlocked}</b> 只缺机构/编码` : ""}
+      ${nBlocked ? `&nbsp;&nbsp;<b style="color:var(--gold)">${nBlocked}</b> 只缺机构/编码` : ""}${wbLine}
     </div>
     <div style="max-height:200px;overflow:auto"><table class="navtbl">
       <thead><tr><th>产品键</th><th style="text-align:left">机构 / 说明</th></tr></thead>
@@ -2873,6 +2888,70 @@ function setSwitchTarget(sel) {
   UI.switchTo = sel && sel.value ? String(sel.value) : "";
   renderProdDetail();
 }
+/* ---------- v97 · 微众稳健货架：录入/OCR 命中后的「动态字段 + 分类 + 代销」 ----------
+   判断全部收口在 js/core/webank.js（命中 / 字典 / 标签 / 代销归并 / 空值语义），
+   这里只做渲染与 esc/shown。纪律：
+     · 只认规范化产品代码命中静态索引，未命中不显示任何微众专属区块（诚实降级）；
+     · 缺字段不生成占位行（不知道≠0），金额字段走 shown()，来源逐项标在 title / 页脚；
+     · 与 detectOrg（发行方识别）解耦：代销渠道不影响机构识别；
+     · 不新增内联 onclick，避免动内联桥；明细用原生 <details> 折叠，零 JS handler。 */
+function webankValText(v) {
+  if (Array.isArray(v)) return v.join("、");
+  if (v === true) return "是";
+  if (v === false) return "否";
+  return String(v);
+}
+/* 产品详情里的完整区块：分类标签行（参考净值瞭望 .tags）+ 代销银行 + 动态字段明细 */
+function webankBlock(p) {
+  const m = matchShelf(WEBANK_SHELF, p && p.prodCode);
+  if (!m.hit) return "";
+  const rec = m.rec;
+  const tags = shelfTags(rec);
+  const banks = agentBanks(rec);
+  const groups = groupedFields(rec);
+  const meta = shelfMeta(WEBANK_SHELF);
+  const tagHtml = tags.length
+    ? `<div class="chips" style="margin:8px 0 2px">${tags.map(t =>
+        `<span class="chip" style="cursor:default" title="出处：${esc(t.src)}">${esc(t.text)}</span>`).join("")}</div>`
+    : "";
+  /* 「若有代销银行」：有则多值列出并各自标出处；无则诚实标注未披露，绝不臆造 */
+  const bankHtml = banks.length
+    ? `<div class="sumline"><span class="k">代销银行（${banks.length} 家）</span><span style="text-align:right">${banks
+        .map(b => `<span title="出处：${esc(b.via)}">${esc(b.name)}</span>`).join(" · ")}</span></div>`
+    : `<div class="sumline"><span class="k">代销银行</span><span class="muted">该渠道未披露代销信息</span></div>`;
+  /* 动态字段：只渲染该产品真正有值的字段，按分组归拢；金额走 shown()，逐项标源字段出处 */
+  const fieldHtml = groups.map(g =>
+    `<div class="muted" style="font-size:11px;margin-top:7px">${esc(g.grp)}</div>` +
+    g.rows.map(r => {
+      const raw = webankValText(r.value);
+      const shownVal = r.money ? shown(esc(raw)) : esc(raw);
+      return `<div class="sumline"><span class="k" title="源字段 ${esc(r.k)} · 出处：${esc(r.src)}">${esc(r.label)}</span>` +
+        `<span style="text-align:right">${shownVal}</span></div>`;
+    }).join("")).join("");
+  const n = groups.reduce((s, g) => s + g.rows.length, 0);
+  return `<div class="note b" style="margin-top:10px">
+    <b>微众稳健货架</b> · 按产品代码 <b>${esc(m.code)}</b> 匹配到 <b>${n}</b> 项字段
+    ${tagHtml}${bankHtml}
+    <details style="margin-top:6px"><summary style="cursor:pointer;font-size:11.5px">展开 ${n} 项动态字段（${groups.length} 组）</summary>${fieldHtml}</details>
+    <div class="muted" style="font-size:10.5px;margin-top:8px">数据来源：${esc(meta.source_we)}；代销：${esc(meta.source_agents)}。快照 ${esc(meta.captured_at)} · 货架 ${meta.shelf_rows} 只 · 仅慢变字段，净值与周期年化以云端抓取为准；枚举码无字典表，保留原值不臆造语义。</div>
+  </div>`;
+}
+/* 录入 / 粘贴 / 扫码预览里的即时提示：命中即可告知「能匹配到多少字段 + 代销银行」 */
+function webankHintHtml(code) {
+  const m = matchShelf(WEBANK_SHELF, code);
+  if (!m.hit) return "";
+  const rec = m.rec;
+  const n = groupedFields(rec).reduce((s, g) => s + g.rows.length, 0);
+  const banks = agentBanks(rec);
+  const meta = shelfMeta(WEBANK_SHELF);
+  const cls = shelfClass(rec);
+  const clsTxt = cls ? (cls.key === "plus" ? "活期+Plus" : cls.key === "fixplus" ? "固收+" : "普通稳健") : "";
+  const bankLine = banks.length
+    ? `代销银行：<b>${banks.map(b => esc(b.name)).join(" · ")}</b>（${banks.length} 家）`
+    : `代销银行：<span class="muted">该渠道未披露代销信息</span>`;
+  return `<div class="note b" style="margin-top:8px">✓ 命中<b>微众稳健货架</b>${clsTxt ? " · " + esc(clsTxt) : ""}（快照 ${esc(meta.captured_at)}）：保存后产品详情可按匹配到的 <b>${n}</b> 项字段动态展示。<br>${bankLine}</div>`;
+}
+
 function renderProdDetail() {
   const p = DATA.products.find(x => x.id === UI.viewProd);
   if (!p) return;
@@ -2966,6 +3045,7 @@ function renderProdDetail() {
         ${assetValueText(p) ? `<i>资产净值 <b>${esc(assetValueText(p))}</b></i>` : ""}
       </div>
     </div>
+    ${webankBlock(p)}
     ${(() => {
       /* v94：业绩比较基准一节。抓到就带出处档位；没抓到也如实说「未披露」，
          不装没有 —— 这一栏是「这只产品对标什么」的口径，AI 问一句时也读它。 */
@@ -3463,8 +3543,9 @@ function applyQrProduct(d) {
   box.value = (old ? old + "\n" : "") + line;
   const inst = $("lkInst");
   if (inst && d.orgName && !inst.value.trim()) inst.value = d.orgName;
-  previewLink();
-  toast(`认出 ${d.name || line}${d.orgName ? " · " + d.orgName : ""}`, 4600);
+  previewLink();   /* v97：预览里已按代码命中微众货架，展示可匹配字段与代销银行 */
+  const wb = matchShelf(WEBANK_SHELF, line).hit ? " · 微众货架命中" : "";
+  toast(`认出 ${d.name || line}${d.orgName ? " · " + d.orgName : ""}${wb}`, 4600);
 }
 
 function openNav(pid) {
