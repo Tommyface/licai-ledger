@@ -16,7 +16,7 @@ import { $, pad, fmtDate, parseDate, today, money, signMoney, pct, cls, uid, esc
 import { ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus,
   regCodeOf, regCodeFromCloud } from "./js/core/orgs.js";
 import { parseProductInput, rowAddable } from "./js/core/paste.js";
-import { navSeries, navAt, latestNav, navHit } from "./js/domain/nav.js";
+import { navSeries, navAt, latestNav, navHit, inQuietWindow, filterNavNotify, newNavItems, navNotifyKey, NOTIFY_DEFAULTS } from "./js/domain/nav.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
   computePosition } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
@@ -63,7 +63,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v94";
+const APP_VER = "v95";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -146,8 +146,10 @@ let SYNC_MEM_TOKEN = "";   /* 网页版专用：只在内存里，绝不进 loca
 const RULES_FEED_PATH = "product-rules.json";
 const OFFICIAL_FEED_PATH = "official-rules.json";
 let RULES_QUOTES = {};
-/* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳 */
-let NOTIFY = { on: false, lastCheck: 0 };
+/* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳；
+   v95：seen = 已提醒过的「产品id@披露日」去重集（B1）；quiet/thresh 默认档出自
+   nav.js:NOTIFY_DEFAULTS（B2/B3 判断只留一处）；muted = 免打扰窗口静默条数（诚实记录）。 */
+let NOTIFY = Object.assign({ on: false, lastCheck: 0, seen: {}, muted: 0 }, NOTIFY_DEFAULTS);
 /* 用户已忽略的抓取告警签名（按「失败集合」生成，集合一变就重新提示） */
 let ALERT_DISMISSED = "";
 let UI = { range: "day", groupBy: "inst", calY: 0, calM: 0, selDate: "", activePick: "", viewProd: "", detTab: "active", prodRange: "3m", prodOv: "a7", detQ: "", detInst: "", detSort: "dayP", detAsc: false, switchTo: "",
@@ -4969,10 +4971,9 @@ async function syncPull(manual) {
     if (!migratedRemote && _POS_VER === pullVer) { DIRTY = false; dirtyPersist(); }
     renderHome(); renderTrade(); renderProd(); renderSet();
     if (migratedRemote) { notifyMigrate(); autoPush(); }
-    const after = navFingerprint();
     /* before.count 为 0 说明本机还没有任何净值（首次拉取 / 换设备），
        拿它当基准会算出「云端有 200 条新净值」这种荒唐提示，故跳过。 */
-    if (before.count > 0) notifyNewNav(navDeltaSince(before.latest), after.latest);
+    if (before.count > 0) notifyNewNav(newNavItems(DATA.products, before.latest));
     renderAlert();
     const rulesTip = rulesStat && rulesStat.filled
       ? `，规则文件回填 ${rulesStat.filled} 项` : "";
@@ -5287,7 +5288,18 @@ function loadNotify() {
   try { ALERT_DISMISSED = localStorage.getItem(LS_ALERT) || ""; } catch (e) { }
 }
 function saveNotify() {
-  try { localStorage.setItem(LS_NOTIFY, JSON.stringify({ on: !!NOTIFY.on, lastCheck: NOTIFY.lastCheck || 0 })); } catch (e) { }
+  /* v95：seen 集只增不减会无限膨胀，超上限就丢最老的键（对象键序即插入序）。
+     键是「产品id@披露日」，旧净值永远不会再触发提醒，丢了没有任何影响。 */
+  try {
+    const ks = Object.keys(NOTIFY.seen || {});
+    if (ks.length > 600) for (const k of ks.slice(0, ks.length - 600)) delete NOTIFY.seen[k];
+    localStorage.setItem(LS_NOTIFY, JSON.stringify({
+      on: !!NOTIFY.on, lastCheck: NOTIFY.lastCheck || 0,
+      quietOn: !!NOTIFY.quietOn, quietStart: Number(NOTIFY.quietStart), quietEnd: Number(NOTIFY.quietEnd),
+      threshOn: !!NOTIFY.threshOn, thresh: Number(NOTIFY.thresh),
+      seen: NOTIFY.seen || {}, muted: Number(NOTIFY.muted) || 0,
+    }));
+  } catch (e) { }
 }
 function saveAlertDismiss() { try { localStorage.setItem(LS_ALERT, ALERT_DISMISSED); } catch (e) { } }
 
@@ -5353,10 +5365,17 @@ function renderNotify() {
   } else if (perm === "denied") {
     html = `<div class="note">通知权限已被拒绝。<br>需到浏览器设置里手动允许本站通知，再回来开启。</div>`;
   } else if (NOTIFY.on) {
-    html = `<div class="note g">已开启。${isStandalone() ? "本页已装到桌面，退到后台也能收到通知。" : "本页留在后台（或装到桌面）时能收到通知。"}</div>`;
-    t = "零后端设计：靠本页定时比对云端数据，<b>完全关闭浏览器后收不到推送</b>（那需要一台常驻服务器）。";
+    const mutedNote = (Number(NOTIFY.muted) || 0) > 0
+      ? `<div class="note" style="margin-top:6px">夜间免打扰已静默 <b>${NOTIFY.muted}</b> 条提醒（窗口过后不补发 —— 云端没新数据就不会再触发）。<span class="more" onclick="clearNotifyMuted()">清除记录</span></div>` : "";
+    html = `<div class="note g">已开启。${isStandalone() ? "本页已装到桌面，退到后台也能收到通知。" : "本页留在后台（或装到桌面）时能收到通知。"}</div>
+      <div class="note" style="margin-top:6px">
+        <label><input type="checkbox" id="nqQuiet" ${NOTIFY.quietOn ? "checked" : ""} onchange="setNotifyQuiet(this.checked)"> 夜间免打扰（${String(NOTIFY.quietStart).padStart(2, "0")}:00–${String(NOTIFY.quietEnd).padStart(2, "0")}:00 不发系统通知）</label>
+        <label style="display:block;margin-top:4px"><input type="checkbox" id="nqThresh" ${NOTIFY.threshOn ? "checked" : ""} onchange="setNotifyThresh(this.checked)"> 日变动超过 <input type="number" id="nqThreshVal" value="${NOTIFY.thresh}" step="0.1" min="0" style="width:56px" onchange="setNotifyThreshVal(this.value)"> % 才提醒</label>
+      </div>${mutedNote}`;
+    t = "零后端设计：靠本页定时比对云端数据，<b>完全关闭浏览器后收不到推送</b>（那需要一台常驻服务器）。默认档：免打扰开、阈值关 —— 只在有新净值时提醒一次，夜里不打扰。";
   } else {
     html = `<div class="note">开启后：抓到<b>新净值</b>、或云端<b>抓取失败</b>时会收到系统通知。<br>
+            同一条净值只提醒一次；默认夜间（00:00–07:00）免打扰，可在开启后调整。<br>
             不开启也不影响使用 —— 首页顶部仍有告警条。</div>`;
     t = (isIOS() && !isStandalone())
       ? "iPhone / iPad：请先「分享 → 添加到主屏幕」，再从桌面图标打开，才能开启通知。" : "";
@@ -5364,6 +5383,19 @@ function renderNotify() {
   box.innerHTML = html;
   if (tip) tip.innerHTML = t;
 }
+
+/* v95 · 免打扰与阈值开关（UI 入口，判断本体在 nav.js） */
+function setNotifyQuiet(on) { NOTIFY.quietOn = !!on; saveNotify(); renderNotify(); }
+function setNotifyThresh(on) {
+  NOTIFY.threshOn = !!on; saveNotify(); renderNotify();
+  toast(NOTIFY.threshOn ? "已开启变动阈值：日变动小于阈值的新净值不再提醒" : "已关闭阈值：有新净值就提醒", 3200);
+}
+function setNotifyThreshVal(v) {
+  const t = Number(v);
+  if (!Number.isFinite(t) || t < 0) { toast("阈值要是非负的数字"); renderNotify(); return; }
+  NOTIFY.thresh = t; saveNotify();
+}
+function clearNotifyMuted() { NOTIFY.muted = 0; saveNotify(); renderNotify(); }
 
 /* ---------- 云端抓取健康度（云端写进 licai-data.json 的 settings.lastFetch） ---------- */
 function lastFetchInfo() {
@@ -5418,24 +5450,33 @@ function navFingerprint() {
   for (const p of DATA.products) count += navCount(p);
   return { count: count, latest: latestDateAll() || "" };
 }
-/* 比上次同步更新的净值条数（披露日 > latestDate）。
-   不能用总条数差：新增产品回填 122 条历史会被误报成「122 条新净值」。 */
-function navDeltaSince(latestDate) {
-  let n = 0;
-  for (const p of DATA.products)
-    for (const d in (p.navHistory || {}))
-      if (d > latestDate) n++;
-  return n;
-}
-/* 拉到新净值后的提醒。
-   用户正盯着屏幕看的时候不再弹系统通知去打断他 —— 前台只给 toast。 */
-function notifyNewNav(delta, latest) {
-  if (!(delta > 0)) return;
+/* 拉到新净值后的提醒（v95 重写）。
+   判断口径全在 js/domain/nav.js（newNavItems / filterNavNotify / inQuietWindow /
+   navNotifyKey），这里只管投递与落账：
+   · 去重（B1）：产品id@披露日 记入 seen，同一条净值只提醒一次；
+   · 阈值（B1）：开关默认关，开了以后 |日环比| < 阈值的被压掉（也记 seen ——
+     用户明确选择了「小的变动不打扰」）；日环比算不出来（null 是不知道）照样提醒；
+   · 免打扰（B2）：夜间窗口内不发系统通知，被静默的条数记进 muted 诚实展示，
+     且不记 seen —— 万一之后云端又动了同一批数据，还有机会正常提醒。 */
+function notifyNewNav(items) {
+  if (!items || !items.length) return;
+  const r = filterNavNotify(items, NOTIFY.seen, NOTIFY);
+  const mark = it => { NOTIFY.seen[navNotifyKey(it.id, it.date)] = true; };
+  r.below.forEach(mark);
+  if (!r.send.length) { saveNotify(); return; }
+  const latest = r.send[r.send.length - 1].date;
   if (document.visibilityState === "visible") {
-    toast(`云端有 ${delta} 条新净值（最近 ${latest}），已同步`, 3600);
+    /* 用户正盯着屏幕看的时候不再弹系统通知去打断他 —— 前台只给 toast */
+    toast(`云端有 ${r.send.length} 条新净值（最近 ${latest}），已同步`, 3600);
+    r.send.forEach(mark);
+  } else if (inQuietWindow(NOTIFY, new Date())) {
+    NOTIFY.muted = (Number(NOTIFY.muted) || 0) + r.send.length;
   } else {
-    pushNotify("净值已更新", `${delta} 条新净值 · 最近披露 ${latest}`);
+    pushNotify("净值已更新", `${r.send.length} 条新净值 · 最近披露 ${latest}`);
+    r.send.forEach(mark);
   }
+  saveNotify();
+  renderNotify();
 }
 /* 后台轮询：只比对远端 sha，变了才真拉全量。
    15 分钟内不重复请求（GitHub API 有速率限制，而云端抓取本身一天只有两次）。 */
@@ -5505,7 +5546,7 @@ Object.assign(window, {
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
-  setProdRange, setRange, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
+  setProdRange, setRange, setNotifyQuiet, setNotifyThresh, setNotifyThreshVal, clearNotifyMuted, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });
 
 (function init() {
