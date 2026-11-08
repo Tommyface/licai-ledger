@@ -75,9 +75,11 @@ test("v99：抓取异常告警条已下线，页面不再渲染 renderAlert", ()
 test("添加产品后真的会去反查登记编码，且后台循环也带着它", () => {
   const b = body(app, "saveProduct");
   assert.match(b, /autoFillRegCode\(/, "保存新产品时没接反查 = 用户要的「自动补齐」没生效");
-  const loop = app.slice(app.indexOf("const runOne = "), app.indexOf("const workers = Array.from"));
-  assert.match(loop, /regCodeDue\(/, "后台核对循环里没有这一路 = 存量产品永远不会被补");
-  assert.match(loop, /autoFillRegCode\(/, "只判冷却不真跑，等于没接");
+  /* v101：回填挪出 runOne、在净值阶段全部结束后统一跑（仍在本轮、并发 2）。
+     断言查 nativeFetchAll 的收尾段 —— 具体时序由 nativefetch.test.mjs 守。 */
+  const tail = app.slice(app.indexOf("await Promise.all(workers)"), app.indexOf("MANUAL.state = (added"));
+  assert.match(tail, /regCodeDue\(/, "净值阶段结束后没有这一路 = 存量产品永远不会被补");
+  assert.match(tail, /autoFillRegCode\(/, "只判冷却不真跑，等于没接");
 });
 
 test("反查走现成的净值桥，只多一个 mode，不另开桥方法", () => {

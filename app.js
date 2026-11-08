@@ -73,7 +73,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v100";
+const APP_VER = "v101";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -4628,6 +4628,12 @@ function nativeNavFetch(p, withAixhub, withLedgerme) {
         name: String(p.name || ""),
         inst: String(p.inst || ""),
         navHistory: p.navHistory || {},
+        /* v101：基准三字段随载荷进来 —— 私有仓 navservice 据此裁掉「净值瞭望」
+           （恒不带净值、只补基准空白；基准已齐再查它就是纯等待，实测 2~4 秒/只）。
+           「有值就不需要」的判据与 applyBench 的「只填空白」是同一句话。 */
+        benchmark: String(p.benchmark || ""),
+        benchRule: String(p.benchRule || ""),
+        benchSrc: String(p.benchSrc || ""),
         /* v78：只交「这一轮要不要查秒讯」这个布尔值；token 由原生侧从加密区注入。
            v79：净值账本那条同理 —— 页面也只交布尔，Cookie 由原生侧注入，值不经过 JS。 */
         aixhub: !!withAixhub,
@@ -4936,22 +4942,11 @@ async function nativeFetchAll(forceExtra) {
       fail++;
       fails.push(prodLabel(p) + "：" + ((r && r.error) || "未知错误"));
     }
-    /* T1b：净值这一趟完了，再按冷却补一次底层/申赎规则（同一次运行里连着做：
-       徽银那份列表索引还热着，省掉第二次翻页）。判据全在 rulesDue()/autoFillRules() 里，
-       这里不留第二套 —— 没接入的机构、五项都齐的、30 天内试过的都不跑。 */
-    const cur = DATA.products.find(x => x.id === p.id) || p;
-    if (rulesDue(cur)) {
-      const line = await autoFillRules(cur, "sync");
-      if (line) ruleNotes.push(prodLabel(cur) + "：" + line);
-    }
-    /* v85：存量产品里缺登记编码的，跟着这一趟顺手补查（冷却与判据都在 regCodeDue 里，
-       这里不留第二套）。放在净值这一趟之后：本轮若刚抓到净值就不必再问编码，
-       而且徽银那类逐页翻的列表索引还热着，同一次运行里连着做省一次冷启动。
-       这一路不计入 fail —— 它没拿到编码不等于这轮净值没入账（v84 的三类口径）。 */
-    if (regCodeDue(cur)) {
-      const line = await autoFillRegCode(cur, "sync");
-      if (line) regNotes.push(prodLabel(cur) + "：" + line);
-    }
+    /* v101：规则/登记编码回填挪出 runOne（挪到净值阶段全部结束之后统一跑）。
+       以前它串在每只产品的净值之后：一只慢的回填（徽银要逐页翻列表）会占住
+       并发 worker，把排在后面的产品净值一起拖住 —— 净值是这轮的主角，先全部
+       出完；回填垫后、仍按并发 2 跑，「列表索引热」的收益不丢（净值阶段刚
+       抓过同机构官网，进程内缓存还活着，间隔只有几秒）。 */
     MANUAL.added = added; MANUAL.fail = fail;
     saveManual(); renderManBox();
   };
@@ -4962,6 +4957,27 @@ async function nativeFetchAll(forceExtra) {
       while (i < list.length) { const p = list[i++]; await runOne(p); }
     });
     await Promise.all(workers);
+    /* v101：净值收齐后的统一回填段 —— 同一批运行、同一批字据，只是不再
+       插在每只产品中间。顺序：先规则、后登记编码（编码靠净值/规则同一批
+       官网数据，越靠后索引越冷）。 */
+    const backlog = DATA.products.filter(p => rulesDue(p)).map(p => ({ p, kind: "rules" }))
+      .concat(DATA.products.filter(p => regCodeDue(p)).map(p => ({ p, kind: "reg" })));
+    if (backlog.length) {
+      let j = 0;
+      const backfill = Array.from({ length: Math.min(2, backlog.length) }, async () => {
+        while (j < backlog.length) {
+          const it = backlog[j++];
+          const line = it.kind === "rules"
+            ? await autoFillRules(it.p, "sync")
+            : await autoFillRegCode(it.p, "sync");
+          if (line) {
+            (it.kind === "rules" ? ruleNotes : regNotes).push(prodLabel(it.p) + "：" + line);
+            saveManual(); renderManBox();
+          }
+        }
+      });
+      await Promise.all(backfill);
+    }
     /* 收尾再合并一次：若抓取期间 syncPull 把 DATA 整体换成了云端对象，
        前面写进旧对象的增量会消失；这里按 id 补回当前对象（只补缺失日期，不重复计数） */
     let lateAdded = 0;

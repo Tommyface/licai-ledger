@@ -362,7 +362,9 @@ test("页面接线：规则回填复用净值那条桥，两处挂钩 + 前台�
   assert.ok(!/NativeNav\.(rules|disc)/.test(app),
     "不许另开桥方法：复用 NativeNav.fetch，Java 侧少一处可漏的守卫");
   assert.ok(app.includes('autoFillRules(target, "add")'), "添加产品后没跑回填");
-  assert.ok(app.includes('await autoFillRules(cur, "sync")'), "净值抓完后没按冷却跑回填");
+  /* v101：回填挪出 runOne、在净值阶段全部结束后统一跑（仍在本轮、仍带字据）。
+     断言查 nativeFetchAll 整个函数体 —— 具体时序由 nativefetch.test.mjs 守。 */
+  assert.ok(/await autoFillRules\((\w+|it\.p), "sync"\)/.test(app), "净值抓完后没按冷却跑回填");
   assert.ok(app.includes("p.rulesAt = new Date().toISOString()"),
     "试过就得留凭据（进账本、跟着数据同步，不是 localStorage —— 铁律 6）");
   assert.ok(/徽银[^"]{0,20}翻页/.test(app), "徽银要翻页找产品，慢的事得提前在前台说");
