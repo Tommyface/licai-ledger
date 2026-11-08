@@ -1,0 +1,994 @@
+{
+ "schema": "licai-ledger.bondWeather/0.2",
+ "weather": {
+  "asOf": "2026-11-06",
+  "prevDate": "2026-11-05",
+  "cells": [
+   {
+    "group": "rate",
+    "issuer": "国债",
+    "tenor": "1年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国债收益率曲线（到期）",
+     "tenorKey": 1.0,
+     "yieldPct": 1.1683,
+     "prevYieldPct": 1.171,
+     "bp1d": -0.3
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-pbc-web/pbc/query",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国债",
+    "tenor": "3年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国债收益率曲线（到期）",
+     "tenorKey": 3.0,
+     "yieldPct": 1.2291,
+     "prevYieldPct": 1.2397,
+     "bp1d": -1.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-pbc-web/pbc/query",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国债",
+    "tenor": "5年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国债收益率曲线（到期）",
+     "tenorKey": 5.0,
+     "yieldPct": 1.3115,
+     "prevYieldPct": 1.3236,
+     "bp1d": -1.2
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-pbc-web/pbc/query",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国债",
+    "tenor": "7年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国债收益率曲线（到期）",
+     "tenorKey": 7.0,
+     "yieldPct": 1.3996,
+     "prevYieldPct": 1.4161,
+     "bp1d": -1.6
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-pbc-web/pbc/query",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国债",
+    "tenor": "10年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国债收益率曲线（到期）",
+     "tenorKey": 10.0,
+     "yieldPct": 1.5868,
+     "prevYieldPct": 1.6038,
+     "bp1d": -1.7
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-pbc-web/pbc/query",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国开",
+    "tenor": "1年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国开债收益率曲线（到期）",
+     "tenorKey": 1.0,
+     "yieldPct": 1.3231,
+     "prevYieldPct": 1.3246,
+     "bp1d": -0.2
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国开",
+    "tenor": "3年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国开债收益率曲线（到期）",
+     "tenorKey": 3.0,
+     "yieldPct": 1.3537,
+     "prevYieldPct": 1.3622,
+     "bp1d": -0.9
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国开",
+    "tenor": "5年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国开债收益率曲线（到期）",
+     "tenorKey": 5.0,
+     "yieldPct": 1.4128,
+     "prevYieldPct": 1.4206,
+     "bp1d": -0.8
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国开",
+    "tenor": "7年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国开债收益率曲线（到期）",
+     "tenorKey": 7.0,
+     "yieldPct": 1.5491,
+     "prevYieldPct": 1.561,
+     "bp1d": -1.2
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "国开",
+    "tenor": "10年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债国开债收益率曲线（到期）",
+     "tenorKey": 10.0,
+     "yieldPct": 1.6361,
+     "prevYieldPct": 1.6481,
+     "bp1d": -1.2
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "口行",
+    "tenor": "1年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债进出口行债收益率曲线（到期）",
+     "tenorKey": 1.0,
+     "yieldPct": 1.3059,
+     "prevYieldPct": 1.3114,
+     "bp1d": -0.5
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "口行",
+    "tenor": "3年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债进出口行债收益率曲线（到期）",
+     "tenorKey": 3.0,
+     "yieldPct": 1.3442,
+     "prevYieldPct": 1.3551,
+     "bp1d": -1.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "口行",
+    "tenor": "5年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债进出口行债收益率曲线（到期）",
+     "tenorKey": 5.0,
+     "yieldPct": 1.4413,
+     "prevYieldPct": 1.4558,
+     "bp1d": -1.4
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "口行",
+    "tenor": "7年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债进出口行债收益率曲线（到期）",
+     "tenorKey": 7.0,
+     "yieldPct": 1.5331,
+     "prevYieldPct": 1.5421,
+     "bp1d": -0.9
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "rate",
+    "issuer": "口行",
+    "tenor": "10年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债进出口行债收益率曲线（到期）",
+     "tenorKey": 10.0,
+     "yieldPct": 1.6597,
+     "prevYieldPct": 1.6721,
+     "bp1d": -1.2
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AAA",
+    "tenor": "1月",
+    "dir": "down",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AAA)（到期）",
+     "tenorKey": 0.08,
+     "yieldPct": 1.4,
+     "prevYieldPct": 1.3994,
+     "bp1d": 0.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AAA",
+    "tenor": "3月",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AAA)（到期）",
+     "tenorKey": 0.25,
+     "yieldPct": 1.4016,
+     "prevYieldPct": 1.4046,
+     "bp1d": -0.3
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AAA",
+    "tenor": "6月",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AAA)（到期）",
+     "tenorKey": 0.5,
+     "yieldPct": 1.4301,
+     "prevYieldPct": 1.4405,
+     "bp1d": -1.0
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AAA",
+    "tenor": "1年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AAA)（到期）",
+     "tenorKey": 1.0,
+     "yieldPct": 1.45,
+     "prevYieldPct": 1.4514,
+     "bp1d": -0.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AAA",
+    "tenor": "3年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AAA)（到期）",
+     "tenorKey": 3.0,
+     "yieldPct": 1.5821,
+     "prevYieldPct": 1.5926,
+     "bp1d": -1.0
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AAA",
+    "tenor": "5年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AAA)（到期）",
+     "tenorKey": 5.0,
+     "yieldPct": 1.6428,
+     "prevYieldPct": 1.6547,
+     "bp1d": -1.2
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA+",
+    "tenor": "1月",
+    "dir": "down",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA+)（到期）",
+     "tenorKey": 0.08,
+     "yieldPct": 1.42,
+     "prevYieldPct": 1.4194,
+     "bp1d": 0.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA+",
+    "tenor": "3月",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA+)（到期）",
+     "tenorKey": 0.25,
+     "yieldPct": 1.4216,
+     "prevYieldPct": 1.4246,
+     "bp1d": -0.3
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA+",
+    "tenor": "6月",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA+)（到期）",
+     "tenorKey": 0.5,
+     "yieldPct": 1.4501,
+     "prevYieldPct": 1.4605,
+     "bp1d": -1.0
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA+",
+    "tenor": "1年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA+)（到期）",
+     "tenorKey": 1.0,
+     "yieldPct": 1.49,
+     "prevYieldPct": 1.4914,
+     "bp1d": -0.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA+",
+    "tenor": "3年",
+    "dir": "none",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA+)（到期）",
+     "tenorKey": 3.0,
+     "reason": "官方曲线未发布该期限"
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA+",
+    "tenor": "5年",
+    "dir": "none",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA+)（到期）",
+     "tenorKey": 5.0,
+     "reason": "官方曲线未发布该期限"
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA",
+    "tenor": "1月",
+    "dir": "down",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA)（到期）",
+     "tenorKey": 0.08,
+     "yieldPct": 1.45,
+     "prevYieldPct": 1.4494,
+     "bp1d": 0.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA",
+    "tenor": "3月",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA)（到期）",
+     "tenorKey": 0.25,
+     "yieldPct": 1.4516,
+     "prevYieldPct": 1.4546,
+     "bp1d": -0.3
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA",
+    "tenor": "6月",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA)（到期）",
+     "tenorKey": 0.5,
+     "yieldPct": 1.4801,
+     "prevYieldPct": 1.4905,
+     "bp1d": -1.0
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA",
+    "tenor": "1年",
+    "dir": "up",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA)（到期）",
+     "tenorKey": 1.0,
+     "yieldPct": 1.54,
+     "prevYieldPct": 1.5414,
+     "bp1d": -0.1
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA",
+    "tenor": "3年",
+    "dir": "none",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA)（到期）",
+     "tenorKey": 3.0,
+     "reason": "官方曲线未发布该期限"
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   },
+   {
+    "group": "credit",
+    "issuer": "AA",
+    "tenor": "5年",
+    "dir": "none",
+    "dirConfidence": "high",
+    "basis": {
+     "curve": "中债中短期票据收益率曲线(AA)（到期）",
+     "tenorKey": 5.0,
+     "reason": "官方曲线未发布该期限"
+    },
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "dataDate": "2026-11-06",
+     "tier": "official",
+     "prevUrl": "https://yield.chinabond.com.cn/cbweb-mn/yc/ycDetail",
+     "prevDate": "2026-11-05"
+    }
+   }
+  ]
+ },
+ "curveCards": [
+  {
+   "issuer": "国债",
+   "tenor": "2年",
+   "yieldPct": 1.2155,
+   "asOf": "2026-11-06",
+   "source": {
+    "url": "https://yield.chinabond.com.cn/cbweb-czb-web/czb/czbChartIndex",
+    "dataDate": "2026-11-06",
+    "tier": "official"
+   }
+  },
+  {
+   "issuer": "国债",
+   "tenor": "5年",
+   "yieldPct": 1.3115,
+   "asOf": "2026-11-06",
+   "source": {
+    "url": "https://yield.chinabond.com.cn/cbweb-czb-web/czb/czbChartIndex",
+    "dataDate": "2026-11-06",
+    "tier": "official"
+   }
+  },
+  {
+   "issuer": "国债",
+   "tenor": "10年",
+   "yieldPct": 1.5868,
+   "asOf": "2026-11-06",
+   "source": {
+    "url": "https://yield.chinabond.com.cn/cbweb-czb-web/czb/czbChartIndex",
+    "dataDate": "2026-11-06",
+    "tier": "official"
+   }
+  },
+  {
+   "issuer": "国债",
+   "tenor": "30年",
+   "yieldPct": 2.0275,
+   "asOf": "2026-11-06",
+   "source": {
+    "url": "https://yield.chinabond.com.cn/cbweb-czb-web/czb/czbChartIndex",
+    "dataDate": "2026-11-06",
+    "tier": "official"
+   }
+  }
+ ],
+ "bpTable": [
+  {
+   "issuer": "国债",
+   "tenor": "2年",
+   "yieldPct": 1.2155,
+   "bp": {
+    "1日": [
+     -0.6,
+     "2026-11-05"
+    ],
+    "5日": [
+     -3.0,
+     "2026-10-30"
+    ],
+    "20日": [
+     -5.2,
+     "2026-10-10"
+    ],
+    "60日": [
+     -3.5,
+     "2026-08-10"
+    ]
+   },
+   "source": {
+    "url": "https://datacenter.eastmoney.com/api/data/get?type=RPTA_WEB_TREASURYYIELD&sty=ALL&st=SOLAR_DATE&sr=-1&token=894050c76af8597a853f5b408b759f5d&p=1&ps=500&pageNo=1&pageNum=1",
+    "dataDate": "2026-11-06",
+    "tier": "secondary_crosschecked"
+   }
+  },
+  {
+   "issuer": "国债",
+   "tenor": "5年",
+   "yieldPct": 1.3115,
+   "bp": {
+    "1日": [
+     -1.2,
+     "2026-11-05"
+    ],
+    "5日": [
+     -4.2,
+     "2026-10-30"
+    ],
+    "20日": [
+     -9.5,
+     "2026-10-10"
+    ],
+    "60日": [
+     -9.1,
+     "2026-08-10"
+    ]
+   },
+   "source": {
+    "url": "https://datacenter.eastmoney.com/api/data/get?type=RPTA_WEB_TREASURYYIELD&sty=ALL&st=SOLAR_DATE&sr=-1&token=894050c76af8597a853f5b408b759f5d&p=1&ps=500&pageNo=1&pageNum=1",
+    "dataDate": "2026-11-06",
+    "tier": "secondary_crosschecked"
+   }
+  },
+  {
+   "issuer": "国债",
+   "tenor": "10年",
+   "yieldPct": 1.5868,
+   "bp": {
+    "1日": [
+     -1.7,
+     "2026-11-05"
+    ],
+    "5日": [
+     -6.3,
+     "2026-10-30"
+    ],
+    "20日": [
+     -9.8,
+     "2026-10-10"
+    ],
+    "60日": [
+     -12.1,
+     "2026-08-10"
+    ]
+   },
+   "source": {
+    "url": "https://datacenter.eastmoney.com/api/data/get?type=RPTA_WEB_TREASURYYIELD&sty=ALL&st=SOLAR_DATE&sr=-1&token=894050c76af8597a853f5b408b759f5d&p=1&ps=500&pageNo=1&pageNum=1",
+    "dataDate": "2026-11-06",
+    "tier": "secondary_crosschecked"
+   }
+  },
+  {
+   "issuer": "国债",
+   "tenor": "30年",
+   "yieldPct": 2.0275,
+   "bp": {
+    "1日": [
+     -1.5,
+     "2026-11-05"
+    ],
+    "5日": [
+     -5.5,
+     "2026-10-30"
+    ],
+    "20日": [
+     -6.0,
+     "2026-10-10"
+    ],
+    "60日": [
+     -13.1,
+     "2026-08-10"
+    ]
+   },
+   "source": {
+    "url": "https://datacenter.eastmoney.com/api/data/get?type=RPTA_WEB_TREASURYYIELD&sty=ALL&st=SOLAR_DATE&sr=-1&token=894050c76af8597a853f5b408b759f5d&p=1&ps=500&pageNo=1&pageNum=1",
+    "dataDate": "2026-11-06",
+    "tier": "secondary_crosschecked"
+   }
+  }
+ ],
+ "indexDir": {
+  "items": [
+   {
+    "name": "中债-综合全价（1年以下）",
+    "dir": "up",
+    "proxy": true,
+    "proxyBasis": "以国债2年 1日BP 推导（代理口径，非指数真值）",
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-czb-web/czb/czbChartIndex",
+     "dataDate": "2026-11-06",
+     "tier": "official"
+    }
+   },
+   {
+    "name": "中债-综合全价（1-3年）",
+    "dir": "none",
+    "proxy": true,
+    "proxyBasis": "无可代理期限，待 P2 中债指数页直读",
+    "source": {
+     "url": "https://yield.chinabond.com.cn/cbweb-czb-web/czb/czbChartIndex",
+     "dataDate": "2026-11-06",
+     "tier": "official"
+    }
+   }
+  ]
+ },
+ "crossCheck": {
+  "ok": true,
+  "detail": [
+   {
+    "tenor": "2年",
+    "official": 1.2155,
+    "secondary": 1.2155,
+    "secondaryDate": "2026-11-06",
+    "match": true
+   },
+   {
+    "tenor": "5年",
+    "official": 1.3115,
+    "secondary": 1.3115,
+    "secondaryDate": "2026-11-06",
+    "match": true
+   },
+   {
+    "tenor": "10年",
+    "official": 1.5868,
+    "secondary": 1.5868,
+    "secondaryDate": "2026-11-06",
+    "match": true
+   },
+   {
+    "tenor": "30年",
+    "official": 2.0275,
+    "secondary": 2.0275,
+    "secondaryDate": "2026-11-06",
+    "match": true
+   }
+  ],
+  "method": "东方财富最新行（转引中债）vs 中债官方端点，2/5/10/30 年逐期限比对"
+ },
+ "internalChecks": {
+  "ycVsCzb": {
+   "ok": true,
+   "detail": [
+    {
+     "tenor": "1年",
+     "yc": 1.1683,
+     "czb": 1.1683,
+     "match": true
+    },
+    {
+     "tenor": "3年",
+     "yc": 1.2291,
+     "czb": 1.2291,
+     "match": true
+    },
+    {
+     "tenor": "5年",
+     "yc": 1.3115,
+     "czb": 1.3115,
+     "match": true
+    },
+    {
+     "tenor": "7年",
+     "yc": 1.3996,
+     "czb": 1.3996,
+     "match": true
+    },
+    {
+     "tenor": "10年",
+     "yc": 1.5868,
+     "czb": 1.5868,
+     "match": true
+    }
+   ],
+   "method": "ycDetail 当日标准期限表 vs czbChartIndex 同期限（解析互证）"
+  },
+  "pbcVsEm": {
+   "ok": true,
+   "detail": [
+    {
+     "tenor": "2年",
+     "pbc": 1.2214,
+     "em": 1.2214,
+     "match": true
+    },
+    {
+     "tenor": "5年",
+     "pbc": 1.3236,
+     "em": 1.3236,
+     "match": true
+    },
+    {
+     "tenor": "10年",
+     "pbc": 1.6038,
+     "em": 1.6038,
+     "match": true
+    },
+    {
+     "tenor": "30年",
+     "pbc": 2.0425,
+     "em": 2.0425,
+     "match": true
+    }
+   ],
+   "method": "pbc 上一交易日曲线 vs 东方财富同日值（日期语义证明）"
+  }
+ },
+ "bpRefRegression": null,
+ "aiText": "【债市快照 2026-11-06（上一交易日 2026-11-05）】来源：中债官方收益率曲线推导（端点 URL+数据日期随附；历史窗口经东方财富逐位交叉核对）\n语义：格子红=债券价格上涨（收益率较上一交易日下行）；绿=下跌；白=持平；蓝=暂无数据。红涨绿跌为中国市场惯例。BP=基点，负值=收益率下行=价格上涨。\n利率债：国债 1年红(-0.3bp) 3年红(-1.1bp) 5年红(-1.2bp) 7年红(-1.6bp) 10年红(-1.7bp)；国开 1年红(-0.2bp) 3年红(-0.9bp) 5年红(-0.8bp) 7年红(-1.2bp) 10年红(-1.2bp)；口行 1年红(-0.5bp) 3年红(-1.1bp) 5年红(-1.4bp) 7年红(-0.9bp) 10年红(-1.2bp)\n信用债：AAA 1月绿(+0.1bp) 3月红(-0.3bp) 6月红(-1.0bp) 1年红(-0.1bp) 3年红(-1.0bp) 5年红(-1.2bp)；AA+ 1月绿(+0.1bp) 3月红(-0.3bp) 6月红(-1.0bp) 1年红(-0.1bp) 3年蓝 5年蓝；AA 1月绿(+0.1bp) 3月红(-0.3bp) 6月红(-1.0bp) 1年红(-0.1bp) 3年蓝 5年蓝\n国债收益率卡片（%）：\n  国债2年 1.2155%（2026-11-06）\n  国债5年 1.3115%（2026-11-06）\n  国债10年 1.5868%（2026-11-06）\n  国债30年 2.0275%（2026-11-06）\n国债 BP 变动（基点，收益率口径，窗口按交易日数，锚点日期随附）：\n  2年: 1日BP=-0.6(锚 2026-11-05)  5日BP=-3.0(锚 2026-10-30)  20日BP=-5.2(锚 2026-10-10)  60日BP=-3.5(锚 2026-08-10)\n  5年: 1日BP=-1.2(锚 2026-11-05)  5日BP=-4.2(锚 2026-10-30)  20日BP=-9.5(锚 2026-10-10)  60日BP=-9.1(锚 2026-08-10)\n  10年: 1日BP=-1.7(锚 2026-11-05)  5日BP=-6.3(锚 2026-10-30)  20日BP=-9.8(锚 2026-10-10)  60日BP=-12.1(锚 2026-08-10)\n  30年: 1日BP=-1.5(锚 2026-11-05)  5日BP=-5.5(锚 2026-10-30)  20日BP=-6.0(锚 2026-10-10)  60日BP=-13.1(锚 2026-08-10)\n基准代理：中债-综合全价（1年以下）方向≈up（代理口径，非指数真值）\n缺口：无（本轮六条曲线的当日与上一交易日数据齐备）\n要求：据此归因该产品下一披露日收益环境（顺风/逆风+驱动因子）；情景区间由本地历史分布计算，本回复不提供单点数值结论，不构成对收益的预告或承诺；缺口直接列出，不编造数字。\n免责：本快照为情景参考，不构成投资建议。",
+ "meta": {
+  "schema": "licai-ledger.bondWeather/0.2",
+  "sourceType": "official_curve",
+  "verified": true,
+  "verifiedBy": "自动引擎（官方一级源+逐位交叉核对+解析互证通过）",
+  "capturedAt": "2026-11-08T17:15:50+08:00",
+  "gaps": [],
+  "consistencyFlags": [],
+  "disclaimer": "情景参考，非预测；格子红=债券价格上涨（收益率下行）、绿=下跌、白=持平、蓝=暂无数据；不构成投资建议。"
+ }
+}

@@ -440,6 +440,19 @@ html:not(.inApp) .app-only{display:none}
 .sumline{display:flex;justify-content:space-between;font-size:12.5px;padding:7px 0;border-bottom:1px dashed var(--line)}
 .sumline:last-child{border:0;font-weight:700}
 .sumline .k{color:var(--ink2)} .sumline:last-child .k{color:var(--ink)}
+/* v100：债市晴雨表格子矩阵（模型接入弹层）。红=收益率下行=债价涨、绿=上行、
+   白=持平、蓝=暂无 —— 行情色直接复用 --up/--down 的红涨绿跌惯例；
+   核验章是状态徽章（绿=通过 / 红=警示），不参与涨跌语义。 */
+.mkt-tbl{width:100%;border-collapse:separate;border-spacing:3px 3px;margin:6px 0 2px}
+.mkt-tbl caption{caption-side:top;text-align:left;padding:2px 0;font-size:11px;color:var(--ink3)}
+.mkt-tbl th{font-size:10px;color:var(--ink3);font-weight:600;padding:2px 3px;white-space:nowrap}
+.mkt-tbl td.mkt-cell{font-size:11px;padding:6px 2px;border-radius:4px;text-align:center;font-weight:600;font-variant-numeric:tabular-nums}
+.mkt-cell.mkt-up{background:var(--up);color:#fff}
+.mkt-cell.mkt-down{background:var(--down);color:#fff}
+.mkt-cell.mkt-flat{background:#eceff3;color:#47506b}
+.mkt-cell.mkt-none{background:#e3ecf7;color:#3a6ea8}
+.mkt-ok{color:#1a9e6a;font-weight:700}
+.mkt-bad{color:var(--up);font-weight:700}
 </style>
 </head>
 <body>

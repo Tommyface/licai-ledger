@@ -36,6 +36,12 @@ jobs:
       - name: 静态索引健康（软哨兵）
         run: node scripts/check-shelf-freshness.mjs
 
+      # v100 · 债市晴雨表参考数据门禁：data/market.reference.json 必须过
+      # js/core/market.js 的 validateMarket（与页面/测试同一个函数，不存在第二套判据）。
+      # 校验失败 / 方向符号打架 / 禁用词命中 → 硬红；快照过期只软提示不阻断。
+      - name: 债市参考数据门禁
+        run: node scripts/check-market.mjs
+
       - name: 语法检查
         run: |
           node --check app.js
@@ -52,9 +58,10 @@ jobs:
       # 墓碑、整文件同步的合并语义（syncPush 不能删掉云端独有条目）、
       # 产品收益表的筛选与排序口径（v45）、同步状态的显示口径（v46：
       # 有改动待推时绝不许显示「已同步」——那等于放用户去卸载）、
-      # 月报的逐日加总口径、底层配置与申赎规则的空值语义（v60）。
+      # 月报的逐日加总口径、底层配置与申赎规则的空值语义（v60）、
+      # 债市晴雨表的整包校验与方向判据（v100）。
       # ★ 这份列表必须与 package.json 的 npm test 一致：漏一个文件，那条链路上的
       #   口径就只在本地被执行过，CI 全绿也不代表它没坏。monthly.test.mjs 是这次
       #   补上的——它早就在 npm test 里，却一直没进 CI，属于同一类漏洞。
       - name: 纯逻辑测试
-        run: node --test tests/app_core.test.mjs tests/handlers.test.mjs tests/calendar.test.mjs tests/tomb.test.mjs tests/sync_merge.test.mjs tests/board.test.mjs tests/syncstatus.test.mjs tests/update.test.mjs tests/monthly.test.mjs tests/disc.test.mjs tests/analysis.test.mjs tests/advice.test.mjs tests/switchadv.test.mjs tests/llm.test.mjs tests/nav.test.mjs tests/webank.test.mjs
+        run: node --test tests/app_core.test.mjs tests/handlers.test.mjs tests/calendar.test.mjs tests/tomb.test.mjs tests/sync_merge.test.mjs tests/board.test.mjs tests/syncstatus.test.mjs tests/update.test.mjs tests/monthly.test.mjs tests/disc.test.mjs tests/analysis.test.mjs tests/advice.test.mjs tests/switchadv.test.mjs tests/llm.test.mjs tests/nav.test.mjs tests/webank.test.mjs tests/market.test.mjs

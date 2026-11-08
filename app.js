@@ -43,6 +43,10 @@ import { switchAdvice } from "./js/domain/switchadv.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
   llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr, LLM_CANCEL_TEXT } from "./js/domain/llm.js";
+/* v100：债市晴雨表（私有仓每日官方曲线推导，公开仓只读）。校验/分组/面板/快照块
+   判据全收口在 js/core/market.js（tests/market.test.mjs 与私有仓同一条契约）。 */
+import { MARKET_SCHEMA, validateMarket, marketAiBlock, marketAiTextSafe,
+  marketPanelHtml, marketStat } from "./js/core/market.js";
 /* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
    只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。
    v98：补 shelfFreshness（快照过期判据）与 agentViaTag（代销口径短标签），
@@ -69,7 +73,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v99";
+const APP_VER = "v100";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -151,6 +155,11 @@ let SYNC_MEM_TOKEN = "";   /* 网页版专用：只在内存里，绝不进 loca
    表达（主源先落、第二源只补空白），判据仍在 applyAutoDisc 那一个入口里。 */
 const RULES_FEED_PATH = "product-rules.json";
 const OFFICIAL_FEED_PATH = "official-rules.json";
+/* v100：债市晴雨表快照（私有仓 Update NAV 每日随净值一起写）。同样是「附带信息」：
+   读不到、校验不过都静默降级成 null —— 一次行情文件读取失败不能变成「拉取失败」。
+   与 MARKET_SCHEMA 是同一条契约，校验收口在 js/core/market.js。 */
+const MARKET_PATH = "market.json";
+let MARKET = null;
 let RULES_QUOTES = {};
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳；
    v95：seen = 已提醒过的「产品id@披露日」去重集（B1）；quiet/thresh 默认档出自
@@ -2144,23 +2153,52 @@ function llmSnapItems() {
     };
   });
 }
-/** 按本机设置把快照压成文本；金额位跟「隐藏金额」走。 */
+/** 按本机设置把快照压成文本；金额位跟「隐藏金额」走。
+    v100：verified 的债市快照附在台账之后 —— 模型问「今天债市怎么样、我的收益
+    为什么这样」时才有依据；未核验的行情不给模型当真数（marketAiBlock 内判）。 */
 function llmSnapText() {
-  return llmSnapshot(llmSnapItems(), { hide: !!DATA.settings.hideAmount, today: today() });
+  const base = llmSnapshot(llmSnapItems(), { hide: !!DATA.settings.hideAmount, today: today() });
+  const blk = marketAiBlock(MARKET);
+  return blk ? `${base}\n\n${blk}` : base;
 }
 /** 发之前就能看见要发什么 —— 这一行的存在就是为了「勾上了不是稀里糊涂出去的」。 */
 function llmSnapLine() {
   const n = DATA.products.length;
   if (!LLM.withData) return `<div class="cap" style="padding-top:2px">现在没带台账数据：模型只听得到你敲进框里那一句。</div>`;
   const s = llmSnapText();
+  const mkt = MARKET ? marketAiBlock(MARKET) : "";
+  const mktNote = !MARKET ? ""
+    : mkt ? ` · 债市快照已附（${MARKET.weather.asOf}）` : " · 债市快照未附（未核验）";
   return `<div class="cap" style="padding-top:2px">本轮会带上：${Math.min(n, LLM_SNAPSHOT_MAX_ITEMS)} / ${n} 只 · ${s.length} 字`
     + (n > LLM_SNAPSHOT_MAX_ITEMS ? `（超过 ${LLM_SNAPSHOT_MAX_ITEMS} 只的写在末尾，不静默截）` : "")
+    + mktNote
     + (DATA.settings.hideAmount ? " · 金额按本机「隐藏金额」隐去" : "") + "</div>";
 }
 function llmDataToggle() {
   const el = $("llmData");
   LLM.withData = !!(el && el.checked);
   openLlm();
+}
+
+/* v100：复制债市 aiText。App WebView 的 navigator.clipboard 未必在安全上下文里，
+   失败退回隐藏 textarea + execCommand 的老办法；两条路都不行就给实话。 */
+function marketCopyAi() {
+  const t = marketAiTextSafe(MARKET);
+  if (!t) return toast("没有可复制的债市快照文本", 2600);
+  const done = () => toast("已复制债市快照文本");
+  const fallback = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      done();
+    } catch (e) { toast("复制失败：" + String(e).slice(0, 80), 3000); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } else fallback();
 }
 
 function llmBridge() {
@@ -2343,6 +2381,8 @@ function openLlm() {
     <div class="chk-row"><label><input type="checkbox" id="llmData" ${LLM.withData ? "checked" : ""}
       onchange="llmDataToggle()"> 这一轮带上我的台账</label></div>
     ${llmSnapLine()}
+    ${marketPanelHtml(MARKET)}
+    ${(MARKET && marketAiTextSafe(MARKET)) ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>` : ""}
     ${llmHistoryHtml()}
     <div class="field" style="margin-top:10px"><textarea id="llmQ" rows="3" placeholder="接着上一轮问，或换个新问题">${esc(LLM.q)}</textarea></div>
     <div class="row-btn" style="margin-top:8px">
@@ -3955,6 +3995,25 @@ async function fetchRulesFeed(path) {
     return null;
   }
 }
+/* v100：读私有仓的债市晴雨表快照。与 fetchRulesFeed 同一套降级口径（复制第二份
+   取数代码就等于第二处鉴权与降级，迟早分叉）——唯一区别是多一道 validateMarket
+   整包校验：结构坏、方向符号打架、禁用词命中，都按「没有这份数据」处理。 */
+async function fetchMarket() {
+  try {
+    const info = await ghReq("GET", `${GH}/repos/${SYNC.owner}/${SYNC.repo}/contents/${MARKET_PATH}`);
+    if (!info || typeof info.content !== "string") return null;
+    const m = JSON.parse(b64ToUtf8(info.content));
+    const chk = validateMarket(m);
+    if (!chk.ok) {
+      console.warn(`债市快照校验未过（按无数据处理）：${chk.why}`);
+      return null;
+    }
+    return m;
+  } catch (e) {
+    console.warn(`债市快照 ${MARKET_PATH} 读取失败（不影响账本同步）：`, String(e).slice(0, 120));
+    return null;
+  }
+}
 /* 手动触发云端抓取（#延时对策，2026-09-16）：
    GitHub 免费仓库的 schedule 是「尽力而为」，实测延迟 2-9.5 小时且可能被跳过 ——
    点这个按钮用 workflow_dispatch 立刻触发一次（官方接口，非定时任务、无排队延迟）。
@@ -5054,6 +5113,9 @@ async function syncPull(manual) {
        第二源只能补主源没补上的空白，读不到的那份自动不参与。 */
     const feed = await fetchRulesFeed(RULES_FEED_PATH);
     const offFeed = await fetchRulesFeed(OFFICIAL_FEED_PATH);
+    /* v100：债市快照与两份规则 feed 同一批取（都只读，都静默降级）。
+       MARKET 只进内存不进 DATA —— 进账本就会跟着整文件同步来回搬。 */
+    const mkt = await fetchMarket();
     DATA = Object.assign({ products: [], trades: [], settings: {} }, remote);
     let rulesStat = null;
     if (feed || offFeed) {
@@ -5061,6 +5123,7 @@ async function syncPull(manual) {
         { name: "信披主源", feed }, { name: "官网第二源", feed: offFeed }]);
       RULES_QUOTES = rulesStat.quotes;      /* 只给展示层，绝不写进 DATA */
     }
+    MARKET = mkt;
     saveLocal();
     applyCalendarConfig();   /* 云端可能补了新的年份 / 截止时间 */
     const pullVer = _POS_VER;
@@ -5616,7 +5679,7 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
+  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
