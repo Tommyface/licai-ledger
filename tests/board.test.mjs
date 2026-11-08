@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BOARD_COLS, BOARD_LEAN, boardCols, NO_INST, instKey, instLabel, boardFilter, boardInstChips,
-  isZeroWan, monthZeroDays, boardSort } from "../js/domain/board.js";
+  isZeroWan, monthZeroDays, boardSort, boardNavAt, boardNavAtText } from "../js/domain/board.js";
 
 const row = (o) => ({ name: "P", ikey: NO_INST, inst: "", code: "", prodCode: "",
   wan: null, a7: null, a14: null, a30: null, zero: 0, ...o });
@@ -15,14 +15,37 @@ const row = (o) => ({ name: "P", ikey: NO_INST, inst: "", code: "", prodCode: ""
 /* ---- 列定义：顺序与文案就是产品页表头，改错了用户会读错口径 ---- */
 test("表头顺序与列数不能漂", () => {
   assert.deepEqual(BOARD_COLS.map(c => c[0]),
-    ["name", "wan", "a7", "a14", "a30", "zero"]);
+    ["name", "wan", "a7", "a14", "a30", "zero", "navAt"]);
   assert.deepEqual(BOARD_COLS.map(c => c[1]),
-    ["产品名称", "万收", "近7日年化", "近14日年化", "近30日年化", "月挂0数"]);
+    ["产品名称", "万收", "近7日年化", "近14日年化", "近30日年化", "月挂0数", "净值披露日"]);
   /* v54 按用户要求砍掉「持有天数」列：台账页那张卡还在算持有天数，产品表里它既占宽
      又不参与挑产品，删的是列不是口径（有测试盯着 BOARD_COLS 里不能再出现它）。 */
   assert.ok(!BOARD_COLS.some(c => c[0] === "holdDays"), "持有天数列已按用户要求移除");
   /* 每列都得有口径说明：万收/N 日年化这类折算口径不写清就会被当成官方数字 */
   for (const c of BOARD_COLS) assert.ok(c[2] && c[2].length > 8, `列 ${c[1]} 缺口径说明`);
+  /* 口径拍板：数据里只有披露日、没有逐产品抓取时刻，列名不许写成「获取时间」 */
+  assert.ok(BOARD_COLS[6][1].includes("披露日") && !BOARD_COLS[6][1].includes("获取时间"),
+    "第 7 列必须叫「净值披露日」，不许把披露日冒充抓取时刻");
+  assert.deepEqual([BOARD_COLS[6][3], BOARD_COLS[6][4]], ["披露", "日期"],
+    "两行短表头要跟着口径改成「披露 / 日期」");
+});
+
+/* ---- v99 · 净值披露日列的取数口径（纯函数，不碰 DOM） ---- */
+test("boardNavAt：抓取记录优先，回退账本最新净值日，脏值/空值都不编造", () => {
+  assert.equal(boardNavAt({ latest: "2026-11-05" }, "2026-11-04"), "2026-11-05",
+    "本轮抓取记录优先于账本最新净值日");
+  assert.equal(boardNavAt(null, "2026-11-04"), "2026-11-04", "没有抓取记录时回退账本");
+  assert.equal(boardNavAt({}, "2026-11-04"), "2026-11-04", "记录里没有 latest 也要回退");
+  assert.equal(boardNavAt({ latest: "昨天" }, "2026-11-04"), "2026-11-04", "脏日期不许冒充");
+  assert.equal(boardNavAt({ latest: "2026-13-45" }, ""), "", "格式不对就当不知道");
+  assert.equal(boardNavAt(null, ""), "", "两处都没有就是空串，由渲染层显示「—」");
+  assert.equal(boardNavAt(undefined, null), "", "空入参不炸");
+});
+
+test("boardNavAtText：表内只给 MM-DD，无值显示「—」", () => {
+  assert.equal(boardNavAtText("2026-11-05"), "11-05");
+  assert.equal(boardNavAtText(""), "—");
+  assert.equal(boardNavAtText("昨天"), "—", "脏值不许漏进表格");
 });
 
 /* ---- 两行短表头（v48）：宽度是这张表的稀缺资源，短表头必须比完整文案更短 ---- */
@@ -45,7 +68,7 @@ test("精简列必须是全部列的子集，且保留首列与挂零列", () =>
   assert.ok(BOARD_LEAN.length < BOARD_COLS.length, "精简模式没有真的少列");
 });
 
-test("boardCols()：full 给全 6 列，其它一律按精简", () => {
+test("boardCols()：full 给全 7 列，其它一律按精简", () => {
   assert.equal(boardCols("full").length, BOARD_COLS.length);
   assert.deepEqual(boardCols("lean").map(c => c[0]), BOARD_LEAN);
   assert.deepEqual(boardCols("").map(c => c[0]), BOARD_LEAN);
@@ -53,7 +76,7 @@ test("boardCols()：full 给全 6 列，其它一律按精简", () => {
   /* full 返回副本：调用方排序不能改到模块级的 BOARD_COLS */
   const f = boardCols("full");
   f.pop();
-  assert.equal(BOARD_COLS.length, 6, "boardCols('full') 返回的不是副本");
+  assert.equal(BOARD_COLS.length, 7, "boardCols('full') 返回的不是副本");
 });
 
 /* ---- 机构键 ---- */

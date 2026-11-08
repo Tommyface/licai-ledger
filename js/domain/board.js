@@ -23,6 +23,12 @@ export const BOARD_COLS = [
   ["a14", "近14日年化", "(最新净值 ÷ 14 个自然日前最近一条披露净值 − 1) × 365 / 14", "14日", "年化"],
   ["a30", "近30日年化", "(最新净值 ÷ 30 个自然日前最近一条披露净值 − 1) × 365 / 30", "30日", "年化"],
   ["zero", "月挂0数", "本月万份收益为 0 的披露日天数（只数有净值披露的日子）", "挂0", "天"],
+  /* v99 · 净值披露日（用户原话「净值获取时间」，拍板定为披露日口径）：数据里只有
+     官方净值披露日，没有逐产品的抓取时刻，所以列名如实写「净值披露日」，
+     不把披露日冒充获取时刻。取数优先级见 boardNavAt()：本轮抓取记录 → 账本
+     最新净值日 → 都没有就是「—」。只在「全部」档出现（BOARD_LEAN 不含它），
+     320 极窄屏默认精简档不受影响。 */
+  ["navAt", "净值披露日", "该产品最新一条净值的官方披露日（YYYY-MM-DD）：优先取本轮抓取记录 settings.lastFetch.products[id].latest，没有抓取记录时回退到账本里该产品的最新净值日，两者都没有显示「—」。这是净值披露日期，不是本机或云端的抓取时刻 —— 数据里没有逐产品获取时刻，不臆造。", "披露", "日期"],
 ];
 
 /**
@@ -56,6 +62,36 @@ export function instKey(inst) {
 /** 机构键的显示名 */
 export function instLabel(key) {
   return key === NO_INST ? "未填机构" : key;
+}
+
+/**
+ * v99 · 收益表「净值披露日」列的取数口径（纯函数，收口在这里便于单测）。
+ * 优先级：本轮抓取记录 settings.lastFetch.products[id].latest → 账本最新净值日 → 空串。
+ * 只认严格的 YYYY-MM-DD：脏值、占位串一律当「不知道」，不编造日期（铁律 10）。
+ * @param {{latest?: string}|null|undefined} info  navSrcInfo(p) 的返回
+ * @param {string|null|undefined} lastDate          boardRows() 里账本最新净值日
+ * @returns {string} YYYY-MM-DD 或空串
+ */
+/** 只认真实存在的 YYYY-MM-DD：格式对但月/日越界（2026-13-45）一样算「不知道」。 */
+function isRealIsoDate(v) {
+  if (typeof v !== "string") return false;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v.trim());
+  if (!m) return false;
+  const y = +m[1], mo = +m[2], d = +m[3];
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+
+export function boardNavAt(info, lastDate) {
+  const a = info && info.latest;
+  if (isRealIsoDate(a)) return a.trim();
+  if (isRealIsoDate(lastDate)) return lastDate.trim();
+  return "";
+}
+
+/** 表内显示：列宽有限只给 MM-DD，完整日期放进 title 由调用方补；没有就是「—」。 */
+export function boardNavAtText(d) {
+  return isRealIsoDate(d) ? d.trim().slice(5) : "—";
 }
 
 /**

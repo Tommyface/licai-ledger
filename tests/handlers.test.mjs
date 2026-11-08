@@ -57,12 +57,17 @@ function body(src, name) {
   return src.slice(i, j < 0 ? undefined : j);
 }
 
-test("renderAlert 的标题走 fetchAlertHeading，不许把三种病因写成一句「没拿到净值」", () => {
-  const b = body(app, "renderAlert");
-  assert.match(b, /fetchAlertHeading\(/, "标题又硬编回去了");
-  assert.doesNotMatch(b, /只产品没拿到净值/, "这句话盖住了「被拦下」和「闸门拒取」两种原因");
-  assert.match(app, /import \{[^}]*fetchAlertHeading[^}]*\} from "\.\/js\/domain\/syncstatus\.js"/,
-    "app.js 没 import 这个函数，浏览器里会静默 ReferenceError");
+/* v99：常驻提醒类 UI 全部下线（用户反馈影响整体美观度）。
+   判据函数留在 syncstatus.js / disc.js 由各自模块测试覆盖，页面侧不再渲染。
+   这几条是反向回归钉子 —— 谁把这些框加回来，这里立刻红。 */
+test("v99：抓取异常告警条已下线，页面不再渲染 renderAlert", () => {
+  assert.ok(!html.includes('id="alertBar"'), "index.html 里又出现 alertBar 挂点");
+  assert.ok(!/function\s+renderAlert\s*\(/.test(app), "app.js 里又定义了 renderAlert");
+  assert.ok(!/function\s+dismissAlert\s*\(/.test(app), "app.js 里又定义了 dismissAlert");
+  assert.ok(!/renderAlert\(\)/.test(app), "app.js 里还有 renderAlert() 调用");
+  assert.ok(!/dismissAlert\(/.test(app), "app.js 里还有 dismissAlert 内联/桥接引用");
+  assert.ok(!/fetchFailSig|ALERT_DISMISSED|LS_ALERT|saveAlertDismiss/.test(app),
+    "告警条下线后，忽略状态那套常量/存储函数也该一并清掉");
 });
 
 
@@ -141,11 +146,12 @@ test("SHELL 不漏关键模块（版本一致性见下方唯一总测）", () =>
    判据在 js/core/disc.js 里已经有口径测试了；这里只盯「页面真的用了它」——
    上一轮（v3.3）就是靠这类逐点断言才把「测试全绿但页面没接线」那种假绿抓出来。 */
 test("规模这一栏：抓取回写、表单初值、详情展示三处都真的走 disc.js 的判据", () => {
-  /* v90 多了 assetValueShort；v92 再多半套逐日序列读/落账函数；v94 又多基准两件；
-     v96 再多 fieldCoverage（A1 覆盖率）—— 仍是同一份 disc.js 判据，
-     不许在 app.js 里另写一套换算。 */
-  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,\s*\n\s*assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,\s*\n\s*benchViaLabel, applyBench, fieldCoverage\s*\} from "\.\/js\/core\/disc\.js"/);
+  /* v99：字段覆盖率框下线，app.js 不再导入 fieldCoverage（判据函数仍留在 disc.js，
+     由 disc.test.mjs 单独覆盖，页面只是不再渲染它）。 */
+  const imp = app.match(/assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,\s*\n\s*assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,\s*\n\s*benchViaLabel, applyBench\s*\} from "\.\/js\/core\/disc\.js"/);
   assert.ok(imp, "资产与基准的判据函数必须从 disc.js 导入，不许在 app.js 里另写一套");
+  assert.ok(!/fieldCoverage/.test(app), "字段覆盖率框已下线，app.js 不该再引用 fieldCoverage");
+  assert.ok(!/fetchAlertHeading/.test(app), "告警条已下线，app.js 不该再引用 fetchAlertHeading");
 
   /* ① 抓取回写：判据跑在 disc.js，这里只盯接线与它所在的位置 */
   const all = body(app, "nativeFetchAll");
@@ -283,27 +289,28 @@ test("v94：benchRule 进了同步字段表，benchSrc 随规则5整键同步", 
     "MERGE_FIELDS 少了 benchRule —— 云端补的确认规则到不了另一台设备");
 });
 
-/* ---- v96 · C3 每日口径简报 + A1 覆盖率面板：页面侧接线 ----
-   简报是云端写的（settings.dailyBrief），本机只读、诚实降级：云端没写就不渲染，
-   不装作有简报。覆盖率判断在 disc.js:fieldCoverage，页面只渲染 —— 判断不许抄第二份。 */
-test("v96 简报与覆盖率：挂点、诚实降级、判断收口、settings 骑行", () => {
+/* ---- v99 · 常驻说明/提醒框下线（用户反馈影响整体 UI 美观度） ----
+   简报框（briefBox）、字段覆盖率框（covBox）、设置页 3 个静态口径说明框、
+   抓取异常告警条全部移除。判据函数本身留在模块里，这里只钉住「页面不再渲染」。 */
+test("v99：简报框/覆盖率框/静态口径说明框已下线，数据骑行不受影响", () => {
   const app = read("app.js");
   const html = read("index.html");
-  /* 挂点必须存在且各自被渲染函数喂 */
-  assert.ok(html.includes('id="briefBox"'), "台账页缺简报挂点 briefBox");
-  assert.ok(html.includes('id="covBox"'), "产品页缺覆盖率挂点 covBox");
-  assert.ok(app.includes('const box = $("briefBox")') && app.includes("renderBrief();\n}"),
-    "renderBrief 必须实现并在 renderHome 收尾调用");
-  assert.ok(app.includes("renderCal(); renderDetail();\n  renderBrief();"), "renderHome 末尾要刷简报");
-  assert.ok(app.includes("renderBoard();\n  renderCoverage();"), "renderProd 末尾要刷覆盖率");
-  /* 诚实降级：云端没写简报（老云端/没跑过新抓取）就不渲染，不许放空壳 */
-  assert.ok(app.includes('if (!db || typeof db.text !== "string" || !db.text.trim()) { box.innerHTML = ""; return; }'),
-    "简报缺失时必须整块隐藏（诚实降级），不许渲染空壳");
-  /* 判断只留一处：页面不许自带覆盖率谓词 */
-  assert.ok(app.includes("fieldCoverage(DATA.products)"), "覆盖率取数必须走 disc.js:fieldCoverage");
+  assert.ok(!html.includes('id="briefBox"'), "台账页又出现 briefBox 挂点");
+  assert.ok(!html.includes('id="covBox"'), "产品页又出现 covBox 挂点");
+  assert.ok(!/function\s+renderBrief\s*\(/.test(app), "app.js 里又定义了 renderBrief");
+  assert.ok(!/function\s+renderCoverage\s*\(/.test(app), "app.js 里又定义了 renderCoverage");
+  assert.ok(!/renderBrief\(\)|renderCoverage\(\)/.test(app), "app.js 里还有简报/覆盖率渲染调用");
+  /* 覆盖率框那段黄底文案不该再出现（截图里那一整块） */
+  assert.ok(!/字段覆盖率/.test(app) && !/字段覆盖率/.test(html), "字段覆盖率框文案又回来了");
+  /* 页面不许自带覆盖率谓词（判据只在 disc.js，disc.test.mjs 覆盖） */
   assert.ok(!/function\s+fieldCoverage/.test(app), "fieldCoverage 不许在 app.js 里再抄一份");
+  /* 静态口径说明框：3 个 .note 连同那张空壳卡片一起删，但 .foot 动态反馈不动 */
+  assert.ok(!/确认与归属口径/.test(html) && !/净值抓取说明/.test(html),
+    "设置页静态口径说明框又回来了");
+  /* 数据层不变：云端写的 dailyBrief 仍要随 settings 骑行，否则本地一推把云端冲掉 */
   assert.ok(read("js/domain/sync.js").includes('"dailyBrief"'),
-    "settings 骑行清单必须含 dailyBrief，否则本地一推就把云端简报冲掉");
-  /* 铁律：结论文本里不写钱 —— 简报是云端口径文本原样展示，页面不做任何金额加工 */
-  assert.ok(!app.includes("signMoney(db.text") && !app.includes("shownMoney(db"), "简报文本不许过金额格式化");
+    "settings 骑行清单必须含 dailyBrief：删的是渲染框，不是数据同步语义");
+  /* 交互反馈仍用 .note：查询/下载/同步等动态提示不许被一起删掉 */
+  assert.ok((app.match(/class="note/g) || []).length >= 20,
+    "动态操作反馈的 .note 被误删了：按钮点了会没反应");
 });

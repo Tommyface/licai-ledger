@@ -23,10 +23,10 @@ import { ocrNavLines } from "./js/domain/ocr.js";
 import { configureCalendar, suggestTradeDates, tradeDaysBetween } from "./js/domain/calendar.js";
 import { normTomb, mergeTombs, purgeTombs, applyTombs as applyTombsIn } from "./js/domain/tomb.js";
 import { mergeForPush, stampMs } from "./js/domain/sync.js";
-import { syncBadge, syncLine, fetchAlertHeading } from "./js/domain/syncstatus.js";
+import { syncBadge, syncLine } from "./js/domain/syncstatus.js";
 import { readRelease, updateVerdict } from "./js/domain/update.js";
 import { NO_INST, instKey, instLabel, boardFilter, boardInstChips,
-  boardCols, monthZeroDays, boardSort } from "./js/domain/board.js";
+  boardCols, monthZeroDays, boardSort, boardNavAt, boardNavAtText } from "./js/domain/board.js";
 import { marketOn as marketOnAt, monthBounds, monthList, monthReport,
   productMonthDays, profitShares } from "./js/domain/monthly.js";
 import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateFor,
@@ -34,7 +34,7 @@ import { DISC_TIERS, normDisc, parseDiscForm, discGaps, discHasContent, feeRateF
   applyRulesFeeds, rulesFeedReg, regCodeDue, applyRegCode, REGCODE_COOLDOWN_DAYS,
   assetValueOf, applyAssetValue, assetValueText, setManualAssetValue, assetValueShort,
   assetHistoryOf, assetValueAt, assetHistoryViaLabel, applyAssetHistory,
-  benchViaLabel, applyBench, fieldCoverage } from "./js/core/disc.js";
+  benchViaLabel, applyBench } from "./js/core/disc.js";
 import { runChecks, portfolioChecks, anaFingerprint, normAnaCache, anaCacheState,
   anaRowParts, anaEntryTarget, anaEntryStatus,
   ANA_LEVELS, ANA_LEVEL_TEXT, ANA_CACHE_V } from "./js/domain/analysis.js";
@@ -59,7 +59,6 @@ const LS_SYNC = "licai_ledger_sync_v1";
    告警的「已读」同理只对当前设备成立 —— 放进 DATA 会被 autoPush 推给别的设备，
    反而让另一台设备漏掉该看到的提醒。 */
 const LS_NOTIFY = "licai_ledger_notify_v1";
-const LS_ALERT = "licai_ledger_alert_v1";
 /* 产品收益表的列模式（"full" / "lean"）只存本机：一台手机一块屏，
    列数合不合得下是各设备自己的事，同步过去反而会把窄屏设备顶成横滑。 */
 const LS_BD = "licai.bdCols";
@@ -70,7 +69,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v98";
+const APP_VER = "v99";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -158,7 +157,6 @@ let RULES_QUOTES = {};
    nav.js:NOTIFY_DEFAULTS（B2/B3 判断只留一处）；muted = 免打扰窗口静默条数（诚实记录）。 */
 let NOTIFY = Object.assign({ on: false, lastCheck: 0, seen: {}, muted: 0 }, NOTIFY_DEFAULTS);
 /* 用户已忽略的抓取告警签名（按「失败集合」生成，集合一变就重新提示） */
-let ALERT_DISMISSED = "";
 let UI = { range: "day", groupBy: "inst", calY: 0, calM: 0, selDate: "", activePick: "", viewProd: "", detTab: "active", prodRange: "3m", prodOv: "a7", detQ: "", detInst: "", detSort: "dayP", detAsc: false, switchTo: "",
   /* 产品页收益表：机构筛选 / 搜索 / 排序列与方向（默认按 7 日年化降序 ——
      v54 起持有天数那一列已下线，默认键跟着落到表里第一列数字上）
@@ -433,7 +431,7 @@ function applyCalendarConfig() {
   configureCalendar(DATA.settings && DATA.settings.tradeCal);
 }
 
-/* 净值滞后（按交易日）：最新净值日期之后又过了几个交易日。
+/* 净值滞后（按交易日）：最新净值披露日之后又过了几个交易日。
    ≥2 个交易日还没新净值才算「滞后」——披露当天与前一个交易日之间属于正常等待，
    长假期间也不算（自然日口径会在国庆/春节误报一堆）。 */
 function navStaleInfo(p) {
@@ -600,30 +598,10 @@ function renderHome() {
   $("statCnt").textContent = pf.rows.length; $("statCnt").className = "v";
   if ($("appVer")) $("appVer").textContent = `版本 ${APP_VER}`;
   renderCal(); renderDetail();
-  renderBrief();
 }
-
-/* ---------- v96 · 每日口径简报（云端抓取脚本写进 settings.dailyBrief，本机只读） ---------- */
-function renderBrief() {
-  const box = $("briefBox"); if (!box) return;
-  const db = DATA.settings && DATA.settings.dailyBrief;
-  /* 云端还没写过（老云端 / 没跑过新抓取脚本）就不渲染 —— 不装作有简报 */
-  if (!db || typeof db.text !== "string" || !db.text.trim()) { box.innerHTML = ""; return; }
-  const lines = String(db.text).split("\n").map(l => esc(l)).join("<br>");
-  box.innerHTML = `<div class="note"><b>每日口径简报</b>` +
-    (db.time ? ` · <span class="muted">更新于 ${esc(stampText(db.time))}</span>` : "") +
-    `<br>${lines}</div>`;
-}
-
-/* ---------- v96 · A1 字段覆盖率（判断在 disc.js:fieldCoverage，这里只渲染） ---------- */
-function renderCoverage() {
-  const box = $("covBox"); if (!box) return;
-  if (!DATA.products.length) { box.innerHTML = ""; return; }
-  const c = fieldCoverage(DATA.products);
-  box.innerHTML = `<div class="note" style="margin-top:8px"><b>字段覆盖率</b>（${c.total} 只产品，「不知道」不冒充 0）：<br>` +
-    c.rows.map(r => `· ${esc(r.label)} <b>${r.ok}/${c.total}</b>` +
-      (r.unknown ? `<span style="color:#8a6300">（${r.unknown} 只不知道）</span>` : "（齐）")).join("<br>") + `</div>`;
-}
+/* v99 · 两个常驻黄底框（每日口径简报 / 覆盖率面板）已按用户要求下线：数据层
+   settings.dailyBrief 仍随 settings 骑行（sync.js 的 MERGE_FIELDS 不动），
+   只是页面不再渲染；覆盖率的统计判据仍留在 disc.js 由模块测试覆盖。 */
 function setStat(id, v, isMoney, isPct) {
   const e = $(id);
   /* 金额与百分比（年化）都算收益类数值：隐藏时一起遮，颜色一起收 */
@@ -1012,7 +990,6 @@ function renderProd() {
      （添加 / 编辑 / 删除 / 补录净值 / 抓取）都会调 renderProd()，
      顺带刷一次表 —— 否则在详情弹层里抓完净值、关掉后表还是旧数字。 */
   renderBoard();
-  renderCoverage();
 }
 
 /* ---------- 产品页：收益对比表（v45 新增） ---------- */
@@ -1030,6 +1007,8 @@ function boardRows() {
       code: regCodeOf(p),          /* 看板搜「Z7…」也要搜得到：这一栏的读法全站只有一种 */
       prodCode: p.prodCode || "",
       lastDate: st.dates.length ? st.dates[st.dates.length - 1] : "",
+      /* v99：本轮抓取记录里的产品最新净值日优先，回退账本最新净值日；都没有留空 */
+      navAt: boardNavAt(navSrcInfo(p), st.dates.length ? st.dates[st.dates.length - 1] : ""),
       /* null = 没有可比的前值 / 样本不足，渲染成「—」，排序永远垫底 */
       wan: lastNum(st.wan),
       a7: lastNum(st.a7),
@@ -1049,7 +1028,7 @@ const wan2 = (v) => (v === null ? "—" : v.toFixed(2));
    但表里的写法故意与详情页不同 —— 不带正号、|≥10%| 只给一位小数：
    三列年化各要 7 个字宽，「+」一个符号就吃掉 7px × 3 = 21px，而这一列本来就用颜色
    标了涨跌（红涨绿跌），负数仍会带「-」。省下来的 21px 全部还给产品名，
-   这是「全部」六列能塞进 360 屏的关键。
+   这是「全部」七列（v99 加净值披露日、列间距调大后）仍能塞进 360 屏的关键。
    退一位小数是同一条理由：列宽 50px 是按最坏串「-123.4%」量的，不退的话同样三位整数
    要多写一位小数（「-123.4%」→「-123.45%」≈ 56px），nowrap 就把「%」挤到隔壁那一列的数字上。
    两位小数的精度在这里本来就是噪声。 */
@@ -1066,7 +1045,7 @@ const pctBd = (v) => {
    漏了会被 tests/app_core.test.mjs 的门禁直接跑红。 */
 const BD_CLS = {
   name: "c-nm", wan: "c-wan",
-  a7: "c-a", a14: "c-a", a30: "c-a", zero: "c-zero",
+  a7: "c-a", a14: "c-a", a30: "c-a", zero: "c-zero", navAt: "c-nd",
 };
 const BD_CELL = {
   /* 名字两行截断，所以补一个 title：手机上没有 hover，长按能看到全名 */
@@ -1076,10 +1055,14 @@ const BD_CELL = {
   a14: (r) => `<td class="c-a ${cls(r.a14 === null ? 0 : r.a14)}">${pctBd(r.a14)}</td>`,
   a30: (r) => `<td class="c-a ${cls(r.a30 === null ? 0 : r.a30)}">${pctBd(r.a30)}</td>`,
   zero: (r) => `<td class="c-zero ${r.zero ? "warn-n" : "muted"}">${r.zero}</td>`,
+  /* v99 · 净值披露日：MM-DD 省宽度，完整 YYYY-MM-DD 放 title；无值显示「—」，
+     文本一律过 esc()（日期来自云端抓取记录，不许直接拼进 HTML）。 */
+  navAt: (r) => `<td class="c-nd ${r.navAt ? "" : "muted"}" title="${r.navAt ? esc(r.navAt + " 净值披露日") : "暂无披露日记录"}">${esc(boardNavAtText(r.navAt))}</td>`,
 };
 
-/** 这台设备的列模式。没手动选过时按视口宽给默认：v54 起「全部」六列只要 252px，
-    连 320 屏（表格实得 278px）都放得下，所以默认直接「全部」；再窄才退回精简。 */
+/** 这台设备的列模式。没手动选过时按视口宽给默认：v99 起「全部」七列要 288px，
+    360 屏（实得 318px）放得下，320 极窄屏（实得 278px）默认走精简档 242px；
+    在 320 屏手动切「全部」会横滑，由右侧渐影提示。 */
 function bdMode() {
   if (UI.bdCols === "full" || UI.bdCols === "lean") return UI.bdCols;
   const w = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 360;
@@ -4979,7 +4962,6 @@ async function nativeFetchAll(forceExtra) {
     };
     if (added) saveLocal();
     else { try { localStorage.setItem(LS_DATA, JSON.stringify(DATA)); } catch (e) { } }
-    renderAlert();
     if (added) autoPush();
     toast(added ? `本机抓取完成：新增 ${added} 条净值` + (fail ? `，${fail} 只失败` : "")
                 : `本机抓取完成：暂无新净值` + (fail ? `（${fail} 只失败）` : ""), 4200);
@@ -5094,7 +5076,6 @@ async function syncPull(manual) {
     /* before.count 为 0 说明本机还没有任何净值（首次拉取 / 换设备），
        拿它当基准会算出「云端有 200 条新净值」这种荒唐提示，故跳过。 */
     if (before.count > 0) notifyNewNav(newNavItems(DATA.products, before.latest));
-    renderAlert();
     const rulesTip = rulesStat && rulesStat.filled
       ? `，规则文件回填 ${rulesStat.filled} 项` : "";
     if (manual) toast((migratedRemote ? "已从云端拉取，并自动整理数据" : "已从云端拉取") + rulesTip);
@@ -5405,7 +5386,6 @@ function maybeAutoUpdCheck() {
    ============================================================ */
 function loadNotify() {
   try { const s = localStorage.getItem(LS_NOTIFY); if (s) NOTIFY = Object.assign(NOTIFY, JSON.parse(s)); } catch (e) { }
-  try { ALERT_DISMISSED = localStorage.getItem(LS_ALERT) || ""; } catch (e) { }
 }
 function saveNotify() {
   /* v95：seen 集只增不减会无限膨胀，超上限就丢最老的键（对象键序即插入序）。
@@ -5421,8 +5401,6 @@ function saveNotify() {
     }));
   } catch (e) { }
 }
-function saveAlertDismiss() { try { localStorage.setItem(LS_ALERT, ALERT_DISMISSED); } catch (e) { } }
-
 function notifySupported() { return typeof Notification !== "undefined" && !!Notification; }
 function notifyPermission() { return notifySupported() ? Notification.permission : "unsupported"; }
 function isIOS() { return /iP(hone|ad|od)/.test(navigator.userAgent || ""); }
@@ -5532,35 +5510,11 @@ function stampText(v) {
   if (v && typeof v === "object") return String(v.time || "");
   return String(v || "");
 }
-/* 告警签名只取「失败集合」，不含时间戳：
-   这样用户点掉之后不会因为下一轮抓取（时间变了）又冒出来，
-   但只要失败的产品变了、或有新的产品开始失败，就会重新提示。 */
-function fetchFailSig(lf) { return lf ? ("fetch:" + (lf.sig || "") + ":" + (Number(lf.fail) || 0)) : ""; }
+/* v99 · 顶部抓取异常告警条已按用户要求下线（反馈影响整体 UI 美观度）。
+   lastFetchInfo() / fetchFailCount() 仍在：refreshNav() 的「详情与处理办法」弹层
+   与设置页同步状态都要读同一份云端抓取结论，删的是顶部横幅，不是数据口径。
+   告警标题的归类判据也留在 syncstatus.js 里由模块测试覆盖，页面只是不再调用。 */
 function fetchFailCount(lf) { return lf ? (Number(lf.fail) || 0) : 0; }
-
-function renderAlert() {
-  const bar = $("alertBar"); if (!bar) return;
-  const lf = lastFetchInfo();
-  const n = fetchFailCount(lf);
-  if (!n || fetchFailSig(lf) === ALERT_DISMISSED) {
-    bar.className = "alert"; bar.innerHTML = ""; return;
-  }
-  const items = (lf.items || []).slice(0, 3)
-    .map(s => `<div class="sm">· ${esc(s)}</div>`).join("");
-  const more = n > 3 ? `<div class="sm">…另有 ${n - 3} 只，点「详情」看全部</div>` : "";
-  bar.className = "alert warn show";
-  bar.innerHTML = `<div class="tx">
-      <b>${esc(fetchAlertHeading(lf))}</b>${lf.time ? `<span class="sm"> · ${esc(stampText(lf))}</span>` : ""}
-      ${items}${more}
-      <div style="margin-top:4px"><span class="more" onclick="refreshNav()">详情与处理办法 ›</span></div>
-    </div>
-    <button class="x" title="本次不再提示" onclick="dismissAlert()">✕</button>`;
-}
-function dismissAlert() {
-  ALERT_DISMISSED = fetchFailSig(lastFetchInfo());
-  saveAlertDismiss(); renderAlert();
-  toast("已忽略本次告警。失败的产品有变化时会重新提示", 3200);
-}
 
 /* ---------- 新净值检测 ---------- */
 /* 净值指纹：最新披露日 + 净值总条数。
@@ -5661,7 +5615,7 @@ function clearAll() {
    tests/handlers.test.mjs 会扫描 index.html / app.js 里的内联调用做双向校验。 */
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
-  clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, dismissAlert, editProd,
+  clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
   exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
@@ -5677,7 +5631,6 @@ Object.assign(window, {
   const migrated = migrateData();
   $("btnHide").textContent = DATA.settings.hideAmount ? "显示" : "隐藏";
   renderHome(); renderSet();
-  renderAlert();
   if (migrated) notifyMigrate();
   /* 上次手动抓取若在系统回收时还没跑完，启动后接着追踪（12 分钟上限自动兜底） */
   ensureManualPolling();
@@ -5717,7 +5670,7 @@ Object.assign(window, {
       /* v46：切回前台先补推本机改动，再核对云端。顺序很重要 ——
          checkCloudUpdate 在没开系统通知时第一行就 return，指望它兜 dirty 是兜不住的。 */
       flushDirty();
-      checkCloudUpdate(); renderAlert(); renderNotify();
+      checkCloudUpdate(); renderNotify();
       /* App 回到前台：立刻按节流核对一次净值（切后台期间可能正好披露了新一天） */
       if (nativeFetchAvailable()) { try { window.__nativeAutoFetch(); } catch (e) { } }
     } else if (DIRTY) {

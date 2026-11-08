@@ -246,7 +246,7 @@ html:not(.inApp) .app-only{display:none}
    320px 这种极窄屏当时仍需滑约 38px —— v52 把表格往外顶满之后，320 屏也放得下了。
    v54 按用户要求去掉「持有天数」这一列、万收从四位小数收到两位：省下的 25px 没有全留给
    表头，而是把年化列从 46 补到实测的 50（最坏串「-123.4%」）、万收按两位小数最坏串「-1.40」定到 33。
-   现在「全部」= 6 列 252px、「精简」= 4 列 242px，两个数都是列宽直加，min-width 必须跟它相等。 */
+   现在「全部」= 7 列 302px、「精简」= 4 列 250px（含 v99 列间距调整），两个数都是列宽直加，min-width 必须跟它相等。 */
 /* 外层只管给渐影定位，内层只管滚动：两件事挤在同一个元素上不成立，
    overflow 容器会把自己的 ::after 一起裁掉，渐影就永远看不见。
    v52 再把这一层往外顶到卡片的内边距（卡片 padding 是 16px）：表格是这页最宽的
@@ -273,25 +273,30 @@ html:not(.inApp) .app-only{display:none}
    裁掉一条，横向滚动时后面那列的字会「漏」进产品名这一列（实测现象：名字左边冒出半个字）。
    width:100% 配 min-width：宽屏铺满卡片，窄屏按 min-width 溢出、交给横滑 ——
    这样不用为每种屏宽写一套断点，列宽也只有一处定义。 */
-.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:252px}
-/* 「全部」6 列（v54 起没有持有天数）的宽度是量出来的，数字列取「两行表头」与「最坏内容」里较宽的那个：
-   年化 50（「-123.4%」）、万收 33（v54 起两位小数，最坏「-1.40」）、挂0 21（表头「挂0/天」），
-   48 + 33 + 21 + 3×50 = 252px。表格铺满卡片内边距之后，360 屏带子有 330px（298 + 左右各 16），
-   扣掉 plate 那 6px×2，表格实得 318px；产品名给 48px 起 —— 多出来的宽度由 fixed
-   布局按比例分给各列（不是只给首列），所以这里写的是「下限」不是「实得」：
-   48 在 360 屏实得 61px、411 屏 70px，两行 10 个汉字上下，数字列各多 4~12px。
-   名字再宽就是抢数字的地盘了。完整名字在详情里，长按标题也能看全。 */
-.boardtbl .c-nm{width:48px}
-.boardtbl .c-wan{width:33px}
-.boardtbl .c-a{width:50px}
-.boardtbl .c-zero{width:21px}
-/* 精简 = 4 列，242px：首列给回 130px（两行约 22 个汉字），数字列维持实测宽度 */
-.boardtbl.lean{min-width:242px}
-.boardtbl.lean .c-nm{width:130px}
-.boardtbl.lean .c-wan{width:34px}
-.boardtbl.lean .c-a{width:50px}
-.boardtbl.lean .c-zero{width:28px}
-.boardtbl th{font-size:10px;color:var(--ink3);font-weight:600;text-align:right;padding:5px 2px;border-bottom:1px solid var(--line);line-height:1.15}
+.boardtbl{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:11px;font-variant-numeric:tabular-nums;width:100%;min-width:302px}
+/* 「全部」7 列（v54 起没有持有天数，v99 加净值披露日）的宽度是量出来的，数字列取「两行表头」与「最坏内容」里较宽的那个：
+   内容区：年化 46（「-123.4%」）、万收 29（v54 起两位小数，最坏「-1.40」）、挂0 17（表头「挂0/天」）、
+   净值披露日 32（「MM-DD」），产品名 44 —— 合计 44 + 29 + 17 + 32 + 3×46 = 260px。
+   v99 按用户要求把列间距从 4px 调到 6px：全局 box-sizing:border-box，左右 padding 2→3px
+   会吃掉内容区，所以每列宽同步 +2px 把内容区原样补回来：50 + 35 + 23 + 38 + 3×52 = 302px。
+   （只加 padding 不加列宽是最容易踩的坑：nowrap 的最坏串会被挤到隔壁列，v47 实测过。）
+   表格铺满卡片内边距之后，360 屏带子有 330px（298 + 左右各 16），扣掉 plate 那 6px×2，
+   表格实得 318px；产品名给 50px 起 —— 多出来的宽度由 fixed 布局按比例分给各列
+   （不是只给首列），所以这里写的是「下限」不是「实得」。名字再宽就是抢数字的地盘了，
+   完整名字在详情里，长按标题也能看全。 */
+.boardtbl .c-nm{width:50px}
+.boardtbl .c-wan{width:35px}
+.boardtbl .c-a{width:52px}
+.boardtbl .c-zero{width:23px}
+.boardtbl .c-nd{width:38px}
+/* 精简 = 4 列，250px：首列给回 132px（两行约 22 个汉字），数字列维持实测内容区宽度；
+   同样按 padding 3px 同步补宽，间距与「全部」档一致。用户拍板：320 极窄屏走这一档。 */
+.boardtbl.lean{min-width:250px}
+.boardtbl.lean .c-nm{width:132px}
+.boardtbl.lean .c-wan{width:36px}
+.boardtbl.lean .c-a{width:52px}
+.boardtbl.lean .c-zero{width:30px}
+.boardtbl th{font-size:10px;color:var(--ink3);font-weight:600;text-align:right;padding:5px 3px;border-bottom:1px solid var(--line);line-height:1.15}
 /* 第二行是「年化 / 收益」这类补语：压到 9px、颜色更浅，一眼扫过去先认出 7日/14日/30日。
     nowrap 是为了让排序角标和补语永远待在第二行，不会被挤到第三行去。 */
 .boardtbl th .l2{display:block;font-size:9px;font-weight:500;color:var(--ink3);white-space:nowrap}
@@ -305,7 +310,7 @@ html:not(.inApp) .app-only{display:none}
 .boardtbl th:first-child,.boardtbl td:first-child{text-align:left;position:sticky;left:0;background:var(--plate);z-index:1;box-shadow:1px 0 0 var(--line)}
 .boardtbl th.srt{cursor:pointer;color:var(--brand)}
 .boardtbl th.srt:hover{text-decoration:underline}
-.boardtbl td{padding:6px 2px;border-bottom:1px dashed var(--line);text-align:right;white-space:nowrap}
+.boardtbl td{padding:6px 3px;border-bottom:1px dashed var(--line);text-align:right;white-space:nowrap}
 .boardtbl td.nm{white-space:normal;overflow:hidden}
 /* 两行截断要落在里面的按钮上（td 自己加 clamp 对块级子元素无效），
    且 display 必须是 -webkit-box：inline-block 上 -webkit-line-clamp 不生效。
@@ -446,12 +451,8 @@ html:not(.inApp) .app-only{display:none}
     <span class="sync-state" id="syncState" onclick="openSync()">未连接</span>
   </div>
 
-  <!-- 云端抓取异常告警（有失败才显示；内容由 renderAlert() 填） -->
-  <div class="alert" id="alertBar"></div>
-
   <!-- ========== 首页 ========== -->
   <div class="page on" id="pg-home">
-    <div id="briefBox" style="margin-bottom:8px"></div>
     <!-- 持有资产 -->
     <div class="card">
       <div class="asset-top">
@@ -586,7 +587,6 @@ html:not(.inApp) .app-only{display:none}
        v45：产品管理内容已迁往「交易」页，本页换成可按机构筛选、可按列排序的收益对比表。
        v48：表头两行竖排 + 精简/全部两种列模式，右上角那颗按钮就是切换器。 -->
   <div class="page" id="pg-prod">
-    <div id="covBox" style="margin-bottom:8px"></div>
     <div class="card">
       <div class="card-t"><h2>产品收益表</h2>
         <div style="display:flex;gap:6px;align-items:center">
@@ -617,7 +617,8 @@ html:not(.inApp) .app-only{display:none}
         月挂 0 数：本月万份收益为 0 的<b>披露日</b>天数，没披露不计。<br>
         样本不足显示「—」，排序时这类行永远排在最后；数据以官方披露为准。<br>
         表头点一下按该列排序、再点翻转方向；右上角「精简 / 全部」切换列数，
-        近 14 / 30 日年化默认收在「全部」里（六列铺满到卡片边缘，320 宽的屏也刚好放得下，再窄才横滑，右边那道渐影就是提示），
+        近 14 / 30 日年化默认收在「全部」里（七列在 360 屏铺满到卡片边缘；320 极窄屏默认走精简档，手动切「全部」会横滑，右边那道渐影就是提示），
+        「净值披露日」列取本轮抓取记录里该产品的官方披露日，没有记录时回退账本最新净值日，都没有显示「—」；这是披露日期、不是抓取时刻；
         这个选择只存本机、不跟其它设备同步。
       </div>
     </div>
@@ -667,37 +668,8 @@ html:not(.inApp) .app-only{display:none}
         数据默认存本机浏览器，配好 GitHub 同步后可多设备共享同一份数据。
       </div>
     </div>
-    <div class="card">
-      <div class="card-t"><h2>口径说明</h2></div>
-      <div class="note b">
-        <b>万份收益与年化口径</b><br>
-        净值型产品官方只披露「份额净值」，无万份收益。本工具换算：<br>
-        · 万份收益(元) = (今日净值 − 上一披露日净值) × 10000 —— <b>整段累计，不按自然日摊平</b>（v68 起）。周末/长假后的那一格含这几天全部涨跌，间隔几天在详情页写明<br>
-        · 当日盈亏(元) = <b>截至当日已确认份额</b> × (今日净值 − 上一披露日净值) —— 与上面那条同一段涨跌，所以「万收 × 份额 ÷ 10000 = 当日盈亏」恒成立<br>
-        · N 日年化 = (nav<sub>t</sub> ÷ N 个自然日前最近净值 − 1) ÷ N × 365（N 取 7 / 14 / 30）<br>
-        · 持仓年化 = 持仓盈亏 ÷ 成本 × 365 ÷ 持有天数（<b>本金天数加权</b>，不足 7 天不给年化）<br>
-        · 成立以来年化 = (末值 ÷ 首值 − 1) ÷ 持有天数 × 365<br>
-        · <b>资产月报</b>：月收益 = 逐日「当日已确认份额 × 净值差」之和（与首页本月收益同一个数）；<br>
-          月年化 = 月收益 ÷ 期末市值 × 365 ÷ 当月天数；买入/赎回按<b>确认日</b>归月，在途不计息、不计入净投入；
-          收益构成<b>按产品</b>列示，资产构成按机构汇总<br>
-        样本不足时显示「—」，<b>不估算、不补齐</b>。以上均为便于横向对比的折算口径，与官方年化可能存在差异。
-      </div>
-      <div class="note" style="margin-top:10px">
-        <b>确认与归属口径</b><br>
-        · <b>T+1 确认</b>：申购/赎回按「T 日申请、T+1 日确认」。<b>确认日之前不计份额、不计收益</b>，
-          该笔金额显示为「在途」，也不计入总资产；赎回确认前持仓不动。<br>
-        · <b>持仓三态</b>：持仓中（已有确认份额）／在途（份额未到账）／已清仓（份额归零但保留历史已实现收益）。<br>
-        · <b>日历三态</b>：<b>未披露</b>（当日无任何产品净值，灰色）与<b>收益为 0</b>（有净值但持平，显示 0.00）是两回事。
-          收益归「净值披露日」归属，<b>未披露日不做均摊</b>，所以日历上同一笔收益不会重复出现。<br>
-        · <b>已实现收益</b>：赎回按<b>移动均价法</b>扣减成本，差额计入已实现（<b>非 FIFO</b>）。
-          理财产品赎回按份额确认，均价法更贴近实际；「已核算 N 笔赎回」指计入统计的赎回笔数。
-      </div>
-      <div class="note" style="margin-top:10px">
-        <b>净值抓取说明</b><br>
-        数据来自各理财公司官网与中国理财网信息披露平台公开查询接口，由 GitHub Actions 每天定时抓取。平台有<b>概率验证码</b>与频率限制，命中时该产品需手动补录净值或以官方页面为准。<br>
-        <b>已有净值不覆盖</b>：单日涨跌超过 10% 视为异常数据，跳过并报警，防止抓错产品污染账本。
-      </div>
-    </div>
+    <!-- v99 · 设置页 3 个静态口径说明框已按用户要求下线（常驻提示框影响整体美观度）。
+         产品页「口径说明」那张 .foot 文字卡片保留：那是列口径说明，不是常驻提醒框。 -->
     <div class="card">
       <div class="card-t"><h2>危险操作</h2></div>
       <button class="btn gh full" style="color:var(--up)" onclick="clearAll()">清空全部本地数据</button>

@@ -395,8 +395,8 @@ test("产品收益表：每个列 key 都有类名、单元格渲染与 CSS 宽�
 });
 /* ---------- v49：玻璃皮肤之下的宽度预算 ---------- */
 /* index.html 里「全部 / 精简」两套列宽 + min-width 是量出来的预算表，不是估的：
-   360 视口下 boardWrap 的 clientWidth = 330px（Playwright 实测），6 列必须排得进去
-   （v54 起「全部」是 6 列：持有天数按用户要求删掉了）。
+   360 视口下 boardWrap 的 clientWidth = 330px（Playwright 实测），7 列必须排得进去
+   （v54 起删掉持有天数，v99 又按用户要求加回一列「净值披露日」）。
    超出哪怕 2px 就变成横滑，而 v49 要解决的正是「一屏看完」。
    v52 把 .board-edge 往外顶到卡片内边距（margin:0 -16px），带子从 298 涨到 330 ——
    这里必须跟着实测值改，不然预算表悄悄松了 32px，谁都不会发现。
@@ -419,7 +419,7 @@ function cssWidths(html, mode) {
   const out = {};
   let m;
   while ((m = re.exec(html))) out[m[1]] = +m[2];
-  /* 4 条规则 = c-nm / c-wan / c-a / c-zero：三列年化共用 .c-a，所以「6 列」在这里只有 4 个类名。
+  /* v99：c-nm / c-wan / c-a / c-zero / c-nd 共 5 个类名（三列年化共用 .c-a，「7 列」只有 5 个类名）。
      少于 4 条就是解析脱靶（比如类名改了、或者规则被并进了简写），预算会变成静默的空检查。 */
   assert.ok(Object.keys(out).length >= 4, `index.html 里只读到 ${Object.keys(out).length} 条列宽规则，解析方式该跟着 CSS 改了`);
   return out;
@@ -443,7 +443,7 @@ function clsKeyMap() {
   return out;
 }
 
-test("产品收益表：「全部」6 列的宽度预算必须塞得进 360 屏", () => {
+test("产品收益表：「全部」7 列的宽度预算必须塞得进 360 屏", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const cls = clsKeyMap();
   for (const mode of ["full", "lean"]) {
@@ -555,22 +555,58 @@ test("产品收益表：首列基准宽不能再涨回去（用户要的就是�
     + "名字就成省略号串了 —— 用户要的是「名字窄一点」，不是「名字没了」");
 });
 
-test("产品收益表：320 屏也得一屏看完 6 列（v52 铺满之后新拿下的预算）", () => {
+/* ---------- v99 · 列间距（用户拍板：走精简档，几列之间的间距调一下） ---------- */
+test("v99 列间距：padding 与列宽同步放大，内容区宽度不许被挤小", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
-  /* 320 视口下 boardWrap 的 clientWidth 实测 290px：320 − .wrap 左右内边距 28 − 卡片
-     左右内边距 32 − 卡片描边 2 + .board-edge 顶回去的 32。这一档以前要横滑 38px，
-     铺满之后不用了，所以把它跟 360 那条一起钉住。
-     v53 那版 278 + plate 左右 12 = 290，余量为 0；v54 删掉持有天数、万收收到两位之后
-     六列合计 252 + 12 = 264，极窄屏终于有了 26px 余量。 */
-  const cls = clsKeyMap();
-  for (const mode of ["full", "lean"]) {
-    const w = cssWidths(html, mode);
-    const keys = mode === "full" ? BOARD_COLS.map(c => c[0]) : BOARD_LEAN;
-    const total = keys.reduce((s, k) => s + w[cls[k]], 0);
-    const room = AVAIL_320 - 2 * platePadX(html);
-    assert.ok(total <= room,
-      `${mode} 合计 ${total}px > 320 屏表格实得 ${room}px：极窄屏又退回横滑，上面那条预算的前提就没了`);
+  const th = html.match(/\.boardtbl th\{[^}]*padding:5px (\d+)px/);
+  const td = html.match(/\.boardtbl td\{[^}]*padding:6px (\d+)px/);
+  assert.ok(th && td, "找不到 th / td 的左右内边距规则：列间距没有唯一落点");
+  const pad = +th[1];
+  assert.equal(+td[1], pad, "th 与 td 左右内边距必须一致，否则表头和单元格对不齐");
+  assert.ok(pad >= 3, `列间距仍是基线的 4px（padding ${pad}px × 2），间距没调整`);
+  /* 全局 box-sizing:border-box —— 加 padding 会吃掉内容区。列宽必须同步补 2×(pad−2)px，
+     否则最坏串「-123.4%」会被 white-space:nowrap 挤到隔壁列（v47 实测现象）。
+     下面按 padding=2 基线的内容区逐项钉死，不许靠肉眼判断「看起来还行」。 */
+  const expectFull = { "c-nm": 44, "c-wan": 29, "c-a": 46, "c-zero": 17, "c-nd": 32 };
+  const expectLean = { "c-nm": 126, "c-wan": 30, "c-a": 46, "c-zero": 24 };
+  const wFull = cssWidths(html, "full");
+  const wLean = cssWidths(html, "lean");
+  for (const [cls, content] of Object.entries(expectFull)) {
+    assert.equal(wFull[cls] - 2 * pad, content,
+      `全部档 .${cls} 内容区被挤成 ${wFull[cls] - 2 * pad}px（基线 ${content}px）：列宽要跟着 padding 一起加`);
   }
+  for (const [cls, content] of Object.entries(expectLean)) {
+    assert.equal(wLean[cls] - 2 * pad, content,
+      `精简档 .${cls} 内容区被挤成 ${wLean[cls] - 2 * pad}px（基线 ${content}px）`);
+  }
+  assert.equal(cssMinWidth(html, "full"), 302, "全部档 min-width 要跟着列宽改成 302px");
+  assert.equal(cssMinWidth(html, "lean"), 250, "精简档 min-width 要跟着列宽改成 250px");
+});
+
+test("产品收益表：320 屏默认精简档一屏看完；全部档加列后横滑，渐影必须在", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  /* 320 视口下 boardWrap 的 clientWidth 实测 290px，实得 278px（扣 plate 左右 12）。
+     v99 加第 7 列「净值披露日」、列间距调整后，「全部」档 302px 已超过这 278px，
+     物理上塞不进 —— 不虚改实测常量、也不删测试，而是把约束如实收窄：
+       ① 320 屏 w<350 默认走精简（bdMode），精简档必须仍一屏看完；
+       ② 「全部」档在 320 屏允许横滑，但右边渐影必须还在（提示用户还能往右滑）；
+       ③ 新列只许出现在「全部」档，不许混进精简档（否则默认档直接横滑）。
+     360 主流屏（实得 318px）两档都要一屏看完，由上面那条 360 测试钉住。 */
+  const cls = clsKeyMap();
+  const room = AVAIL_320 - 2 * platePadX(html);
+  const wLean = cssWidths(html, "lean");
+  const leanTotal = BOARD_LEAN.reduce((s, k) => s + wLean[cls[k]], 0);
+  assert.ok(leanTotal <= room,
+    `精简档合计 ${leanTotal}px > 320 屏表格实得 ${room}px：320 屏默认档横滑了`);
+  assert.ok(BOARD_LEAN.indexOf("navAt") < 0,
+    "新列混进了精简档：320 屏默认视图会直接横滑，应只在「全部」档出现");
+  assert.ok(BOARD_COLS.some(c => c[0] === "navAt"), "「全部」档丢了净值披露日列");
+  const wFull = cssWidths(html, "full");
+  const fullTotal = BOARD_COLS.reduce((s, c) => s + wFull[cls[c[0]]], 0);
+  assert.ok(fullTotal > room,
+    `全部档合计 ${fullTotal}px 已能塞进 320 屏 ${room}px：说明列宽被压缩过头，回去核对 360 屏预算`);
+  assert.ok(/\.board-fade\{/.test(html) && /addEventListener\("scroll",\s*bdEdge/.test(APP_SRC),
+    "全部档在 320 屏会横滑，渐影与 scroll 监听就不许少：否则用户不知道右边还有列");
 });
 
 /* ---------- v54：持有天数下线、万收两位小数 ---------- */
