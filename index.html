@@ -674,11 +674,17 @@ html:not(.inApp) .app-only{display:none}
     <div class="card">
       <div class="card-t"><h2>备份与恢复</h2></div>
       <div class="row-btn">
+        <button class="btn gh" style="flex:1" onclick="exportFullBackup()">导出全量备份</button>
+        <button class="btn gh" style="flex:1" onclick="importFullBackup()">导入全量备份</button>
+      </div>
+      <div class="row-btn" style="margin-top:10px">
         <button class="btn gh" style="flex:1" onclick="exportJSON()">导出 JSON</button>
         <button class="btn gh" style="flex:1" onclick="importJSON()">导入 JSON</button>
       </div>
       <div class="foot" style="text-align:left;padding-top:10px">
         数据默认存本机浏览器，配好 GitHub 同步后可多设备共享同一份数据。
+        「全量备份」用口令加密（AES-256），App 内还包括 PAT、模型密钥、账本 Cookie 等加密区内容；
+        口令不存任何地方，忘了就解不开。
       </div>
     </div>
     <!-- v99 · 设置页 3 个静态口径说明框已按用户要求下线（常驻提示框影响整体美观度）。

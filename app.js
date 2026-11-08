@@ -73,7 +73,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v102";
+const APP_VER = "v103";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -5684,6 +5684,205 @@ function clearAll() {
 }
 
 /* ============================================================
+   v103 全量备份 / 恢复（口令加密 · 含 App 加密槽密钥）
+   容器 = { magic, v, kdf, salt, iv, ct }；载荷 = { web, slots?, llmCfg?, meta }。
+   口令 PBKDF2(SHA-256, 60 万次) 派生 AES-GCM-256 密钥，口令不存任何地方 ——
+   忘了就解不开，这是特性不是缺陷。App 加密槽（PAT/模型Key/账本Cookie/秒讯）
+   经 NavBridge.backupSecrets/restoreSecrets 受控出入，页面其余路径永远拿不到值。
+   ============================================================ */
+const BK_MAGIC = "licai-full-backup";
+const BK_VER = 1;
+const BK_ITER = 600000;
+
+function b64u(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function ub64(s) {
+  const b = atob(s), u = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+  return u;
+}
+async function bkDerive(pass, salt, iter) {
+  const km = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: iter, hash: "SHA-256" },
+    km, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+async function bkEncrypt(obj, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await bkDerive(pass, salt, BK_ITER);
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return JSON.stringify({
+    magic: BK_MAGIC, v: BK_VER, kdf: { name: "PBKDF2-SHA256", iter: BK_ITER },
+    salt: b64u(salt), iv: b64u(iv), ct: b64u(new Uint8Array(ct))
+  });
+}
+async function bkDecrypt(container, pass) {
+  const o = typeof container === "string" ? JSON.parse(container) : container;
+  if (!o || o.magic !== BK_MAGIC) throw new Error("不是本台账的全量备份文件");
+  if (o.v !== BK_VER) throw new Error("备份版本不支持（v" + o.v + "）");
+  const key = await bkDerive(pass, ub64(o.salt), (o.kdf || {}).iter || BK_ITER);
+  let pt;
+  try {
+    pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ub64(o.iv) }, key, ub64(o.ct));
+  } catch (e) {
+    throw new Error("口令不对，或文件已损坏");
+  }
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+
+/* App 加密槽桥：判「方法在不在」，与 gh 桥同一口径。
+   出口归属遵守 OWNERS 表：SYNC/LEDGERME/AIXHUB 三槽走 NavBridge.__bkDone，
+   LLM 槽走 LlmBridge.__bkLlmDone —— 旧壳可能只有其一，逐槽如实降级。 */
+function bkBridge() {
+  try { return !!(window.NativeNav && typeof window.NativeNav.backupSecrets === "function"); }
+  catch (e) { return false; }
+}
+function llmBkBridge() {
+  try { const b = llmBridge(); return !!(b && typeof b.backupLlmSecret === "function"); }
+  catch (e) { return false; }
+}
+function bkCall(fn, args, onDone) {
+  const id = "bk" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const t = setTimeout(() => { try { delete window.__bkDone; delete window.__bkLlmDone; } catch (e) { } onDone(null); }, 8000);
+  window.__bkDone = window.__bkLlmDone = function (rid, res) {
+    if (rid !== id) return;
+    clearTimeout(t);
+    try { delete window.__bkDone; delete window.__bkLlmDone; } catch (e) { }
+    onDone(res || null);
+  };
+  try { fn(id, ...args); }
+  catch (e) { clearTimeout(t); try { delete window.__bkDone; delete window.__bkLlmDone; } catch (e2) { } onDone(null); }
+}
+/* 导出：两桥拼装四槽（LLM 槽拿不到就缺着，由调用方如实提示） */
+async function bkFetchSlots() {
+  if (!bkBridge()) return null;
+  const r = await new Promise(res => bkCall(window.NativeNav.backupSecrets, [], res));
+  if (!r || !r.ok) return null;
+  const out = Object.assign({}, r.secrets || {});
+  if (llmBkBridge()) {
+    const r2 = await new Promise(res => bkCall(llmBridge().backupLlmSecret, [], res));
+    if (r2 && r2.ok && r2.secret) out.llm = r2.secret;
+  }
+  return out;
+}
+/* 回填：两桥分发，返回实际写入槽数 */
+async function bkRestoreSlots(slots) {
+  let n = 0;
+  if (bkBridge()) {
+    const r = await new Promise(res => bkCall(window.NativeNav.restoreSecrets,
+      [JSON.stringify({ sync: slots.sync || "", ledgerme: slots.ledgerme || "", aixhub: slots.aixhub || "" })], res));
+    if (r && r.ok) n += r.restored || 0;
+  }
+  if (slots.llm && llmBkBridge()) {
+    const r2 = await new Promise(res => bkCall(llmBridge().restoreLlmSecret,
+      [JSON.stringify({ secret: slots.llm })], res));
+    if (r2 && r2.ok) n += r2.restored || 0;
+  }
+  return n;
+}
+
+/* Web 层收集/写回：账本、同步配置、状态键、两套登录态；
+   不备份 bdCols（列缓存）与 nativeFetchAt（时间戳）—— 可再生信息不进备份 */
+function bkCollectWeb() {
+  const grab = keys => Object.fromEntries(Object.values(keys).map(k => [k, localStorage.getItem(k) || ""]));
+  return {
+    data: localStorage.getItem(LS_DATA) || "",
+    sync: localStorage.getItem(LS_SYNC) || "",
+    st: localStorage.getItem(LS_ST) || "",
+    notify: localStorage.getItem(LS_NOTIFY) || "",
+    manual: localStorage.getItem(LS_MANUAL) || "",
+    upd: localStorage.getItem(LS_UPD) || "",
+    aix: grab(AIX_LS),
+    lgm: grab(LGM_LS)
+  };
+}
+
+async function exportFullBackup() {
+  const p1 = prompt("设置备份口令（至少 8 位；口令不存任何地方，忘了就解不开）：");
+  if (p1 == null) return;
+  if (p1.length < 8) return toast("口令至少 8 位", 3200);
+  const p2 = prompt("再输一遍口令确认：");
+  if (p2 == null) return;
+  if (p1 !== p2) return toast("两次口令不一致，已取消", 3200);
+  toast("正在打包…", 1600);
+  const payload = { web: bkCollectWeb(), meta: { app: APP_VER, ts: new Date().toISOString(), owner: SYNC.owner || "" } };
+  const slots = await bkFetchSlots();
+  if (slots) payload.slots = slots;
+  const b = llmBridge();
+  if (b) {
+    try {
+      const cfg = JSON.parse(b.getConfig() || "{}");
+      if (cfg.baseUrl || cfg.model) payload.llmCfg = cfg;
+    } catch (e) { /* 读不到配置就不进备份，不影响其余 */ }
+  }
+  if (!slots) toast("网页端备份：不含 App 加密区密钥（PAT/模型Key/账本Cookie）", 4200);
+  const container = await bkEncrypt(payload, p1);
+  const blob = new Blob([container], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `理财台账全量备份_${today()}.licai`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast(slots ? "已导出全量备份（含密钥，请妥善保管文件与口令）" : "已导出备份（网页层）", 3600);
+}
+
+async function importFullBackup() {
+  const inp = document.createElement("input"); inp.type = "file"; inp.accept = ".licai,.json";
+  inp.onchange = () => {
+    const f = inp.files[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = async () => {
+      try {
+        const pass = prompt("输入备份口令：");
+        if (pass == null || pass === "") return;
+        let payload;
+        try { payload = await bkDecrypt(rd.result, pass); }
+        catch (e) { return toast(e.message, 4200); }
+        const w = payload.web || {};
+        if (!w.data) return toast("备份里没有账本数据，文件异常", 4200);
+        const meta = payload.meta || {};
+        const hasKeys = !!payload.slots;
+        if (!confirm(`备份时间：${(meta.ts || "?").slice(0, 19).replace("T", " ")}\n来源版本：${meta.app || "?"} · owner：${meta.owner || "?"}\n内容：账本 + 同步配置${hasKeys ? " + 全部密钥（PAT/模型Key/Cookie）" : "（不含密钥）"}\n\n导入将覆盖本机现有数据与配置，确定？`)) return;
+        /* owner：备份带的与当前不同时问一句 —— 改名/迁移场景的第一落点 */
+        let owner = "";
+        try { owner = (JSON.parse(w.sync || "{}").owner) || ""; } catch (e) { }
+        if (owner && SYNC.owner && owner !== SYNC.owner) {
+          const useBk = confirm(`备份的同步 owner 是「${owner}」，当前是「${SYNC.owner}」。\n确定=用备份的 owner；取消=保留当前。`);
+          if (!useBk) {
+            try { const o = JSON.parse(w.sync); o.owner = SYNC.owner; w.sync = JSON.stringify(o); } catch (e) { }
+          }
+        }
+        const put = (k, v) => { if (v != null) try { localStorage.setItem(k, v); } catch (e) { } };
+        put(LS_DATA, w.data); put(LS_SYNC, w.sync); put(LS_ST, w.st);
+        put(LS_NOTIFY, w.notify); put(LS_MANUAL, w.manual); put(LS_UPD, w.upd);
+        Object.values(AIX_LS).forEach(k => put(k, (w.aix || {})[k] || ""));
+        Object.values(LGM_LS).forEach(k => put(k, (w.lgm || {})[k] || ""));
+        try { DATA = Object.assign({ products: [], trades: [], settings: {} }, JSON.parse(w.data)); } catch (e) { }
+        try { SYNC = Object.assign(SYNC, JSON.parse(w.sync || "{}")); } catch (e) { }
+        try { SYNC_ST = Object.assign(SYNC_ST, JSON.parse(w.st || "{}")); } catch (e) { }
+        applyCalendarConfig(); saveLocal();
+        if (hasKeys) {
+          const n = await bkRestoreSlots(payload.slots);
+          if (n > 0) toast(`密钥已回填 ${n} 项`, 3000);
+          else toast("密钥回填失败，可在设置页手动重配", 3600);
+        }
+        if (payload.llmCfg && llmBridge()) {
+          try { llmBridge().setConfig(JSON.stringify(payload.llmCfg)); } catch (e) { }
+        }
+        renderHome(); renderTrade(); renderProd(); renderSet();
+        toast("已恢复全量备份" + (hasKeys ? "，建议进设置页点「保存并测试」验证同步" : ""), 4200);
+      } catch (e) { toast("恢复失败：" + e.message, 4200); }
+    };
+    rd.readAsText(f);
+  };
+  inp.click();
+}
+
+/* ============================================================
    启动
    ============================================================ */
 
@@ -5695,7 +5894,7 @@ function clearAll() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportJSON, go, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
