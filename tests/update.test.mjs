@@ -8,7 +8,7 @@ import { parseVer, cmpVer, readRelease, updateVerdict, APK_ASSET } from "../js/d
 const rel = (over) => Object.assign({
   tag_name: "apk-latest", name: "理财台账 APK · latest", draft: false, prerelease: false,
   published_at: "2026-10-31T04:22:58Z",
-  body: "自动构建 · 本仓 `33f9a29d`\napkVersion=1.0.205\n网页资源 `glorywork/licai-ledger@ad1b434`",
+  body: "自动构建 · 本仓 `33f9a29d`\napkVersion=1.0.205\n网页资源 `Tommyface/licai-ledger@ad1b434`",
   assets: [{ name: APK_ASSET, state: "uploaded", size: 42927899, url: "https://api.github.com/repos/o/r/releases/assets/1" }]
 }, over || {});
 

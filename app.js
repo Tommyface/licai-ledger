@@ -73,7 +73,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v101";
+const APP_VER = "v102";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -144,7 +144,7 @@ let DATA = { products: [], trades: [], settings: { hideAmount: false } };
    老用户磁盘上那份明文键由 syncPurgeLegacy() 装载即删（只删不读、不拿去试请求）。
    B1 窗口期：v80 页面先上线、新 APK 还没出时，v79 壳有 NativeNav 但不认识第四槽 ——
    syncShellOld() 认出来给一句实话，绝不静默发一发空 token 请求。 */
-let SYNC = { owner: "glorywork", repo: "licai-data", path: "licai-data.json", sha: "", auto: true };
+let SYNC = { owner: "Tommyface", repo: "licai-data", path: "licai-data.json", sha: "", auto: true };
 let SYNC_MEM_TOKEN = "";   /* 网页版专用：只在内存里，绝不进 localStorage / DOM */
 /* v81 第 4 步：云端规则 feed 的路径，与「披露原文摘录」的内存态。
    product-rules.json 是私有仓里 Update NAV 每天写的独立产物（第 1~3 步落地），
@@ -3794,7 +3794,7 @@ function openSync() {
     ? `本机只需一项：<code>Contents: Read and write</code>。净值在手机上本地抓，不派发云端任务，<b>不用给 Actions 权限</b>。`
     : `需要两项：<code>Contents: Read and write</code>（读写数据）+ <code>Actions: Read and write</code>（用「⚡ 立即抓取」触发云端任务；只给 Contents 会 403）。`;
   /* 预填值没被改过就别展开高级，首次配置只剩 Token 一格 */
-  const advOpen = (SYNC.owner !== "glorywork" || SYNC.repo !== "licai-data" || SYNC.path !== "licai-data.json");
+  const advOpen = (SYNC.owner !== "Tommyface" || SYNC.repo !== "licai-data" || SYNC.path !== "licai-data.json");
   /* 「App 更新」只在有本机更新桥的壳里出现：判的是 nativeUpdateAvailable() 而不是
      inApp —— 线上优先之后跑的是页面上的代码、装的是本机那个壳，两者版本可以错开
      （Java 只挡住「比本壳更老的代码」，新代码允许跑在旧壳上）。所以桥的存在与否

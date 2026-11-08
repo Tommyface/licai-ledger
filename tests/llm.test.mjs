@@ -329,7 +329,7 @@ const SNAP_ITEM = { name: "稳健增利 90 天", inst: "某理财子", code: "Z1
 test("快照：白名单只出那十个字段，混进来的凭据与仓库信息一个字都不跟着走", () => {
   const dirty = Object.assign({}, SNAP_ITEM, {
     token: "sk-LEAKCHECK-abcdef", apiKey: "KEY-LEAKCHECK", Authorization: "Bearer LEAKCHECK",
-    repo: "glorywork/licai-data", path: "/data/licai/sync/licai-data.json",
+    repo: "Tommyface/licai-data", path: "/data/licai/sync/licai-data.json",
     password: "hunter2", baseUrl: "https://LEAKCHECK.test/v1",
   });
   const s = llmSnapshot([dirty], { today: "2026-11-03" });
