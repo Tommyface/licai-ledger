@@ -1856,6 +1856,25 @@ test("研判装配失败不许静默：briefRun 里 briefPack 有 try/catch", ()
   assert.match(body, /装配数据失败/, "兜底了但没把原因说到屏上");
 });
 
+/* ---------- v110：研判要在原生 90 秒读超时之内落定 ---------- */
+
+test("研判超时不许只显示原生那句 timeout：必须指到「关掉联网检索」", () => {
+  /* v109 真机报障的原文就是 timeout —— 屏上照登等于什么都没说，用户只能再点一次然后同样超时。
+     研判只用本机数据；端点默认带着联网检索工具，模型为凑 sources 去搜，90 秒就是这么花掉的。 */
+  const i = APP_SRC.indexOf("function briefErrText(");
+  assert.ok(i > 0, "找不到 briefErrText");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /要求端点做联网检索/, "超时文案没把「关掉联网检索」说出来");
+  assert.match(body, /timeout/, "没有识别原生那个词");
+});
+
+test("研判落定要记耗时：发出时打点，卡片把用时画出来", () => {
+  const i = APP_SRC.indexOf("function briefRun(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /BRIEF\.t0 = Date\.now\(\)/, "发出时没打点，算不出用时");
+  assert.match(APP_SRC, /ms: BRIEF\.ms/, "卡片没拿到耗时");
+});
+
 test("研判缓存换代：解析口径变了，旧条目必须判不认", () => {
   /* v108 首版把整个响应壳当正文存进 licai.briefCache。若不按版本作废，
      v109 打开研判层会先命中这些坏条目；指纹又没变，于是连请求都不再发——

@@ -140,6 +140,41 @@ test("债市块：verified=true 时复用 aiText", () => {
   assert.match(t, /10年红\(-1\.7bp\)/);
 });
 
+/* v110：研判的债市块改成「关键期限」紧凑版。v109 把整段 aiText（实测 1364 字）搬进去，
+   模型为了凑 sources 去联网检索，90 秒读超时就是这么花掉的。 */
+function cell(issuer, tenor, y, bp, group) {
+  return { group: group || "rate", issuer, tenor, dir: bp < 0 ? "up" : bp > 0 ? "down" : "flat",
+    basis: { yieldPct: y, prevYieldPct: y - bp / 100, bp1d: bp } };
+}
+const MKT_CELLS = {
+  meta: { verified: true, gaps: [] },
+  weather: { asOf: "2026-11-06", prevDate: "2026-11-05", cells: [
+    cell("国债", "1年", 1.1683, -0.3), cell("国债", "3年", 1.25, -1.1), cell("国债", "5年", 1.3115, -1.2),
+    cell("国债", "7年", 1.45, -1.6), cell("国债", "10年", 1.5868, -1.7),
+    cell("AAA", "1年", 1.9, -0.1, "credit"), cell("AAA", "3年", 2.1, -1.0, "credit"), cell("AAA", "5年", 2.3, -1.2, "credit"),
+  ] },
+  bpTable: [{ issuer: "国债", tenor: "10年", bp: { "5日": [-6.3, "2026-10-30"], "20日": [-9.8, "2026-10-10"] } }],
+  aiText: "【债市快照 2026-11-06】来源：中债官方收益率曲线推导\n利率债：国债 1年红(-0.3bp) 10年红(-1.7bp)\n要求：据此归因该产品下一披露日收益环境",
+};
+
+test("债市块（v110）：有结构化格子时只给关键期限，整块不超过 420 字", () => {
+  const t = briefMarketBlock(MKT_CELLS);
+  assert.match(t, /国债 收益率\/当日变动：1年1\.168%\/-0\.3bp/);
+  assert.match(t, /10年1\.587%\/-1\.7bp/, "10 年那一格必须在（研判看的就是这一格）");
+  assert.match(t, /信用AAA 当日变动/);
+  assert.match(t, /10年国债累计：5日 -6\.3bp｜20日 -9\.8bp/);
+  assert.match(t, /缺口：无/);
+  assert.ok(t.length < 420, "紧凑块超长了：实际 " + t.length + " 字");
+  assert.ok(t.indexOf("要求：") < 0, "把「据此归因」那一段搬进来了 —— 那是单只产品口径，不是研判口径");
+});
+
+test("债市块（v110）：老快照没有格子时退回节选，不整段搬 aiText", () => {
+  const t = briefMarketBlock(MKT_OK);
+  assert.match(t, /10年红\(-1\.7bp\)/, "利率债那一行要留");
+  assert.match(t, /逐格行情未展开/);
+  assert.ok(t.length < 420);
+});
+
 /* ---------- 装配 ---------- */
 
 test("briefBuild：默认明细档，块顺序为 portfolio → check → market，末段是问题", () => {
@@ -153,7 +188,7 @@ test("briefBuild：默认明细档，块顺序为 portfolio → check → market
   assert.equal(r.chars, r.input.length);
   assert.match(r.input, /【这一次要看的问题】/);
   assert.match(r.input, new RegExp(BRIEF_QUESTION.portfolio.slice(0, 12)));
-  assert.match(r.instructions, /只依据下面给出的数据块/);
+  assert.match(r.instructions, /只用下面的数据块/);
 });
 
 test("briefBuild：超字数上限时从后往前砍块，并在末尾写明砍了什么", () => {
@@ -189,7 +224,7 @@ test("briefFingerprint：净值变 / 净值日变 / 债市日期变 / 版本变 
   assert.notEqual(f0, briefFingerprint({ ...base, items: [item({ nav: 1.015 })] }));
   assert.notEqual(f0, briefFingerprint({ ...base, items: [item({ navDate: "2026-11-05" })] }));
   assert.notEqual(f0, briefFingerprint({ ...base, marketAsOf: "2026-11-07" }));
-  assert.notEqual(f0, briefFingerprint({ ...base, ver: "brief-2" }));
+  assert.notEqual(f0, briefFingerprint({ ...base, ver: "brief-3" }));
 });
 
 test("briefFingerprint：金额与份额变化不影响指纹（隐藏开关不该让结论作废）", () => {
@@ -312,6 +347,15 @@ test("briefCardHtml：含免责页脚、结论与依据标记", () => {
   assert.match(h, new RegExp(BRIEF_DISCLAIMER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("briefCardHtml：落定后把实测耗时写进卡片（90 秒读超时这一版就靠它调参）", () => {
+  const r = normBrief({ verdict: "watch", confidence: 0.6, headline: "继续观察",
+    sections: [{ key: "product", points: [{ text: "净值平稳", basis: "ledger" }] }] });
+  const h = briefCardHtml(r.brief, { tier: "detail", chars: 900, atText: "11-09 18:43", ms: 43000 });
+  assert.match(h, /用时 43 秒/);
+  const h0 = briefCardHtml(r.brief, { tier: "detail", chars: 900, atText: "11-09 18:43" });
+  assert.ok(h0.indexOf("用时") < 0, "没有耗时数据时不许画一个 0 秒出来");
+});
+
 test("briefCardHtml：模型文本里的尖括号被转义，不许注入 HTML", () => {
   const r = normBrief({ headline: "<img src=x onerror=alert(1)>", sections: [] });
   const h = briefCardHtml(r.brief, {});
@@ -334,7 +378,12 @@ test("指令里六条硬约束都在（改提示词时不许悄悄删）", () =>
     assert.ok(BRIEF_INSTRUCTIONS.indexOf(kw) >= 0, "指令缺少：" + kw);
   }
   assert.ok(BRIEF_INSTRUCTIONS.indexOf("JSON") >= 0);
-  assert.equal(BRIEF_PROMPT_VER, "brief-1");
+  assert.equal(BRIEF_PROMPT_VER, "brief-2");
+  /* v110：契约里不许再出现 sources / 联网 —— 那是 90 秒读超时的直接来源 */
+  assert.ok(BRIEF_INSTRUCTIONS.indexOf('"sources"') < 0, "又把 sources 写回契约了：模型会为了凑出处去联网");
+  assert.match(BRIEF_INSTRUCTIONS, /不要联网检索/);
+  assert.match(BRIEF_INSTRUCTIONS, /总字数不超过 500/);
+  assert.match(BRIEF_INSTRUCTIONS, /ledger\|check\|market/);
   assert.ok(BRIEF_MAX_CHARS[BRIEF_TIER_DETAIL] > BRIEF_MAX_CHARS[BRIEF_TIER_AGG]);
   assert.ok(BRIEF_BANNED_RE.test("预期收益 3%"));
   assert.ok(!BRIEF_BANNED_RE.test("净值平稳"));

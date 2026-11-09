@@ -84,7 +84,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v109";
+const APP_VER = "v110";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -6218,6 +6218,8 @@ const BRIEF = {
   phase: "idle",         /* idle | building | running | done | error */
   id: "", buf: null, fp: "", tier: BRIEF_TIER_DETAIL,
   res: null, raw: "", err: "", at: 0, chars: 0, dropped: null, timer: 0,
+  t0: 0,                 /* 这一发是什么时候出去的：落定后算「用时」，写进卡片 */
+  ms: 0,                 /* 上一次落定的实测耗时（毫秒）—— 90 秒读超时是这一版的硬约束 */
   runs: 0,               /* 本次页面生命周期内已发几次（刷新归零，与 LLM 轮次同一口径） */
   stale: "",             /* 缓存命中但指纹已变时的那句话 */
 };
@@ -6289,6 +6291,7 @@ function renderBriefSheet() {
     </div>
     <div class="bf-chips">${tierBtn(BRIEF_TIER_DETAIL, "明细档")}${tierBtn(BRIEF_TIER_AGG, "聚合档（不发产品名）")}</div>
     ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：${built.blocks.map(b => esc(BRIEF_BLOCK_LABEL[b.key] || b.key) + " " + b.chars + " 字").join(" · ")}${built.dropped.length ? ` · <b>未带上 ${esc(built.dropped.map(k => BRIEF_BLOCK_LABEL[k] || k).join("、"))}</b>` : ""}</div>` : ""}
+    ${(LLM.cfg && LLM.cfg.search !== false) ? `<div class="cap" style="padding:0 0 8px">端点开着<b>「要求端点做联网检索」</b>：研判只用本机数据，用不上它；模型为了凑出处去搜，正是超时的来源。要是超时，到「设置 → 模型接入」把这个勾去掉再试。</div>` : ""}
     ${packErr ? `<div class="note r">装配数据块时出错：${esc(packErr)}</div>` : ""}
     ${area}
     <div class="cap" style="padding:10px 0 0">
@@ -6303,16 +6306,16 @@ function renderBriefSheet() {
 function briefCardArea(stale) {
   if (BRIEF.phase === "running") {
     return `<div class="bf bf-run"><div class="bf-dot"></div>
-      <div><b>正在生成这一份研判</b><div class="bf-run-s">一次请求 · 通常 15 到 35 秒 · 不会自动重发</div></div></div>
+      <div><b>正在生成这一份研判</b><div class="bf-run-s">一次请求 · 通常 20 到 60 秒 · 超过 90 秒原生会断开 · 不会自动重发</div></div></div>
       <div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="briefCancel()">取消这一份（不再等 · 已发出的那一发撤回不了）</button></div>`;
   }
   if (BRIEF.phase === "error") {
     return `<div class="bf bf-err"><b>这一份没生成出来</b><div>${esc(BRIEF.err || "原因不明")}</div>
-      <div class="bf-run-s">错误原样摊开，没有替你猜原因；代码不会自己重发。</div></div>`;
+      <div class="bf-run-s">${BRIEF.ms ? "用时 " + Math.max(1, Math.round(BRIEF.ms / 1000)) + " 秒 · " : ""}错误原样摊开，没有替你猜原因；代码不会自己重发。</div></div>`;
   }
   if (BRIEF.res) return briefCardHtml(BRIEF.res, {
     tier: BRIEF.tier, chars: BRIEF.chars, dropped: BRIEF.dropped, stale,
-    atText: briefTimeText(BRIEF.at),
+    atText: briefTimeText(BRIEF.at), ms: BRIEF.ms,
   });
   if (BRIEF.raw) return briefRawHtml(BRIEF.raw, { stale, atText: briefTimeText(BRIEF.at) });
   if (!llmBridge()) {
@@ -6333,12 +6336,13 @@ function openBrief(t) {
   LLM.host = "brief";
   /* 切目标必须清干净：不清就会把上一只的结论画在新目标头上 —— 那种错看起来"很像真的"。 */
   BRIEF.res = null; BRIEF.raw = ""; BRIEF.err = ""; BRIEF.dropped = null;
-  BRIEF.fp = ""; BRIEF.at = 0; BRIEF.phase = "idle";
+  BRIEF.fp = ""; BRIEF.at = 0; BRIEF.ms = 0; BRIEF.phase = "idle";
   const e = briefCacheGet();
   if (e) {
     BRIEF.tier = e.tier === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
     BRIEF.fp = String(e.fp || ""); BRIEF.at = Number(e.at) || 0;
     BRIEF.chars = Number(e.chars) || 0;
+    BRIEF.ms = Number(e.ms) || 0;
     BRIEF.res = e.res || null; BRIEF.raw = String(e.raw || "");
     BRIEF.dropped = e.dropped || null;
     BRIEF.phase = (BRIEF.res || BRIEF.raw) ? "done" : "idle";
@@ -6498,9 +6502,11 @@ function briefRun(force) {
   BRIEF.id = "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   BRIEF.buf = null; BRIEF.err = ""; BRIEF.raw = ""; BRIEF.res = null; BRIEF.dropped = null;
   BRIEF.chars = pack.built.chars; BRIEF.fp = pack.fp; BRIEF.at = 0; BRIEF.stale = "";
+  BRIEF.ms = 0; BRIEF.t0 = Date.now();
   BRIEF.runs++;
   BRIEF.timer = setTimeout(() => {
     if (BRIEF.phase !== "running") return;
+    BRIEF.ms = BRIEF.t0 ? Date.now() - BRIEF.t0 : 0;
     BRIEF.phase = "error";
     BRIEF.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一发可能已经计费）";
     BRIEF.buf = null; BRIEF.id = "";
@@ -6550,16 +6556,33 @@ function briefReasoningText(env) {
     return r.trim();
   } catch (e) { return ""; }
 }
+/**
+ * 把原生的错误原话翻译成「能指路的一句话」。
+ * 原生侧把读超时只叫 "timeout"（老壳只有这一个词），屏上照登就等于什么都没说：
+ * 用户能做的只有再点一次，然后同样超时。
+ * ★ 研判是本机数据 + 本机模型，不需要联网。端点默认带着联网检索工具（设置里那个勾），
+ *   v109 的输出契约又要求 url + 发布日期 —— 模型为了凑出处去搜，90 秒读超时就是这么花掉的。
+ *   所以超时这一档必须把「关掉检索再试」说到脸上，而不是让用户猜。
+ */
+function briefErrText(text, ms) {
+  const s = String(text || "");
+  if (!/timeout|timed\s*out|没等到响应|超时/i.test(s)) return s;
+  const secs = ms ? Math.max(1, Math.round(ms / 1000)) : 90;
+  return "等满 " + secs + " 秒没回（原生读超时；这一发可能已经计费）。"
+    + "研判只用本机数据，不需要联网 —— 先去「设置 → 模型接入」取消勾选「要求端点做联网检索」，"
+    + "再点上面的重试。原生原话：" + s;
+}
 function briefDone(metaJson) {
   if (BRIEF.timer) { clearTimeout(BRIEF.timer); BRIEF.timer = 0; }
   if (BRIEF.phase !== "running") return;      /* 已经按超时/取消落定：迟到的答案不翻案 */
+  BRIEF.ms = BRIEF.t0 ? Date.now() - BRIEF.t0 : 0;
   const rd = llmMetaOf(metaJson);
   const meta = rd.meta;
   const raw = BRIEF.buf ? llmChunkJoin(BRIEF.buf) : "";
   BRIEF.buf = null; BRIEF.id = "";
   if (!meta || !meta.ok) {
     BRIEF.phase = "error";
-    BRIEF.err = llmMetaErr(meta, rd.why, raw.length);
+    BRIEF.err = briefErrText(llmMetaErr(meta, rd.why, raw.length), BRIEF.ms);
     if (meta && meta.status) BRIEF.err += "（HTTP " + meta.status + "）";
     briefRepaint(); return;
   }
@@ -6609,7 +6632,7 @@ function briefDone(metaJson) {
   if (!obj) {
     /* L2：模型没按格式回。原文照登，但标明「未结构化」—— 不修补、不硬塞进卡片。 */
     BRIEF.phase = "done"; BRIEF.res = null; BRIEF.raw = text; BRIEF.at = Date.now();
-    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: null, raw: text, chars: BRIEF.chars, dropped: null });
+    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: null, raw: text, chars: BRIEF.chars, dropped: null, ms: BRIEF.ms });
     briefRepaint(); return;
   }
   const nr = normBrief(obj);
@@ -6620,7 +6643,7 @@ function briefDone(metaJson) {
   }
   BRIEF.phase = "done"; BRIEF.res = nr.brief; BRIEF.raw = ""; BRIEF.at = Date.now();
   BRIEF.dropped = nr.dropped || null;
-  briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: nr.brief, raw: "", chars: BRIEF.chars, dropped: nr.dropped || null });
+  briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: nr.brief, raw: "", chars: BRIEF.chars, dropped: nr.dropped || null, ms: BRIEF.ms });
   /* 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。
      它占一轮额度（确实计了一次费），LLM.turns 的长度就是 already-used 的口径。
      ★ a 存的是**摘要**不是原始 JSON：llmHistoryHtml 会把 a 原样画在屏幕上，

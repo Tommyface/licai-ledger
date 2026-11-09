@@ -36,14 +36,16 @@ import { marketAiBlock } from "../core/market.js";
 
 /** 提示词版本：改 BRIEF_INSTRUCTIONS / 输出契约 / 四段框架，必须 +1。
     它进指纹 —— 不加版本号会出的事：提示词改了、指纹没变，用户看到旧结论却以为是新的。 */
-export const BRIEF_PROMPT_VER = "brief-1";
+export const BRIEF_PROMPT_VER = "brief-2";
 
 /** 两档。detail 是默认（用户 2026-11-09 定：主要看自己持有的产品详情）。 */
 export const BRIEF_TIER_DETAIL = "detail";
 export const BRIEF_TIER_AGG = "aggregate";
 export const BRIEF_TIER_LABEL = { detail: "明细档", aggregate: "聚合档" };
-/** 每档的 input 字数上限。超了按 blocks 的优先级从后往前砍，砍了什么要写在末尾。 */
-export const BRIEF_MAX_CHARS = { detail: 5200, aggregate: 2400 };
+/** 每档的 input 字数上限。超了按 blocks 的优先级从后往前砍，砍了什么要写在末尾。
+    v110 起从 5200/2400 收紧：研判要在原生 90 秒读超时之内回来，
+    输入越大首字越晚 —— 实测债市块曾独占 1364 字，比全部台账还多。 */
+export const BRIEF_MAX_CHARS = { detail: 3200, aggregate: 1800 };
 /** 单只产品的净值序列最多带几个点（只用于算指标，不进 prompt）。 */
 export const BRIEF_METRIC_MIN_POINTS = 6;
 
@@ -75,32 +77,35 @@ const MAX_TEXT_CHARS = 240;
 /**
  * 专家指令。写成常量而不是散在调用点：它是「资产」，要能被版本号管住、被测试断言。
  * ★ 这里刻意不出现具体厂商名与模型名 —— 换端点时这段一个字都不用改。
+ *
+ * ★ v110 的两点收紧，都是冲着「90 秒读超时」去的（真机 v109 报 timeout）：
+ *   1) **不再要 sources / 不再要联网**。v109 的输出契约里要 url + 发布日期，
+ *      而端点默认带着联网检索工具 —— 模型为了凑出处会去搜，几次搜索就把 90 秒吃完了；
+ *      同一时刻的追问不要出处，所以它一直能回。研判本来就只用本机数据，出处是编的温床。
+ *   2) **字数封顶 500**。v109 的四段 + 每段 3 条 + 动作 4 条，实际产出常常 1200 字以上，
+ *      深度推理模型还要先想一遍；输入 2100 字 + 输出 1200 字 + 思考，落不进一个读超时。
  */
 export const BRIEF_INSTRUCTIONS = [
   "你是个人理财台账的分析助手。读者就是这台手机的主人，他看得见自己的账，不需要科普，也不需要寒暄。",
   "",
-  "【只依据下面给出的数据块】",
+  "【只用下面的数据块】",
   "- 数据块里没有的，写「数据块里没有」，不许估算、不许补默认值。",
   "- 任何数字都要能指回具体某一块；指不回去的判断直接删掉。",
   "- 不做收益预测；不写「预期收益 / 预计收益 / 会涨 / 稳赚」这类话。",
   "- 不给目标净值、止损价、止盈价 —— 理财没有对应的市场机制，给了就是编的。",
   "- 推断句必须以「可能 / 倾向于 / 若…则…」开头，与事实句分开写。",
   "- 信息不足时先说要补什么、缺哪一项，再谈能得出什么；不许拿一个看着合理的数把缺口填上。",
+  "- 不要联网检索，也不要引用数据块以外的资料；不要给链接、不要给 sources。",
   "",
-  "【按四段看】",
-  "1) 结构：仓位、品类集中度、期限结构、在途、现金比例。",
-  "2) 产品：净值趋势与回撤、基准偏离、费率档位、披露及时性、来源一致性。",
-  "3) 市场：债市方向与关键期限 BP、资金面。",
-  "4) 交叉：优先动哪只、哪只别碰、哪只其实没事；每个动作附代价（赎回费、到账天数、持有期是否跨档）。",
-  "",
-  "【输出】只输出一个 JSON 对象，不要解释文字，不要 Markdown 围栏。字段：",
+  "【输出】只输出一个 JSON 对象：不要解释文字，不要 Markdown 围栏，不要逐条复述输入。",
+  "中文，句子短，不用感叹号，不用「建议您」。总字数不超过 500。字段：",
   '{"verdict":"continue|watch|adjust|collect","confidence":0到1之间的小数,',
-  ' "headline":"40字以内的一句话结论",',
-  ' "sections":[{"key":"structure|product|market","points":[{"text":"...","basis":"ledger|check|market|web","ref":"可选"}]}],',
-  ' "actions":[{"target":"产品名或组合","do":"继续持有|观察|到期换仓|补录信息","why":"...","cost":"...","when":"..."}],',
-  ' "unknowns":["数据缺口"],"sources":[{"title":"...","url":"https://...","date":"YYYY-MM-DD"}]}',
-  "sections 至少两段、每段 1 到 3 条；actions 可以为空数组；unknowns 必须如实列出缺口。",
-  "中文，句子短，不用感叹号，不用「建议您」。",
+  ' "headline":"30字以内的一句话结论",',
+  ' "sections":[{"key":"structure|product|market","points":[{"text":"50字以内","basis":"ledger|check|market"}]}],',
+  ' "actions":[{"target":"产品名或组合","do":"继续持有|观察|到期换仓|补录信息","why":"30字以内","cost":"20字以内"}],',
+  ' "unknowns":["数据缺口，20字以内"]}',
+  "sections 2 到 3 段、每段 1 到 2 条；actions 1 到 2 条，没有就空数组；unknowns 至多 3 条。",
+  "已经知道的事实直接下结论；免责声明不用写，页面自带。",
 ].join("\n");
 
 /** 两个入口的固定问题。不让用户手打，才能保证每次问的是同一件事（可比、可缓存）。 */
@@ -302,14 +307,85 @@ export function briefChecksBlock(checks) {
 }
 
 /**
- * 债市块：直接复用 market.js 的 marketAiBlock（含 verified 门禁与禁用词复扫）。
- * 没有可用快照时返回一句"本轮没有"，**不省略这一行** —— 让模型知道"不是没看，是没数据"。
+ * 债市块（研判专用）：只要「关键期限的收益率与当日 BP」，不要逐格行情。
+ *
+ * ★ v110 换掉 v108 的整段 aiText（实测 1364 字，比全部台账 608 字还多一倍）。
+ *   那一份是给「单只产品下一披露日环境」写的，自带「要求：据此归因…」的口吻，
+ *   搬进研判既跑题又拖慢首字。这里改从 weather.cells 直接取数：
+ *   国债 5 个期限 + 信用 AAA 3 个期限 + 10 年累计 BP，约 180 字。
+ *   老快照没有 cells 的，退回 aiText 节选（标题 + 利率债 + 缺口），不整段搬。
  * @param {any} m
  */
 export function briefMarketBlock(m) {
-  const block = marketAiBlock(m);
-  if (block) return "【债市】\n" + block;
-  return "【债市】\n本轮没有可用的债市快照（未核验或未取到）—— 涉及市场环境的判断只能写「数据块里没有」。";
+  const empty = "【债市】\n本轮没有可用的债市快照（未核验或未取到）—— 涉及市场环境的判断只能写「数据块里没有」。";
+  if (!m || !m.meta || m.meta.verified !== true) return empty;
+  const c = briefMarketCompact(m);
+  if (c) return "【债市】\n" + c;
+  const full = marketAiBlock(m);
+  if (!full) return empty;
+  const lines = String(full).split("\n").map(s => s.trim()).filter(Boolean);
+  const keep = [];
+  if (lines[0]) keep.push(lines[0]);
+  const rate = lines.find(s => s.indexOf("利率债：") === 0);
+  if (rate) keep.push(rate);
+  const gap = lines.find(s => s.indexOf("缺口：") === 0);
+  if (gap) keep.push(gap);
+  keep.push("（逐格行情未展开：研判只看方向与关键期限）");
+  const out = keep.join("\n");
+  return "【债市】\n" + (out.length > 420 ? out.slice(0, 420) + "…" : out);
+}
+
+/** 结构化紧凑块：没有可读的 cells 就返回空串（由 briefMarketBlock 退回节选）。 */
+export function briefMarketCompact(m) {
+  const w = (m && m.weather) || {};
+  const cells = Array.isArray(w.cells) ? w.cells : [];
+  if (!cells.length) return "";
+  const pick = (issuer, tenor) => cells.find(c => c && c.issuer === issuer && c.tenor === tenor);
+  const bpOf = c => {
+    if (!c || !c.basis || c.dir === "none") return null;
+    const bp = Number(c.basis.bp1d);
+    return isFinite(bp) ? bp : null;
+  };
+  const fmt = bp => (bp > 0 ? "+" : "") + bp.toFixed(1) + "bp";
+  const gov = [];
+  for (const t of ["1年", "3年", "5年", "7年", "10年"]) {
+    const c = pick("国债", t);
+    const bp = bpOf(c);
+    if (bp === null) continue;
+    const y = Number(c.basis.yieldPct);
+    gov.push(t + (isFinite(y) ? y.toFixed(3) + "%" : "") + "/" + fmt(bp));
+  }
+  const aaa = [];
+  for (const t of ["1年", "3年", "5年"]) {
+    const bp = bpOf(pick("AAA", t));
+    if (bp === null) continue;
+    aaa.push(t + fmt(bp));
+  }
+  if (!gov.length) return "";
+  const out = ["快照 " + w.asOf + "（上一交易日 " + w.prevDate + "），中债官方收益率曲线，已核验。"];
+  out.push("国债 收益率/当日变动：" + gov.join("｜"));
+  if (aaa.length) out.push("信用AAA 当日变动：" + aaa.join("｜"));
+  const trend = briefMarketTrend(m);
+  if (trend) out.push(trend);
+  out.push("口径：BP 为负 = 收益率下行 = 债券价格上涨。");
+  const gaps = (m.meta && Array.isArray(m.meta.gaps)) ? m.meta.gaps.filter(g => typeof g === "string" && g) : [];
+  out.push("缺口：" + (gaps.length ? gaps.slice(0, 3).join("、") : "无"));
+  const text = out.join("\n");
+  return text.length > 420 ? text.slice(0, 420) + "…" : text;
+}
+
+/** 10 年国债的 5 日 / 20 日累计 BP —— 只给方向，不给区间。没有 bpTable 就返回空串。 */
+export function briefMarketTrend(m) {
+  const t = Array.isArray(m && m.bpTable) ? m.bpTable.find(x => x && x.issuer === "国债" && x.tenor === "10年") : null;
+  if (!t || !t.bp) return "";
+  const one = v => (Array.isArray(v) && isFinite(Number(v[0])) ? Number(v[0]) : null);
+  const d5 = one(t.bp["5日"]);
+  const d20 = one(t.bp["20日"]);
+  if (d5 === null && d20 === null) return "";
+  const parts = [];
+  if (d5 !== null) parts.push("5日 " + (d5 > 0 ? "+" : "") + d5.toFixed(1) + "bp");
+  if (d20 !== null) parts.push("20日 " + (d20 > 0 ? "+" : "") + d20.toFixed(1) + "bp");
+  return "10年国债累计：" + parts.join("｜");
 }
 
 /**
@@ -538,7 +614,7 @@ const BASK_CLASS = { ledger: "bf-b-ledger", check: "bf-b-check", market: "bf-b-m
  * 研判卡。**所有进入 HTML 的文本都过 esc** —— 模型输出是不可信输入，
  * 它完全可能回一段带尖括号的"结论"。
  * @param {object} b normBrief 出来的 brief
- * @param {{ at?: number, atText?: string, chars?: number, tier?: string, dropped?: any, stale?: string }} [opts]
+ * @param {{ at?: number, atText?: string, chars?: number, tier?: string, dropped?: any, stale?: string, ms?: number }} [opts]
  */
 export function briefCardHtml(b, opts) {
   const o = opts || {};
@@ -546,7 +622,10 @@ export function briefCardHtml(b, opts) {
   /* 头部刻意不再写「AI 研判」四个字：弹层标题已经写了，卡片里再写一遍就是同一句话占两行。
      这里只放「什么时候、什么档、多少字」与结论档位 —— 读者要判断的是「这份还新不新」。 */
   const meta = [o.atText || "", BRIEF_TIER_LABEL[o.tier] || BRIEF_TIER_LABEL.detail,
-    o.chars ? Number(o.chars) + " 字" : ""].filter(Boolean).join(" · ");
+    o.chars ? Number(o.chars) + " 字" : "",
+    /* 用时不是装饰：这一版就是被 90 秒读超时卡住的，屏幕上没有耗时，
+       就只能靠猜「是慢还是没发」。落定后把实测耗时写进卡片，下一轮照它调。 */
+    o.ms ? "用时 " + Math.max(1, Math.round(Number(o.ms) / 1000)) + " 秒" : ""].filter(Boolean).join(" · ");
   const head = `<div class="bf-hd"><div class="bf-hd-l"><span>${esc(meta)}</span></div>`
     + `<span class="bf-verdict bf-v-${esc(x.verdict || "watch")}">${esc(BRIEF_VERDICT_TEXT[x.verdict] || BRIEF_VERDICT_TEXT.watch)}</span></div>`;
   const line = x.headline ? `<div class="bf-line">${esc(x.headline)}</div>` : "";
