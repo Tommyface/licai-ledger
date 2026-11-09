@@ -168,6 +168,15 @@ test("债市块（v110）：有结构化格子时只给关键期限，整块不�
   assert.ok(t.indexOf("要求：") < 0, "把「据此归因」那一段搬进来了 —— 那是单只产品口径，不是研判口径");
 });
 
+test("债市块（v110）：上游没给 gaps 字段时不替它写「缺口：无」", () => {
+  /* 「无」是一句断言。字段缺失只说明上游没说，不说明没有缺口 —— 宁可不写这一行。 */
+  const m = JSON.parse(JSON.stringify(MKT_CELLS));
+  delete m.meta.gaps;
+  const t = briefMarketBlock(m);
+  assert.ok(t.indexOf("缺口：") < 0, "字段缺失被写成了「无缺口」");
+  assert.match(t, /10年1\.587%\/-1\.7bp/, "其他内容照旧");
+});
+
 test("债市块（v110）：老快照没有格子时退回节选，不整段搬 aiText", () => {
   const t = briefMarketBlock(MKT_OK);
   assert.match(t, /10年红\(-1\.7bp\)/, "利率债那一行要留");

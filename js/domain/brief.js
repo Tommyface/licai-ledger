@@ -368,8 +368,12 @@ export function briefMarketCompact(m) {
   const trend = briefMarketTrend(m);
   if (trend) out.push(trend);
   out.push("口径：BP 为负 = 收益率下行 = 债券价格上涨。");
-  const gaps = (m.meta && Array.isArray(m.meta.gaps)) ? m.meta.gaps.filter(g => typeof g === "string" && g) : [];
-  out.push("缺口：" + (gaps.length ? gaps.slice(0, 3).join("、") : "无"));
+  /* 缺口只在上游真的给了这个字段时才说：字段缺失 ≠ 没有缺口。
+     「无」是一句断言，没有依据就不能写 —— 宁可整行不出现，让模型写「数据块里没有」。 */
+  if (m.meta && Array.isArray(m.meta.gaps)) {
+    const gaps = m.meta.gaps.filter(g => typeof g === "string" && g);
+    out.push("缺口：" + (gaps.length ? gaps.slice(0, 3).join("、") : "无"));
+  }
   const text = out.join("\n");
   return text.length > 420 ? text.slice(0, 420) + "…" : text;
 }
