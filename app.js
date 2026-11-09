@@ -62,9 +62,14 @@ import { matchShelf, shelfTags, shelfClass, agentBanks, hasAgents, groupedFields
    这一层只做四件事：装配数据块 / 算指纹 / 容错解析 + 逐条校验 / 画卡片。
    口径（数字本地算、明细档默认、不做收益预测、每条带依据、不修补坏 JSON）全部
    收口在 js/domain/brief.js 的文件头注释里，改动前先读那五条。 */
-import { BRIEF_PROMPT_VER, BRIEF_MAX_CHARS, BRIEF_TIER_DETAIL, BRIEF_TIER_AGG, BRIEF_TIER_LABEL,
-  BRIEF_QUESTION, briefMetrics, briefBuild, briefFingerprint, extractJson, normBrief,
-  briefCardHtml, briefRawHtml, briefEmptyHtml, briefSummaryText } from "./js/domain/brief.js";
+import { BRIEF_TIER_DETAIL, BRIEF_TIER_AGG, BRIEF_TIER_LABEL,
+  briefMetrics, briefFingerprint, extractJson, normBrief,
+  briefCardHtml, briefRawHtml, briefEmptyHtml, briefSummaryText,
+  /* v112：研报体。契约解析与卡片拼装在 brief.js，事实层在 report.js。 */
+  REPORT_PROMPT_VER, REPORT_INSTRUCTIONS, parseReport, reportCardHtml, reportSummaryText }
+  from "./js/domain/brief.js";
+import { reportSession, reportNavFacts, reportMarketFacts, reportPortfolioRows,
+  reportWatch, reportFactsText, reportNumberAudit } from "./js/domain/report.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -84,7 +89,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v111";
+const APP_VER = "v112";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -6207,7 +6212,7 @@ const LS_BRIEF = "licai.briefCache";
     v108 首版把整个 HTTP 响应壳（choices/message/usage）当成正文存了下来，
     那一批条目里根本没有 verdict。不换代的话，v109 打开研判层会先命中这些坏缓存，
     指纹又没变，于是连请求都不再发 —— 修好的代码永远跑不到。 */
-const BRIEF_CACHE_VER = 2;
+const BRIEF_CACHE_VER = 3;
 /** 研判缓存最多留几份：按目标（组合/每只产品）各一份，超了丢最旧的。
     只存本机 —— 它含持仓判断，推云端等于把「我对某只产品的看法」多存一份。 */
 const BRIEF_CACHE_MAX = 8;
@@ -6218,6 +6223,9 @@ const BRIEF = {
   phase: "idle",         /* idle | building | running | done | error */
   id: "", buf: null, fp: "", tier: BRIEF_TIER_DETAIL,
   res: null, raw: "", err: "", at: 0, chars: 0, dropped: null, timer: 0,
+  /* v112：res 有两种形状 —— "report"（研报体，三段）与 "brief"（旧的 JSON 卡片）。
+     用 shape 分派，不靠「有没有 paras」猜：猜错就会把旧结论画成空卡。 */
+  shape: "", audit: null,
   t0: 0,                 /* 这一发是什么时候出去的：落定后算「用时」，写进卡片 */
   ms: 0,                 /* 上一次落定的实测耗时（毫秒）—— 90 秒读超时是这一版的硬约束 */
   runs: 0,               /* 本次页面生命周期内已发几次（刷新归零，与 LLM 轮次同一口径） */
@@ -6267,30 +6275,29 @@ function renderBriefSheet() {
   const label = briefTargetLabel();
   const built = pack && pack.built;
   const chars = built ? built.chars : (BRIEF.chars || 0);
-  const cap = BRIEF_MAX_CHARS[BRIEF.tier] || BRIEF_MAX_CHARS[BRIEF_TIER_DETAIL];
   const running = BRIEF.phase === "running";
   /* 指纹变了 = 台账或债市有更新，下面这份是旧的。这句话必须画在卡片上方，
      画在卡片里会被当成"结论的一部分"读过去。 */
   let stale = "";
   if ((BRIEF.res || BRIEF.raw) && BRIEF.fp && pack && pack.fp && pack.fp !== BRIEF.fp) {
-    stale = "数据已变（这份生成于 " + briefTimeText(BRIEF.at) + "）—— 点「重新研判」看新的";
+    stale = "数据或时点已变（这份生成于 " + briefTimeText(BRIEF.at) + "）—— 点「重新生成」看新的";
   }
   const hasOut = !!(BRIEF.res || BRIEF.raw);
   const btnText = running ? "生成中…"
     : (BRIEF.phase === "error" ? "重试（另计一次）"
-      : (hasOut ? "重新研判（另计一次）" : "生成研判（1 次请求）"));
+      : (hasOut ? "重新生成（另计一次）" : "生成研报（1 次请求）"));
   const tierBtn = (t, txt) => `<button class="bf-chip${BRIEF.tier === t ? " on" : ""}"
       onclick="briefTierSet('${t}')" ${running ? "disabled" : ""}>${txt}</button>`;
   const area = briefCardArea(stale);
   openSheet(`<div class="sheet-t"><h3>AI 研判</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div class="bf-bar">
       <div class="bf-tgt"><b>${esc(label)}</b>
-        <span>${esc(BRIEF_TIER_LABEL[BRIEF.tier] || BRIEF_TIER_LABEL[BRIEF_TIER_DETAIL])} · 本次 ${chars} 字${chars > cap ? "（超上限，已砍块）" : ""}</span>
+        <span>${esc(BRIEF_TIER_LABEL[BRIEF.tier] || BRIEF_TIER_LABEL[BRIEF_TIER_DETAIL])} · 本次 ${chars} 字</span>
       </div>
       <button class="btn pri bf-go" ${running ? "disabled" : ""} onclick="briefRun(${hasOut ? "true" : "false"})">${btnText}</button>
     </div>
     <div class="bf-chips">${tierBtn(BRIEF_TIER_DETAIL, "明细档")}${tierBtn(BRIEF_TIER_AGG, "聚合档（不发产品名）")}</div>
-    ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：${built.blocks.map(b => esc(BRIEF_BLOCK_LABEL[b.key] || b.key) + " " + b.chars + " 字").join(" · ")}${built.dropped.length ? ` · <b>未带上 ${esc(built.dropped.map(k => BRIEF_BLOCK_LABEL[k] || k).join("、"))}</b>` : ""}</div>` : ""}
+    ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：<b>研报数据块 ${built.chars} 字</b>（${built.kind === "product" ? "净值轨迹 + 本地测算" : "持仓一览 + 本地测算"} + 债市表，全部由本机算出；模型只写怎么读）</div>` : ""}
     ${(LLM.cfg && LLM.cfg.search !== false) ? `<div class="cap" style="padding:0 0 8px">端点开着<b>「要求端点做联网检索」</b>：研判只用本机数据，用不上它；模型为了凑出处去搜，正是超时的来源。要是超时，到「设置 → 模型接入」把这个勾去掉再试。</div>` : ""}
     ${packErr ? `<div class="note r">装配数据块时出错：${esc(packErr)}</div>` : ""}
     ${area}
@@ -6302,29 +6309,61 @@ function renderBriefSheet() {
     </div>
     ${llmPanelHtml(false, "追问这一份研判")}`);
 }
-/** 卡片区：运行中 / 出错 / 结构化 / 原文降级 / 空态，五种，一一对应，不混着写。 */
+/**
+ * 卡片区（v112）。
+ *
+ * ★ 与 v108~v111 的结构性差别：**事实区（两张表 + 观察项 + 缺口）永远先画**，
+ *   它不依赖模型、不等任何回传；模型那一份只是接在下面的三段解读。
+ *   这样超时、报错、取消、断网四种情况下，屏幕上都不会只剩一句抱歉 ——
+ *   两张表和本地算出来的结论一直在。v109/v111 的「等 90 秒什么都没有」就是
+ *   把「有没有结论」当成了「要不要画东西」，这一版从结构上把两件事拆开了。
+ * @param {string} stale
+ */
 function briefCardArea(stale) {
+  let facts = null;
+  try {
+    facts = briefPack().facts;
+  } catch (e) {
+    /* 本地装配失败：这是唯一「连表都画不出来」的情况，必须说清楚不是端点的问题。 */
+    return `<div class="bf bf-err"><b>本地数据装配失败</b><div>${esc(String(e))}</div>
+      <div class="bf-run-s">不是端点的问题：有一条本机数据读不出来，修好之前点生成也没有用。</div></div>`;
+  }
+  const opt = {
+    facts, tier: BRIEF.tier, chars: BRIEF.chars, ms: BRIEF.ms,
+    dropped: BRIEF.dropped, audit: BRIEF.audit, stale,
+    /* 没生成过就没有「生成时间」这一行 —— 画一句「时间不明」等于告诉读者这里本该有个时间。 */
+    atText: BRIEF.at ? briefTimeText(BRIEF.at) : "",
+  };
+  if (BRIEF.res && BRIEF.shape === "brief") {
+    /* 旧口径的结论（v108~v111 存下的条目，或模型按旧格式回的）：事实区照画，
+       结论用它自己那张条目卡 —— 强行塞进研报模板会丢掉 basis 标签。 */
+    return reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
+      + briefCardHtml(BRIEF.res, {
+        tier: BRIEF.tier, chars: BRIEF.chars, dropped: BRIEF.dropped, stale,
+        atText: briefTimeText(BRIEF.at), ms: BRIEF.ms,
+      });
+  }
+  if (BRIEF.res) return reportCardHtml(Object.assign({ rep: BRIEF.res }, opt));
+  if (BRIEF.raw) {
+    return reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
+      + briefRawHtml(BRIEF.raw, { stale, atText: briefTimeText(BRIEF.at) });
+  }
+  let ph = "";
   if (BRIEF.phase === "running") {
-    return `<div class="bf bf-run"><div class="bf-dot"></div>
-      <div><b>正在生成这一份研判</b><div class="bf-run-s">一次请求 · 通常 20 到 60 秒 · 超过 90 秒原生会断开 · 不会自动重发</div></div></div>
-      <div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="briefCancel()">取消这一份（不再等 · 已发出的那一发撤回不了）</button></div>`;
+    ph = `<div class="rp-sec"><div class="bf-run"><div class="bf-dot"></div>
+      <div><b>正在写解读</b><div class="bf-run-s">上面两张表已经算好，不用等它 · 通常 20 到 60 秒 · 超过 90 秒原生会断开</div></div></div>
+      <button class="btn gh" style="width:100%;margin-top:8px" onclick="briefCancel()">取消这一份（不再等 · 已发出的那一发撤回不了）</button></div>`;
+  } else if (BRIEF.phase === "error") {
+    ph = `<div class="rp-sec"><div class="bf bf-err" style="margin:0"><b>解读没生成出来</b><div>${esc(BRIEF.err || "原因不明")}</div>
+      <div class="bf-run-s">${BRIEF.ms ? "用时 " + Math.max(1, Math.round(BRIEF.ms / 1000)) + " 秒 · " : ""}表格与结论是本地算的，不受影响；代码不会自己重发。</div></div></div>`;
+  } else if (!llmBridge()) {
+    ph = `<div class="rp-sec"><div class="rp-none">网页版没有模型桥：密钥与端点都在 App 里，解读只在手机上能生成。<b>上面两张表照常可用。</b></div></div>`;
+  } else if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) {
+    ph = `<div class="rp-sec"><div class="rp-none">还没配端点或密钥。去「设置 → 模型接入」填好，回来点上面的按钮。<b>上面两张表不受影响。</b></div></div>`;
+  } else {
+    ph = `<div class="rp-sec"><div class="rp-none">点上面的「生成研报」，让模型写三段怎么读这两张表。上面这些是本地算的，不用等它。</div></div>`;
   }
-  if (BRIEF.phase === "error") {
-    return `<div class="bf bf-err"><b>这一份没生成出来</b><div>${esc(BRIEF.err || "原因不明")}</div>
-      <div class="bf-run-s">${BRIEF.ms ? "用时 " + Math.max(1, Math.round(BRIEF.ms / 1000)) + " 秒 · " : ""}错误原样摊开，没有替你猜原因；代码不会自己重发。</div></div>`;
-  }
-  if (BRIEF.res) return briefCardHtml(BRIEF.res, {
-    tier: BRIEF.tier, chars: BRIEF.chars, dropped: BRIEF.dropped, stale,
-    atText: briefTimeText(BRIEF.at), ms: BRIEF.ms,
-  });
-  if (BRIEF.raw) return briefRawHtml(BRIEF.raw, { stale, atText: briefTimeText(BRIEF.at) });
-  if (!llmBridge()) {
-    return briefEmptyHtml("网页版没有模型桥：密钥与端点都在 App 里，这个功能只在手机上可用。");
-  }
-  if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) {
-    return briefEmptyHtml("还没配端点或密钥。去「设置 → 模型接入」填好，回来点上面的按钮。");
-  }
-  return briefEmptyHtml("点上面的「生成研判」：把台账、体检与债市装配成一次请求。");
+  return reportCardHtml(Object.assign({ rep: null, placeholderHtml: ph }, opt));
 }
 /**
  * 打开研判层。
@@ -6336,6 +6375,7 @@ function openBrief(t) {
   LLM.host = "brief";
   /* 切目标必须清干净：不清就会把上一只的结论画在新目标头上 —— 那种错看起来"很像真的"。 */
   BRIEF.res = null; BRIEF.raw = ""; BRIEF.err = ""; BRIEF.dropped = null;
+  BRIEF.shape = ""; BRIEF.audit = null;
   BRIEF.fp = ""; BRIEF.at = 0; BRIEF.ms = 0; BRIEF.phase = "idle";
   const e = briefCacheGet();
   if (e) {
@@ -6345,6 +6385,8 @@ function openBrief(t) {
     BRIEF.ms = Number(e.ms) || 0;
     BRIEF.res = e.res || null; BRIEF.raw = String(e.raw || "");
     BRIEF.dropped = e.dropped || null;
+    BRIEF.shape = String(e.shape || "");
+    BRIEF.audit = e.audit || null;
     BRIEF.phase = (BRIEF.res || BRIEF.raw) ? "done" : "idle";
   }
   renderBriefSheet();
@@ -6365,7 +6407,7 @@ function briefTierSet(t) {
    与追问的最大区别：研判是**一次性任务**，一次点击 = 一次请求 = 一次计费。
    所以这里没有多轮、没有自动重试，失败就是失败，重来的按钮在人手里。 */
 
-/** 每只产品的事实（供 briefBuild 装配）。
+/** 每只产品的事实（供研报的事实层装配）。
     指标全在本地算完再交出去 —— 模型拿不到原始序列，也就没有"自己算一遍"的机会。 */
 function briefItems() {
   return DATA.products.map(p => {
@@ -6379,43 +6421,11 @@ function briefItems() {
       state: pos.inTransit ? "在途（份额未确认）"
         : (pos.shares > 0 ? "持仓中" : (hasAnyTradeIn(p, DATA.trades) ? "已清仓" : "从未建仓")),
       metrics: briefMetrics(navSeries(p)),
+      /* v112：组合层研报要算「每只距前高多少 bp」，那需要序列本身。
+         这一段只进本地计算，不进请求 —— 模型看到的永远是算好的结论。 */
+      series: navSeries(p),
     };
   });
-}
-/** 组合层汇总：市值合计、按市值加权的持有天数、品类数、在途笔数。
-    加权而不是算术平均 —— 一只 1 万的持 300 天，不该和一只 50 万的持 5 天平权。 */
-function briefTotals(items) {
-  let value = 0, wsum = 0, dsum = 0, inTransit = 0;
-  const kinds = {};
-  for (const it of items) {
-    const v = Number(it.shares) * Number(it.nav);
-    if (it.shares > 0 && isFinite(v) && v > 0) {
-      value += v;
-      if (Number(it.holdDays) > 0) { dsum += Number(it.holdDays) * v; wsum += v; }
-    }
-    if (/在途/.test(String(it.state || ""))) inTransit++;
-    if (it.inst) kinds[it.inst] = 1;
-  }
-  return { value, weightedDays: wsum > 0 ? dsum / wsum : 0, kinds: Object.keys(kinds).length, inTransit };
-}
-/** 组合层的体检：两条组合判据 + 各只的 warn/bad（最多 6 条，bad 优先）。
-    只把「要注意/有问题」交出去 —— 11 项全列会让模型把注意力摊到 8 个"正常"上。 */
-function briefPortfolioChecks(items) {
-  const rows = items.filter(it => it.shares > 0 && Number(it.nav) > 0)
-    .map(it => ({ id: it.id, name: it.name, market: it.shares * it.nav }));
-  const out = portfolioChecks(rows, DATA.products.length);
-  const td = today();
-  const bad = [];
-  for (const p of DATA.products) {
-    let cs = [];
-    try { cs = runChecks({ p, trades: DATA.trades, td, pos: position(p), st: navStats(p) }); }
-    catch (e) { continue; }   /* 单只算不出来不该让整份研判发不出去 */
-    for (const c of cs) {
-      if (c.level === "bad" || c.level === "warn") bad.push({ key: c.key, level: c.level, title: prodLabel(p) + " · " + c.title, text: c.text });
-    }
-  }
-  bad.sort((a, b) => (a.level === "bad" ? 0 : 1) - (b.level === "bad" ? 0 : 1));
-  return out.concat(bad.slice(0, 6));
 }
 /** 目标名（画在弹层标题与按钮上）。 */
 function briefTargetLabel() {
@@ -6426,35 +6436,66 @@ function briefTargetLabel() {
   }
   return "整个组合";
 }
-/** 装配一次：数据块、指纹、字数。**不发请求**，所以可以随便调（重绘时也在调）。 */
-function briefPack() {
+/** 这份研报「拿不到什么」。固定三条，与 report.js 的 reportWatch 分工：
+    观察项说「本机看到了什么异常」，缺口说「本机根本看不到什么」。 */
+const BRIEF_GAPS = [
+  "资金面：没有 DR001 / DR007，判断「回笼是自然到期还是收紧」缺依据",
+  "国债期货：无法区分现券领先还是期货领先",
+  "信用二永成交：只看得到 AAA 曲线，看不到活跃券利差",
+];
+/**
+ * 事实层：这一期研报的全部数字，**全在本地算完**（v112）。
+ * 与 briefPack 的分工：这个只产出结构化事实（表格 + 观察项），不发请求、不进指纹；
+ * briefPack 把它拼成请求。
+ */
+function briefFacts() {
   const t = BRIEF.target || { kind: "portfolio" };
   const all = briefItems();
-  let items = all, checks = [];
+  const td = today();
+  const mk0 = reportMarketFacts(MARKET, td);
+  /* 时点要看着「今天有没有收盘数据」判断，所以 market 先算。 */
+  const ses = reportSession(0, td, mk0 && mk0.ok ? mk0.asOf : "");
+  const mk = mk0;
+  const agg = BRIEF.tier === BRIEF_TIER_AGG;
   if (t.kind === "product") {
-    items = all.filter(it => it.id === t.id);
+    const it = all.find(x => x.id === t.id) || {};
     const p = DATA.products.find(x => x.id === t.id);
-    if (p) {
-      try { checks = runChecks({ p, trades: DATA.trades, td: today(), pos: position(p), st: navStats(p) }); }
-      catch (e) { checks = []; }
-    }
-  } else {
-    checks = briefPortfolioChecks(all);
+    const nav = reportNavFacts(p ? navSeries(p) : [], { today: td });
+    return {
+      session: ses, kind: "product",
+      name: agg ? "这一只（名称已隐去）" : String(it.name || ""),
+      inst: agg ? "" : String(it.inst || ""),
+      nav, market: mk,
+      watch: reportWatch(nav, mk, ses), gaps: BRIEF_GAPS,
+    };
   }
-  const totals = briefTotals(items);
-  const built = briefBuild({
-    target: t, items, checks, totals, market: MARKET, tier: BRIEF.tier,
-    hide: !!DATA.settings.hideAmount, today: today(),
-  });
-  const fp = briefFingerprint({
-    target: t, items,
-    marketAsOf: (MARKET && MARKET.weather && MARKET.weather.asOf) || "",
-    tier: BRIEF.tier, ver: BRIEF_PROMPT_VER,
-  });
-  return { built, fp, items, totals, checks };
+  const rows = reportPortfolioRows(all).map((r, i) => (agg ? Object.assign({}, r, { name: "产品" + (i + 1) }) : r));
+  return {
+    session: ses, kind: "portfolio", rows, market: mk,
+    watch: reportWatch(null, mk, ses, { rows, today: td }), gaps: BRIEF_GAPS,
+  };
 }
-/** 数据块的中文名：给用户看的字，不许把 portfolio/check 这些键名直接画到屏幕上。 */
-const BRIEF_BLOCK_LABEL = { portfolio: "台账", product: "产品", check: "体检", market: "债市" };
+/** 装配一次：请求体、指纹、事实层。**不发请求**，所以可以随便调（重绘时也在调）。 */
+function briefPack() {
+  const t = BRIEF.target || { kind: "portfolio" };
+  const facts = briefFacts();
+  const input = reportFactsText({
+    session: facts.session, kind: facts.kind, name: facts.name, inst: facts.inst,
+    nav: facts.nav, rows: facts.rows, market: facts.market, gaps: facts.gaps,
+  });
+  const built = {
+    v: 2, input, instructions: REPORT_INSTRUCTIONS, chars: input.length,
+    tier: BRIEF.tier, kind: facts.kind, blocks: [], dropped: [], over: false,
+  };
+  /* 指纹带上时点：盘前生成的那一份，到盘后叙述重心已经不对了，应当作废重来。
+     只带 key（preopen/intraday/afterclose/closed），不带具体时刻 —— 否则每过一分钟就「数据已变」。 */
+  const fp = briefFingerprint({
+    target: t, items: briefItems(),
+    marketAsOf: (MARKET && MARKET.weather && MARKET.weather.asOf) || "",
+    tier: BRIEF.tier, ver: REPORT_PROMPT_VER + "|" + facts.session.key,
+  });
+  return { built, fp, facts };
+}
 /** 指纹一样的第二份不发 —— 省的不只是钱，还有「同一个东西看两遍」的困惑。 */
 function briefFpNow() {
   try { return briefPack().fp; } catch (e) { return ""; }
@@ -6501,6 +6542,7 @@ function briefRun(force) {
   BRIEF.phase = "running";
   BRIEF.id = "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   BRIEF.buf = null; BRIEF.err = ""; BRIEF.raw = ""; BRIEF.res = null; BRIEF.dropped = null;
+  BRIEF.shape = ""; BRIEF.audit = null;
   BRIEF.chars = pack.built.chars; BRIEF.fp = pack.fp; BRIEF.at = 0; BRIEF.stale = "";
   BRIEF.ms = 0; BRIEF.t0 = Date.now();
   BRIEF.runs++;
@@ -6628,33 +6670,85 @@ function briefDone(metaJson) {
     briefRepaint(); return;
   }
   text = note + text;
+  /* ① 先按 report-1 解析（纯文本 + ## 分段）。这是 v112 的正式格式：
+     坏一段只丢一段，不会像 JSON 那样坏一个逗号整份作废。 */
+  const pr = parseReport(text);
+  if (pr.ok) {
+    BRIEF.phase = "done"; BRIEF.shape = "report";
+    BRIEF.res = pr.report; BRIEF.raw = ""; BRIEF.at = Date.now();
+    BRIEF.dropped = pr.dropped || null;
+    BRIEF.audit = reportNumberAudit(reportPlainText(pr.report), briefAuditValues());
+    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: "report", res: pr.report,
+      raw: "", chars: BRIEF.chars, dropped: BRIEF.dropped, ms: BRIEF.ms, audit: BRIEF.audit });
+    briefPushTurn(pr.report);
+    briefRepaint(); return;
+  }
+  /* ② 老格式（brief-2 的 JSON）：模型可能按旧习惯回，缓存里也可能还有旧的一份。
+     处理这一档不是为了好看，是为了「发版当天不会有一次点击直接报错」。 */
   const obj = extractJson(text);
-  if (!obj) {
-    /* L2：模型没按格式回。原文照登，但标明「未结构化」—— 不修补、不硬塞进卡片。 */
-    BRIEF.phase = "done"; BRIEF.res = null; BRIEF.raw = text; BRIEF.at = Date.now();
-    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: null, raw: text, chars: BRIEF.chars, dropped: null, ms: BRIEF.ms });
+  if (obj) {
+    const nr = normBrief(obj);
+    if (!nr.ok) {
+      BRIEF.phase = "error";
+      BRIEF.err = String(nr.why || "模型输出没能通过校验");
+      briefRepaint(); return;
+    }
+    BRIEF.phase = "done"; BRIEF.shape = "brief";
+    BRIEF.res = nr.brief; BRIEF.raw = ""; BRIEF.at = Date.now();
+    BRIEF.dropped = nr.dropped || null; BRIEF.audit = null;
+    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: "brief", res: nr.brief,
+      raw: "", chars: BRIEF.chars, dropped: nr.dropped || null, ms: BRIEF.ms, audit: null });
+    briefPushTurn(nr.brief);
     briefRepaint(); return;
   }
-  const nr = normBrief(obj);
-  if (!nr.ok) {
-    BRIEF.phase = "error";
-    BRIEF.err = String(nr.why || "模型输出没能通过校验");
-    briefRepaint(); return;
+  /* ③ 两种格式都不是：原文照登，标明未结构化。
+     ★ 这里把 parseReport 的失败原因带上 —— 它比「没找到 JSON」更能指路
+       （「回复里没有可用的正文段」说明模型只写了表头，那是能改的事）。 */
+  BRIEF.phase = "done"; BRIEF.shape = ""; BRIEF.res = null; BRIEF.raw = text; BRIEF.at = Date.now();
+  BRIEF.audit = null;
+  briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: "", res: null, raw: text,
+    chars: BRIEF.chars, dropped: null, ms: BRIEF.ms, audit: null });
+  briefRepaint();
+}
+
+/** 研报正文的纯文本（给数字审计用）：小标题也进去，标题里同样可能有数。 */
+function reportPlainText(rep) {
+  const r = rep || {};
+  return (Array.isArray(r.paras) ? r.paras : []).map(p => String(p.h || "") + " " + String(p.body || "")).join("\n");
+}
+/** 审计用的「事实集」：这一期屏幕上出现过的每一个数。 */
+function briefAuditValues() {
+  const v = [];
+  const push = x => { const n = Number(x); if (isFinite(n)) v.push(n); };
+  let f = null;
+  try { f = briefPack().facts; } catch (e) { return v; }
+  if (f.nav && f.nav.ok) {
+    const nv = f.nav;
+    for (const t of nv.tail) { push(t.value); push(t.bp); }
+    push(nv.last.value); push(nv.lastBp);
+    push(nv.peak.value); push(nv.gapBp); push(nv.dd.pct);
+    if (nv.shock) { push(nv.shock.bp); push(nv.shock.sigma); push(nv.shock.backBp); push(nv.shock.ratio * 100); }
+    push(nv.sigmaBp); push(nv.normalBp); push(nv.fastBp);
+    push(nv.etaNormal); push(nv.etaFast); push(nv.n);
   }
-  BRIEF.phase = "done"; BRIEF.res = nr.brief; BRIEF.raw = ""; BRIEF.at = Date.now();
-  BRIEF.dropped = nr.dropped || null;
-  briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: nr.brief, raw: "", chars: BRIEF.chars, dropped: nr.dropped || null, ms: BRIEF.ms });
-  /* 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。
-     它占一轮额度（确实计了一次费），LLM.turns 的长度就是 already-used 的口径。
-     ★ a 存的是**摘要**不是原始 JSON：llmHistoryHtml 会把 a 原样画在屏幕上，
-       一整段 JSON 铺开既难读又占半屏，而结论已经在上面那张卡片里了。 */
+  if (Array.isArray(f.rows)) for (const r of f.rows) { push(r.nav); push(r.d30); push(r.dd); push(r.gapBp); }
+  if (f.market && f.market.ok) {
+    for (const r of f.market.rows) { push(r.y); push(r.bp1); push(r.bp5); push(r.bp20); }
+    for (const r of f.market.small) push(r.bp1);
+    for (const r of f.market.aaa) { push(r.y); push(r.bp1); }
+  }
+  return v;
+}
+/** 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。
+    它占一轮额度（确实计了一次费），LLM.turns 的长度就是 already-used 的口径。
+    ★ a 存的是**摘要**不是原文：llmHistoryHtml 会把 a 原样画在屏幕上。 */
+function briefPushTurn(x) {
   LLM.turns.push({
-    q: "（上一轮是「" + briefTargetLabel() + "」的研判请求）",
-    a: briefSummaryText(nr.brief),
+    q: "（上一轮是「" + briefTargetLabel() + "」的研报请求）",
+    a: BRIEF.shape === "report" ? reportSummaryText(x) : briefSummaryText(x),
     briefRound: true,
     err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 },
   });
-  briefRepaint();
 }
 /** 回传分流：两套状态各一个 id。认不出来的一律丢 —— 迟到的不许串到下一轮。 */
 function llmRoute(id) {

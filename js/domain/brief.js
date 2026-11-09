@@ -33,6 +33,9 @@
 
 import { esc } from "../core/util.js";
 import { marketAiBlock } from "../core/market.js";
+/* v112：研报体。事实层在 report.js，这里只做「契约解析 + 卡片拼装」——
+   单向依赖，report.js 不 import 本文件（否则 brief.conf 与 report 的枚举会成环）。 */
+import { reportTableHtml, reportCoordsHtml } from "./report.js";
 
 /** 提示词版本：改 BRIEF_INSTRUCTIONS / 输出契约 / 四段框架，必须 +1。
     它进指纹 —— 不加版本号会出的事：提示词改了、指纹没变，用户看到旧结论却以为是新的。 */
@@ -712,6 +715,263 @@ export function briefSummaryText(b) {
       a.target + " " + a.do + (a.cost ? "（" + a.cost + "）" : "")).join("；"));
   }
   if ((x.unknowns || []).length) lines.push("缺口：" + x.unknowns.join("；"));
+  const out = lines.join("\n");
+  return out.length > 1200 ? out.slice(0, 1200) + "…（摘要超长已截断）" : out;
+}
+
+/* ============================================================
+   v112 · 研报体（report-1）
+   ------------------------------------------------------------
+   与上面的 brief-2 并存一个版本周期：旧缓存与旧格式回复仍能降级渲染，
+   但新请求一律走 report-1。下一个大版本再删旧的那一套（现在删，等于把
+   「用户手机上还存着的那份 JSON 结论」一起删掉）。
+
+   为什么换格式：sections 是条目式的，天生写不出「因为 A 所以 B」；
+   而每多写一句长句，就多一层 JSON 转义，坏一个引号整份作废。
+   换成「三行头字段 + ## 分段」后，坏一段只丢一段。
+   ============================================================ */
+
+/** 提示词版本。改指令 / 改格式 / 改分段数，必须 +1 —— 它进指纹。 */
+export const REPORT_PROMPT_VER = "report-1";
+
+/** 分段上限：模型偶尔会写成六段。多出来的丢，并在卡片底部计数。 */
+const REPORT_MAX_PARAS = 5;
+/** 每段正文上限：一段 400 字已经远超「60 到 160 字」的要求，超出就是在灌水。 */
+const REPORT_MAX_PARA_CHARS = 420;
+
+/**
+ * 研报指令。
+ * ★ 四件事按重要性排序：① 只用数据块；② 不许新增数字；③ 按时点定重心；④ 只输出三段。
+ *   第 ② 条是这一版的核心 —— 它配上 reportNumberAudit() 才成立：
+ *   指令负责「别编」，审计负责「编了能查出来」。只写指令不做审计，等于没有。
+ */
+export const REPORT_INSTRUCTIONS = [
+  "你是个人理财的持仓复盘助手。读者是这台手机的主人，他看得见自己的账，不需要科普，也不需要寒暄。",
+  "",
+  "【只用下面的数据块】",
+  "- 数据块里没有的，写「数据块里没有」；不许估算、不许补默认值。",
+  "- **不许新增任何数字**：你写的每个数字都必须原样出现在数据块里。指不回去的整句删掉。",
+  "- 不做收益预测；不给概率；不给目标净值、止损价、止盈价。",
+  "- 推断句以「可能 / 倾向于 / 若…则…」开头，与事实句分开写。",
+  "- 不要联网检索，不要给链接，不要给出处，不要写免责声明（页面自带）。",
+  "",
+  "【按时点定重心】数据块里的【时点】与【叙述重心】是这一次的写法，照它来。",
+  "本机没有实时行情时，不许把上一交易日说成「今天」。",
+  "",
+  "【输出格式】严格照抄下面四行，然后三段，不要围栏、不要 JSON、不要编号列表：",
+  "结论：continue 或 watch 或 adjust 或 collect（四选一，只写英文）",
+  "信心：0 到 1 之间的小数",
+  "标题：30 字以内的一句话结论",
+  "",
+  "## 小标题（自己起，三段不重复）",
+  "正文 60 到 160 字。",
+  "",
+  "共三段。不要复述表格的每一行 —— 表格读者自己看得见，你只写怎么读。",
+  "中文，句子短，不用感叹号，不用「建议您」。",
+].join("\n");
+
+const VERDICT_ALIAS = {
+  continue: "continue", hold: "continue", 维持: "continue", 继续持有: "continue",
+  watch: "watch", 观察: "watch", 继续观察: "watch",
+  adjust: "adjust", 调整: "adjust", 减仓: "adjust", 换仓: "adjust",
+  collect: "collect", 补录: "collect", 补信息: "collect",
+};
+
+/** @param {any} v */
+function verdictOf(v) {
+  const k = String(v == null ? "" : v).trim().toLowerCase();
+  if (BRIEF_VERDICTS.indexOf(k) >= 0) return k;
+  const zh = String(v == null ? "" : v).trim();
+  return VERDICT_ALIAS[zh] || VERDICT_ALIAS[zh.replace(/^(继续|建议|考虑)/, "")] || "";
+}
+
+/**
+ * 解析 report-1 的回复。
+ *
+ * 容错到「只要有一段正文就算成功」：模型少写一段、忘了 `##`、把「结论」写成
+ * 「verdict」、把 0.62 写成 62 —— 都能收；**只有「一段正文都没有」才判失败**。
+ * 这一点与旧的 normBrief 不同：旧格式坏一个字段整份作废，新格式坏一段只丢一段。
+ *
+ * @param {string} text
+ * @returns {{ ok: boolean, why?: string, report?: object, dropped?: { paras: number, banned: number } }}
+ */
+export function parseReport(text) {
+  const s = String(text == null ? "" : text).replace(/\r\n?/g, "\n").trim();
+  if (!s) return { ok: false, why: "端点回了空响应" };
+  const first = s.indexOf("##");
+  /* 整段就是一个 JSON 对象、又没有 ## 段 —— 那是 brief-2 的老格式，交给 extractJson 去处理。
+     不在这里接：接了会把它当成「一段正文」，屏幕上就会出现一段裸 JSON 冒充研报。 */
+  if (first < 0 && /^[\[{]/.test(s)) {
+    const j = extractJson(s);
+    if (j && typeof j === "object") return { ok: false, why: "这是旧格式（JSON），交给旧解析器" };
+  }
+  const headPart = first >= 0 ? s.slice(0, first) : s;
+  const restPart = first >= 0 ? s.slice(first) : "";
+  const fields = {};
+  for (const line of headPart.split("\n")) {
+    const m = /^\s*(结论|信心|标题|verdict|confidence|headline)\s*[：:]\s*(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    const k = m[1];
+    if (!(k in fields)) fields[k] = m[2];
+  }
+  const verdict = verdictOf(fields["结论"] || fields["verdict"]) || "watch";
+  let conf = Number(String(fields["信心"] || fields["confidence"] || "").replace(/[^\d.]/g, ""));
+  if (isFinite(conf) && conf > 1 && conf <= 100) conf = conf / 100;
+  const confidence = (isFinite(conf) && conf >= 0 && conf <= 1) ? Math.round(conf * 100) / 100 : null;
+  const headline = cleanText(fields["标题"] || fields["headline"] || "", 60);
+  if (headline && BRIEF_BANNED_RE.test(headline)) {
+    return { ok: false, why: "模型给出了收益预测或目标价类表述，这份结论不予采用" };
+  }
+  const dropped = { paras: 0, banned: 0 };
+  const paras = [];
+  if (restPart) {
+    for (const chunk of restPart.split(/^##\s*/m)) {
+      const c = chunk.trim();
+      if (!c) continue;
+      const nl = c.indexOf("\n");
+      const h = cleanText((nl < 0 ? c : c.slice(0, nl)).replace(/^#+\s*/, ""), 24);
+      const body = cleanText(nl < 0 ? "" : c.slice(nl + 1), REPORT_MAX_PARA_CHARS);
+      if (!body) { if (h) { if (paras.length < REPORT_MAX_PARAS) paras.push({ h: "", body: cleanText(h, REPORT_MAX_PARA_CHARS) }); } continue; }
+      if (BRIEF_BANNED_RE.test(body)) { dropped.banned++; dropped.paras++; continue; }
+      if (paras.length >= REPORT_MAX_PARAS) { dropped.paras++; continue; }
+      paras.push({ h, body });
+    }
+  } else {
+    /* 没有 `##`：把头部字段之外的行当正文。模型有时会写成「标题：xx\n正文……」，
+       这一档不能整份丢 —— 它至少说了一些东西。 */
+    const left = headPart.split("\n")
+      .filter(l => !/^\s*(结论|信心|标题|verdict|confidence|headline)\s*[：:]/.test(l))
+      .join("\n").trim();
+    if (left && !BRIEF_BANNED_RE.test(left)) paras.push({ h: "", body: cleanText(left, REPORT_MAX_PARA_CHARS) });
+  }
+  if (!paras.length) {
+    return { ok: false, why: "回复里没有可用的正文段（模型可能只写了表头或只回了思考过程）" };
+  }
+  /* partial：既没有结论档位、也没有标题 —— 说明模型压根没按格式写，只是说了几句人话。
+     这种要展示（说了总比空着强），但**不许挂一个默认的「继续观察」档位**冒充结论。 */
+  const hasHead = !!String(fields["结论"] || fields["verdict"] || "").trim() || !!headline;
+  return {
+    ok: true,
+    report: { verdict, confidence, headline, paras, partial: !hasHead, promptVer: REPORT_PROMPT_VER },
+    dropped,
+  };
+}
+
+/** 叙述区：三段。**空 rep 返回空串** —— 由调用方决定画什么占位，不在这里猜。 */
+export function reportNarrativeHtml(rep) {
+  const r = rep || {};
+  const paras = Array.isArray(r.paras) ? r.paras : [];
+  if (!paras.length) return "";
+  const body = paras.map(p => {
+    const h = p.h ? `<span class="rp-ph">${esc(p.h)}</span>` : "";
+    return `<p>${h}${esc(p.body)}</p>`;
+  }).join("");
+  /* 标题跟着内容走：模型按格式写了，它是「怎么读这两张表」；
+     只说了几句人话（partial），它就是「原话」—— 挂着「读表」的标题会让人以为那是分析。 */
+  const title = r.partial ? "模型的原话（没有按格式写）" : "怎么读这两张表";
+  return `<div class="rp-sec"><div class="rp-sh"><h4>${esc(title)}</h4>`
+    + `<span class="rp-tag model">模型 · 这一次请求</span></div>`
+    + `<div class="rp-prose">${body}</div></div>`;
+}
+
+/** 观察项：全部本地判据，模型碰不到。 */
+function reportWatchHtml(list) {
+  const arr = Array.isArray(list) ? list : [];
+  if (!arr.length) return "";
+  const rows = arr.map((w, i) => {
+    const cls = w.level === "bad" ? "a" : w.level === "warn" ? "b" : "c";
+    return `<div class="rp-w"><i class="${cls}">${i + 1}</i><div>${esc(w.text)}`
+      + (w.sub ? `<em>${esc(w.sub)}</em>` : "") + `</div></div>`;
+  }).join("");
+  return `<div class="rp-sec"><div class="rp-sh"><h4>接下来看什么</h4>`
+    + `<span class="rp-tag local">本地检测</span></div><div class="rp-ws">${rows}</div></div>`;
+}
+
+/** 缺口栏：这份研报的边界。不是免责声明，所以放在正文区而不是页脚。 */
+function reportGapsHtml(gaps) {
+  const arr = (Array.isArray(gaps) ? gaps : []).filter(Boolean);
+  if (!arr.length) return "";
+  return `<div class="rp-sec"><div class="rp-gap"><b>这份拿不到的东西</b><ul>`
+    + arr.map(g => `<li>${esc(g)}</li>`).join("") + `</ul></div></div>`;
+}
+
+/**
+ * 整张研报卡。
+ *
+ * ★ rep 为空时**只画事实区**，叙述区换成一句「点上面的按钮」——
+ *   这就是 P0 的核心：模型挂了，两张表还在。v109 那种「等 90 秒什么都没有」
+ *   不是因为模型慢，是因为页面把「有没有结论」当成了「要不要画东西」。
+ *
+ * @param {{ facts?: any, rep?: object|null, atText?: string, chars?: number, ms?: number,
+ *   stale?: string, tier?: string, audit?: any, dropped?: any, placeholderHtml?: string }} opts
+ */
+export function reportCardHtml(opts) {
+  const o = opts || {};
+  const f = o.facts || {};
+  const nav = f.nav;
+  const kind = f.kind === "product" ? "product" : "portfolio";
+  const coords = reportCoordsHtml({ session: f.session, nav, market: f.market, rows: f.rows });
+  const head = `<div class="rp-hd"><div class="rp-hd-l">`
+    + `<div class="rp-name">${esc(f.name || (kind === "product" ? "这一只" : "整个组合"))}</div>`
+    + `<div class="rp-sub">${esc([f.inst, o.tier ? (BRIEF_TIER_LABEL[o.tier] || BRIEF_TIER_LABEL.detail) : ""].filter(Boolean).join(" · "))}`
+    + (nav && nav.ok ? ` · 净值 ${esc(nav.last.value.toFixed(6))}` : "") + `</div></div>`
+    + (o.rep && o.rep.partial
+      ? `<span class="bf-verdict bf-v-collect">未结构化</span>`
+      : o.rep ? `<span class="bf-verdict bf-v-${esc(o.rep.verdict || "watch")}">${esc(BRIEF_VERDICT_TEXT[o.rep.verdict] || BRIEF_VERDICT_TEXT.watch)}</span>` : "")
+    + `</div>${coords}`;
+
+  const lead = o.rep && o.rep.headline
+    ? `<div class="rp-lead"><div class="rp-hl">${esc(o.rep.headline)}</div>`
+      + (!o.rep.partial && briefConfText(o.rep.confidence)
+        ? `<div class="rp-m"><span>${esc(briefConfText(o.rep.confidence))}</span>`
+          + `<span class="rp-bar"><i style="width:${Math.round((Number(o.rep.confidence) || 0) * 100)}%"></i></span></div>`
+        : "")
+      + `</div>`
+    : "";
+
+  const tables = reportTableHtml({ kind, nav, rows: f.rows, market: f.market });
+  /* 没有叙述时画什么，由调用方给：运行中要画转圈与取消，出错要画错误原文，还没跑要画引导。
+     这三种长得很不一样，塞进这里就变成了「组件猜业务」。placeholderHtml 由调用方负责转义。 */
+  const narr = o.rep
+    ? reportNarrativeHtml(o.rep)
+    : String(o.placeholderHtml || `<div class="rp-sec"><div class="rp-none">点上面的按钮生成解读 —— 上面两张表是本地算的，不用等模型。</div></div>`);
+
+  const audit = o.audit && Array.isArray(o.audit.unknown) && o.audit.unknown.length
+    ? `<div class="rp-audit${o.audit.unknown.length >= 3 ? " warn" : ""}">`
+      + `<b>数字核对</b>模型写了 ${Number(o.audit.total) || 0} 个数字，`
+      + (o.audit.unknown.length >= 3
+        ? `有 ${o.audit.unknown.length} 个在数据块里找不到，这份要打折扣看：`
+        : `有 ${o.audit.unknown.length} 个在数据块里找不到：`)
+      + o.audit.unknown.slice(0, 4).map(x => `<code>${esc(x)}</code>`).join("") + `</div>`
+    : "";
+
+  const drop = o.dropped && (o.dropped.paras || o.dropped.banned)
+    ? `<div class="rp-drop">校验时丢弃：${[
+      o.dropped.banned ? `含收益预测的段落 ${o.dropped.banned} 段` : "",
+      o.dropped.paras ? `超长或超量的段落 ${o.dropped.paras} 段` : "",
+    ].filter(Boolean).join("、")}</div>` : "";
+
+  const meta = [o.atText || "", o.chars ? Number(o.chars) + " 字" : "",
+    o.ms ? "用时 " + Math.max(1, Math.round(Number(o.ms) / 1000)) + " 秒" : ""].filter(Boolean).join(" · ");
+
+  return `<div class="rp">${head}${lead}${o.stale ? `<div class="bf-stale">${esc(o.stale)}</div>` : ""}`
+    + `${tables}${narr}${audit}${reportWatchHtml(f.watch)}${reportGapsHtml(f.gaps)}${drop}`
+    + `<div class="rp-foot">${meta ? esc(meta) + "<br>" : ""}${esc(BRIEF_DISCLAIMER)}</div></div>`;
+}
+
+/**
+ * 研报 → 一段人可读的摘要，喂给「追问」的上文。
+ * 与 briefSummaryText 同一用途、不同结构：那边是条目，这边是段落。
+ * @param {object} rep
+ */
+export function reportSummaryText(rep) {
+  const r = rep || {};
+  const lines = ["【上一份研报 · " + (BRIEF_VERDICT_TEXT[r.verdict] || "观察") + "】" + String(r.headline || "").trim()];
+  for (const p of (Array.isArray(r.paras) ? r.paras : [])) {
+    const h = String(p.h || "").trim();
+    const b = String(p.body || "").trim();
+    if (b) lines.push(h ? h + "：" + b : b);
+  }
   const out = lines.join("\n");
   return out.length > 1200 ? out.slice(0, 1200) + "…（摘要超长已截断）" : out;
 }

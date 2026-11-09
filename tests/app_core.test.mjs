@@ -1856,6 +1856,54 @@ test("研判装配失败不许静默：briefRun 里 briefPack 有 try/catch", ()
   assert.match(body, /装配数据失败/, "兜底了但没把原因说到屏上");
 });
 
+/* ---------- v112：研报体，事实优先 ---------- */
+
+test("研报：卡片区必须先算事实层，再判有没有结论", () => {
+  /* 这一条是 v112 的结构性保证：模型挂了、超时了、没点按钮，两张表都得在。
+     v109 的「等 90 秒什么都没有」不是模型慢，是页面把「有没有结论」
+     当成了「要不要画东西」。顺序一反，这个 bug 就会原样回来。 */
+  const i = APP_SRC.indexOf("function briefCardArea(");
+  assert.ok(i > 0, "找不到 briefCardArea");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  const kFacts = body.indexOf("briefPack().facts");
+  const kRes = body.indexOf("BRIEF.res");
+  assert.ok(kFacts > 0, "卡片区没算事实层");
+  assert.ok(kRes > 0, "卡片区没有结论分支");
+  assert.ok(kFacts < kRes, "先判结论后算事实 —— 没结论时就会什么都不画");
+  assert.match(body, /reportCardHtml/, "没走研报卡");
+});
+
+test("研报：落定先按 report-1 解析，旧 JSON 兜底，最后才降级原文", () => {
+  const i = APP_SRC.indexOf("function briefDone(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  const kParse = body.indexOf("parseReport(text)");
+  const kJson = body.indexOf("extractJson(text)");
+  const kRaw = body.indexOf("BRIEF.raw = text");
+  assert.ok(kParse > 0, "没有 report-1 解析");
+  assert.ok(kJson > kParse, "旧 JSON 兜底应排在 report-1 之后");
+  assert.ok(kRaw > kJson, "原文降级应排在最后");
+});
+
+test("研报：缓存版本号跟着解析口径换代", () => {
+  assert.match(APP_SRC, /const BRIEF_CACHE_VER = 3;/, "解析口径变了却没升缓存版本：旧条目会挡在新代码前面");
+});
+
+test("研报：弹层不能再出现「已砍块」—— 研报不分块，砍了就说不清少了什么", () => {
+  const i = APP_SRC.indexOf("function renderBriefSheet(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.ok(body.indexOf("已砍块") < 0);
+  assert.match(body, /研报数据块/);
+});
+
+test("研报：数字审计要跑在模型正文上，不是跑在表头上", () => {
+  const i = APP_SRC.indexOf("function briefAuditValues(");
+  assert.ok(i > 0, "没有事实集收集函数");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /tail/, "净值轨迹的数没进事实集");
+  assert.match(body, /shock/, "冲击的数没进事实集");
+  assert.match(body, /market/, "债市的数没进事实集");
+});
+
 /* ---------- v110：研判要在原生 90 秒读超时之内落定 ---------- */
 
 test("研判超时不许只显示原生那句 timeout：必须指到「关掉联网检索」", () => {

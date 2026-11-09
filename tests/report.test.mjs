@@ -1,0 +1,492 @@
+// @ts-check
+/* 研报事实层（v112 · report-1）的测试。跑法：node --test tests/report.test.mjs
+   这一层是「研报里所有数字的来源」，错一个数字，模型就会把错的那个写进结论里，
+   而屏幕上没有任何东西能看出来。所以每一条都要钉住。 */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  REPORT_SESSION_LABEL, reportSession, reportNavFacts, reportMarketFacts,
+  reportPortfolioRows, reportWatch, reportFactsText, reportTableHtml,
+  reportCoordsHtml, reportNumberAudit, navSummary,
+} from "../js/domain/report.js";
+import { parseReport, reportCardHtml, reportNarrativeHtml, reportSummaryText,
+  REPORT_INSTRUCTIONS, REPORT_PROMPT_VER } from "../js/domain/brief.js";
+
+/* ---------- 夹具 ---------- */
+
+const p2 = n => String(n).padStart(2, "0");
+const fmt = d => d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate());
+function bus(from, n) {
+  const out = [];
+  const d = new Date(from + "T12:00:00");
+  while (out.length < n) {
+    const w = d.getDay();
+    if (w !== 0 && w !== 6) out.push(fmt(d));
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+/**
+ * 23 个披露点：前 18 天每天 +1.2bp，然后 −4.86、−11.52、+7.90、+2.65。
+ * 这条曲线的形状与真机样本（诚享7天29号 10-22 到 10-28）同构：
+ * 一个前高、一次事件级下跌、两天修复。数字是算准的，断言才敢写死。
+ */
+function mkSeries() {
+  const days = bus("2026-09-28", 23);
+  const bps = [];
+  for (let i = 0; i < 18; i++) bps.push(1.2);
+  bps.push(-4.86, -11.52, 7.90, 2.65);
+  let v = 1.010000;
+  /** @type {Array<[string, number]>} */
+  const s = [[days[0], v]];
+  for (let i = 0; i < bps.length; i++) {
+    v = v * (1 + bps[i] / 10000);
+    s.push([days[i + 1], Math.round(v * 1e6) / 1e6]);
+  }
+  return s;
+}
+const SERIES = mkSeries();
+const NAV = reportNavFacts(SERIES, { today: "2026-11-02" });
+
+function cell(issuer, tenor, y, bp, group) {
+  return { group: group || "rate", issuer, tenor, dir: bp < 0 ? "up" : bp > 0 ? "down" : "flat",
+    basis: { yieldPct: y, prevYieldPct: y - bp / 100, bp1d: bp } };
+}
+const MKT = {
+  meta: { verified: true, gaps: [], capturedAt: "2026-10-30T17:20:00+08:00" },
+  weather: {
+    asOf: "2026-10-30", prevDate: "2026-10-29",
+    cells: [
+      cell("国债", "1年", 1.1683, -0.3), cell("国债", "3年", 1.2291, -1.1),
+      cell("国债", "5年", 1.3115, -1.2), cell("国债", "7年", 1.3996, -1.6),
+      cell("国债", "10年", 1.5868, -1.7),
+      cell("AAA", "3年", 1.5821, -1.0, "credit"), cell("AAA", "5年", 1.6428, -1.2, "credit"),
+    ],
+  },
+  bpTable: [
+    { issuer: "国债", tenor: "2年", yieldPct: 1.2155, bp: { "1日": [-0.6, "2026-10-29"], "5日": [-3.0, "2026-10-23"], "20日": [-5.2, "2026-10-02"] } },
+    { issuer: "国债", tenor: "5年", yieldPct: 1.3115, bp: { "1日": [-1.2, "2026-10-29"], "5日": [-4.2, "2026-10-23"], "20日": [-9.5, "2026-10-02"] } },
+    { issuer: "国债", tenor: "10年", yieldPct: 1.5868, bp: { "1日": [-1.7, "2026-10-29"], "5日": [-6.3, "2026-10-23"], "20日": [-9.8, "2026-10-02"] } },
+    { issuer: "国债", tenor: "30年", yieldPct: 2.0275, bp: { "1日": [-1.5, "2026-10-29"], "5日": [-5.5, "2026-10-23"], "20日": [-6.0, "2026-10-02"] } },
+  ],
+};
+const MK = reportMarketFacts(MKT, "2026-11-02");
+
+/* ---------- 时点 ---------- */
+
+test("时点：盘前 / 盘中 / 盘后 / 休市，按点按钮的那一刻分", () => {
+  const at = (iso, td) => reportSession(new Date(iso).getTime(), td);
+  assert.equal(at("2026-11-09T08:30:00", "2026-11-09").key, "preopen");
+  assert.equal(at("2026-11-09T10:00:00", "2026-11-09").key, "intraday");
+  assert.equal(at("2026-11-09T21:21:00", "2026-11-09").key, "afterclose");
+  assert.equal(at("2026-11-14T10:00:00", "2026-11-14").key, "closed", "周六不是交易日");
+});
+
+test("时点边界：09:00 整算盘中，15:30 整算盘后", () => {
+  const at = (iso) => reportSession(new Date(iso).getTime(), "2026-11-09").key;
+  assert.equal(at("2026-11-09T08:59:00"), "preopen");
+  assert.equal(at("2026-11-09T09:00:00"), "intraday");
+  assert.equal(at("2026-11-09T15:29:00"), "intraday");
+  assert.equal(at("2026-11-09T15:30:00"), "afterclose");
+});
+
+test("时点：盘中路线必须自带「没有实时行情」这句任务书", () => {
+  /* 本机的中债曲线是日频收盘发布。盘中路线最危险的地方不是数据旧，
+     是模型会把「上一交易日收盘」写成「今天上午」。所以这句必须写进 focus。 */
+  const s = reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09");
+  assert.match(s.focus, /没有实时行情|还没有任何成交数据/);
+  assert.equal(REPORT_SESSION_LABEL[s.key], "盘中");
+});
+
+test("时点：盘后但今天曲线还没发布时，不许说「讲今天收盘」", () => {
+  /* 中债曲线一般 17:00 后才发布。21 点打开时最新一条往往是上一交易日的，
+     这时候让模型「讲今天收盘」，它就只能编。 */
+  const old = reportSession(new Date("2026-11-09T21:21:00").getTime(), "2026-11-09", "2026-11-06");
+  assert.match(old.focus, /今天的收盘曲线还没发布/);
+  assert.match(old.focus, /11-06/);
+  assert.equal(old.fresh, false);
+  const now = reportSession(new Date("2026-11-09T21:21:00").getTime(), "2026-11-09", "2026-11-09");
+  assert.match(now.focus, /先讲今天收盘/);
+  assert.equal(now.fresh, true);
+});
+
+test("时点：休市路线的重心是「最近一个交易日 + 下一个交易日」", () => {
+  const s = reportSession(new Date("2026-11-14T10:00:00").getTime(), "2026-11-14");
+  assert.match(s.focus, /最近一个交易日/);
+  assert.match(s.focus, /下一个交易日/);
+  assert.equal(s.tradeDay, false);
+});
+
+/* ---------- 净值事实 ---------- */
+
+test("净值：样本点、最新值、前高与距前高", () => {
+  assert.equal(NAV.ok, true);
+  assert.equal(NAV.n, 23);
+  assert.equal(NAV.last.date, "2026-10-28");
+  assert.equal(NAV.peak.date, "2026-10-22");
+  assert.ok(Math.abs(NAV.gapBp - 5.84) < 0.01, "距前高应是 5.84bp，实际 " + NAV.gapBp);
+});
+
+test("净值：最大回撤带区间，不是光一个百分数", () => {
+  assert.ok(Math.abs(NAV.dd.pct - (-0.1638)) < 0.001);
+  assert.equal(NAV.dd.from, "2026-10-22");
+  assert.equal(NAV.dd.to, "2026-10-26");
+});
+
+test("净值：事件冲击与「收回几成」", () => {
+  assert.equal(NAV.shock.date, "2026-10-26");
+  assert.ok(Math.abs(NAV.shock.bp - (-11.52)) < 0.01);
+  assert.equal(NAV.shock.days, 2);
+  assert.ok(Math.abs(NAV.shock.ratio * 100 - 91.5) < 0.2, "收回比例应约 91.5%，实际 " + (NAV.shock.ratio * 100));
+});
+
+test("净值：样本不足 20 个点时不报 σ 倍数", () => {
+  /* 12 个点里 4 个极端值，σ 会被那几个点主导，算出来的「2.4 倍」看着有、其实没意义。 */
+  const short = reportNavFacts(SERIES.slice(-12), { today: "2026-11-02" });
+  assert.equal(short.sigmaBp, 0);
+  assert.equal(short.shock.sigma, 0);
+  assert.ok(navSummary(short).indexOf("倍") < 0, "没有 σ 就不许写「X 倍」");
+});
+
+test("净值：常态日收益直接取中位数，不做剔除", () => {
+  /* 23 个点里 18 个 +1.2、4 个极端，中位数应落在 1.2 附近。 */
+  assert.ok(Math.abs(NAV.normalBp - 1.2) < 0.05, "实际 " + NAV.normalBp);
+});
+
+test("净值：两个口径的「还要几个披露点」都给，不合并", () => {
+  assert.equal(NAV.etaNormal, 5);
+  assert.equal(NAV.etaFast, 1);
+  assert.ok(navSummary(NAV).indexOf("按常态日收益") > 0);
+});
+
+test("净值：日更产品缺的交易日要点名，今天不算", () => {
+  assert.equal(NAV.cadence, "daily");
+  assert.deepEqual(NAV.missing, ["2026-10-29", "2026-10-30"]);
+});
+
+test("净值：周更产品不许报「缺 4 个披露点」", () => {
+  /* 误报比不报更糟：用户会以为产品出问题了。 */
+  const weekly = SERIES.filter((_, i) => i % 5 === 0 || i === SERIES.length - 1);
+  const f = reportNavFacts(weekly, { today: "2026-11-02" });
+  assert.equal(f.cadence, "weekly");
+  assert.deepEqual(f.missing, []);
+});
+
+test("净值：不足 2 个点返回 ok:false，不硬算", () => {
+  assert.equal(reportNavFacts([["2026-10-01", 1.01]], {}).ok, false);
+  assert.equal(reportNavFacts([], {}).ok, false);
+  assert.equal(reportNavFacts(null, {}).ok, false);
+});
+
+test("净值：脏数据被丢掉，不参与计算", () => {
+  const s = SERIES.slice(0, 5).concat([["bad", 1], ["2026-10-09", 0], ["2026-10-10", NaN]]);
+  const f = reportNavFacts(s, {});
+  assert.equal(f.n, 5, "三个脏点应当被过滤掉");
+});
+
+/* ---------- 债市事实 ---------- */
+
+test("债市：四个关键期限带 5/20 日，方向能算出来", () => {
+  assert.equal(MK.ok, true);
+  assert.equal(MK.rows.length, 4);
+  assert.equal(MK.allDown, true, "全期限下行要能算出来，而不是让模型看图说话");
+  assert.ok(Math.abs(MK.rows[2].bp20 + 9.8) < 0.01);
+});
+
+test("债市：快照落后几个交易日是算出来的", () => {
+  assert.equal(MK.asOf, "2026-10-30");
+  assert.equal(MK.lagTradeDays, 1, "10-30 到 11-02 之间只有一个交易日");
+});
+
+test("债市：未核验 / 无格子一律 ok:false，不返回空表", () => {
+  assert.equal(reportMarketFacts({ meta: { verified: false }, weather: { cells: [] } }, "").ok, false);
+  assert.equal(reportMarketFacts({ meta: { verified: true }, weather: { cells: [] } }, "").ok, false);
+  assert.equal(reportMarketFacts(null, "").ok, false);
+});
+
+/* ---------- 观察项 ---------- */
+
+test("观察项：缺披露 + 快照滞后，各一条", () => {
+  const w = reportWatch(NAV, MK, reportSession(0, "2026-11-02"));
+  const text = w.map(x => x.text).join("｜");
+  assert.match(text, /净值缺 2 个披露点/);
+  assert.match(text, /落后 1 个交易日/);
+});
+
+test("观察项：组合层要挑出「净值掉队」的那几只", () => {
+  /* 组合层没有单只序列，但「最新净值日是哪天」照样要看：一只掉队，整张表的结论就跟着旧。 */
+  const rows = [
+    { name: "A", navDate: "2026-10-30" },
+    { name: "B", navDate: "2026-10-26" },
+    { name: "C", navDate: "2026-10-26" },
+  ];
+  const w = reportWatch(null, MK, reportSession(0, "2026-11-02"), { rows, today: "2026-11-02" });
+  const text = w.map(x => x.text).join("｜");
+  assert.match(text, /有 2 只的净值停在 10-26/);
+});
+
+test("坐标：组合层给「最新 + 最早」，只给最新会让人以为整套都到那天了", () => {
+  const h = reportCoordsHtml({ session: reportSession(0, "2026-11-02"),
+    nav: null, market: MK, rows: [{ navDate: "2026-10-30" }, { navDate: "2026-10-26" }] });
+  assert.match(h, /净值 10-30（最早 10-26）/);
+});
+
+test("观察项：债市缺失时说「本轮没有」，不说「数据暂缺」", () => {
+  const w = reportWatch(NAV, { ok: false }, reportSession(0, "2026-11-02"));
+  assert.match(w.map(x => x.text).join("｜"), /本轮没有可用的债市快照/);
+});
+
+/* ---------- 请求装配 ---------- */
+
+test("请求：含时点、测算、缺口，且不超过 1000 字", () => {
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-09T21:21:00").getTime(), "2026-11-09"),
+    kind: "product", name: "诚享7天29号", inst: "北银理财", nav: NAV, market: MK,
+    gaps: ["资金面：没有 DR001 / DR007", "国债期货"],
+  });
+  assert.match(txt, /【时点】11-09 21:21（周一 · 盘后）/);
+  assert.match(txt, /【叙述重心】/);
+  assert.match(txt, /距前高 5\.8bp/);
+  assert.match(txt, /按常态需 5 个披露点/);
+  assert.match(txt, /【拿不到的数据】资金面/);
+  assert.ok(txt.length <= 1100, "研报输入超长了：" + txt.length);
+});
+
+test("请求：盘中路线必须把「没有实时行情」写进数据块", () => {
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09"),
+    kind: "product", name: "X", nav: NAV, market: MK, gaps: [],
+  });
+  assert.match(txt, /本机没有实时行情/);
+});
+
+test("请求：债市缺失时不许留空，要写明只能写「数据块里没有」", () => {
+  const txt = reportFactsText({ session: reportSession(0, "2026-11-02"), kind: "product", name: "X", nav: NAV, market: { ok: false }, gaps: [] });
+  assert.match(txt, /本轮没有可用的债市快照/);
+  assert.match(txt, /数据块里没有/);
+});
+
+/* ---------- 数字审计 ---------- */
+
+test("审计：编出来的数字必须被点名", () => {
+  const r = reportNumberAudit("净值 1.014962，距前高 5.8bp，另有 99.9% 与 7.77 两个假数。", [1.014962, 5.84]);
+  assert.ok(r.unknown.indexOf("99.9") >= 0);
+  assert.ok(r.unknown.indexOf("7.77") >= 0);
+  assert.ok(r.unknown.indexOf("1.014962") < 0);
+});
+
+test("审计：日期与舍入不算编数", () => {
+  /* 11-02 会被正则切成 11 与 -02；1.014962 抄成 1.0150 或 1.0149 都是抄，不是编。 */
+  const r = reportNumberAudit("11-02 单日 −11.5bp，净值 1.0150，另一处写 1.0149，10-29 前高。", [1.014962, 11.52]);
+  assert.deepEqual(r.unknown, []);
+  assert.ok(r.total > 0);
+});
+
+test("审计：全对时 unknown 为空，比例 0", () => {
+  const r = reportNumberAudit("5.8bp", [5.84]);
+  assert.deepEqual(r.unknown, []);
+  assert.equal(r.ratio, 0);
+});
+
+/* ---------- 渲染 ---------- */
+
+test("表格：净值表把前高与冲击标出来，涨红跌绿", () => {
+  const h = reportTableHtml({ kind: "product", nav: NAV, market: MK });
+  assert.match(h, /rp-hi/);
+  assert.match(h, /rp-lo/);
+  assert.match(h, /前高/);
+  assert.match(h, /冲击/);
+  assert.match(h, /rp-up/, "−11.5bp 是收益率下行 / 净值下跌，走绿");
+  assert.ok(h.indexOf("<script") < 0);
+});
+
+test("表格：债市缺失时整块不画，不留一张空表", () => {
+  const h = reportTableHtml({ kind: "product", nav: NAV, market: { ok: false } });
+  assert.ok(h.indexOf("债市关键期限") < 0);
+});
+
+test("表格：产品名里的尖括号被转义", () => {
+  const rows = [{ name: "<img src=x onerror=alert(1)>", nav: 1.01, navDate: "2026-10-01", d30: 0.1, dd: -0.2, gapBp: 3 }];
+  const h = reportTableHtml({ kind: "portfolio", rows, market: { ok: false } });
+  assert.ok(h.indexOf("<img") < 0, "模型与台账里的名字都可能带尖括号");
+  assert.match(h, /&lt;img/);
+});
+
+test("坐标：净值 / 债市 / 生成，三个日期各一个胶囊", () => {
+  const h = reportCoordsHtml({ session: reportSession(new Date("2026-11-09T21:21:00").getTime(), "2026-11-09"), nav: NAV, market: MK });
+  assert.match(h, /净值 10-28/);
+  assert.match(h, /债市 10-30/);
+  assert.match(h, /生成 11-09 21:21/);
+  assert.equal((h.match(/<span class="rp-co/g) || []).length, 3);
+});
+
+/* ---------- 契约解析 ---------- */
+
+const OK_TEXT = [
+  "结论：watch",
+  "信心：0.62",
+  "标题：单日冲击已收回九成，但还差前高 5.8bp",
+  "",
+  "## 这一跌是什么性质",
+  "11-02 单日 −11.5bp，是常态波动的 6.6 倍，属于事件冲击，不是收益能力变化。",
+  "",
+  "## 债市给的是顺风还是逆风",
+  "10-30 全期限下行，对净值是顺风；但快照比净值新一个交易日，还没被净值验证。",
+  "",
+  "## 还差多少、要多久",
+  "距前高 5.8bp。按常态需 5 个披露点，按最近两日需 1 个。",
+].join("\n");
+
+test("解析：三段 + 三个头字段", () => {
+  const r = parseReport(OK_TEXT);
+  assert.equal(r.ok, true);
+  assert.equal(r.report.verdict, "watch");
+  assert.equal(r.report.confidence, 0.62);
+  assert.match(r.report.headline, /还差前高/);
+  assert.equal(r.report.paras.length, 3);
+  assert.equal(r.report.paras[0].h, "这一跌是什么性质");
+});
+
+test("解析：没有 ## 但有正文，也要收 —— 坏一段只丢一段，不是整份作废", () => {
+  const r = parseReport("结论：continue\n标题：平稳\n今天没有新情况，净值按票息走。");
+  assert.equal(r.ok, true);
+  assert.equal(r.report.verdict, "continue");
+  assert.equal(r.report.paras.length, 1);
+  assert.equal(r.report.paras[0].h, "");
+});
+
+test("解析：只有表头没有正文 → 判失败，并说清是「没有正文」", () => {
+  const r = parseReport("结论：watch\n信心：0.5\n标题：空");
+  assert.equal(r.ok, false);
+  assert.match(String(r.why), /没有可用的正文段/);
+});
+
+test("解析：中文枚举、百分数信心都能收", () => {
+  const r = parseReport("结论：继续观察\n信心：62\n## 一\n净值平稳。");
+  assert.equal(r.report.verdict, "watch");
+  assert.equal(r.report.confidence, 0.62);
+});
+
+test("解析：标题里出现收益预测，整份拒收", () => {
+  const r = parseReport("结论：watch\n标题：预计收益可达 3%\n## 一\n净值平稳。");
+  assert.equal(r.ok, false);
+  assert.match(String(r.why), /收益预测/);
+});
+
+test("解析：某一段里出现收益预测，只丢那一段并计数", () => {
+  const r = parseReport("结论：watch\n标题：观察\n## 一\n净值平稳。\n## 二\n目标净值 1.05，稳赚。");
+  assert.equal(r.ok, true);
+  assert.equal(r.report.paras.length, 1);
+  assert.equal(r.dropped.banned, 1);
+});
+
+test("解析：超过 5 段只留前 5 段，其余计数", () => {
+  const t = "结论：watch\n标题：x\n" + [1, 2, 3, 4, 5, 6].map(i => `## 段${i}\n内容${i}。`).join("\n");
+  const r = parseReport(t);
+  assert.equal(r.report.paras.length, 5);
+  assert.equal(r.dropped.paras, 1);
+});
+
+test("解析：旧 JSON 格式让路，不会被当成「一段正文」", () => {
+  /* 不让路的话，屏幕上会出现一段裸 JSON 冒充研报 —— 而它本来是旧格式，能被旧解析器正确渲染。 */
+  const old = JSON.stringify({ verdict: "watch", headline: "x", sections: [] });
+  const r = parseReport(old);
+  assert.equal(r.ok, false);
+  assert.match(String(r.why), /旧格式/);
+});
+
+test("解析：既无档位也无标题时标 partial，不许挂一个默认档位冒充结论", () => {
+  const r = parseReport("我觉得还行，但要看后面几天的走势。");
+  assert.equal(r.ok, true);
+  assert.equal(r.report.partial, true);
+  const h = reportCardHtml({
+    facts: { session: reportSession(0, "2026-11-09"), kind: "product", name: "X", nav: NAV, market: MK, watch: [], gaps: [] },
+    rep: r.report,
+  });
+  assert.match(h, /未结构化/);
+  assert.ok(h.indexOf("继续观察") < 0, "没给档位就不许画一个默认档位");
+});
+
+test("解析：给了档位就不标 partial", () => {
+  const r = parseReport(OK_TEXT);
+  assert.equal(r.report.partial, false);
+});
+
+test("指令：不许出现 sources / 联网，且要求不许新增数字", () => {
+  assert.equal(REPORT_PROMPT_VER, "report-1");
+  assert.ok(REPORT_INSTRUCTIONS.indexOf('"sources"') < 0);
+  assert.match(REPORT_INSTRUCTIONS, /不许新增任何数字/);
+  assert.match(REPORT_INSTRUCTIONS, /不要联网检索/);
+});
+
+/* ---------- 卡片 ---------- */
+
+test("卡片：没有解读时只画事实区 —— 这是 P0 的核心", () => {
+  /* 模型挂了、超时了、没点按钮，屏幕上都得有东西。v109 的「等 90 秒什么都没有」
+     不是模型慢，是页面把「有没有结论」当成了「要不要画东西」。 */
+  const h = reportCardHtml({
+    facts: { session: reportSession(new Date("2026-11-09T21:21:00").getTime(), "2026-11-09"), kind: "product", name: "诚享7天29号", inst: "北银理财", nav: NAV, market: MK, watch: [], gaps: ["资金面"] },
+    rep: null,
+    placeholderHtml: `<div class="rp-sec"><div class="rp-none">点按钮生成</div></div>`,
+  });
+  assert.match(h, /诚享7天29号/);
+  assert.match(h, /这只产品的净值/);
+  assert.match(h, /债市关键期限/);
+  assert.match(h, /点按钮生成/);
+  assert.ok(h.indexOf("怎么读这几张表") < 0, "没有结论就不许画结论区");
+});
+
+test("卡片：有解读时三段都画出来，并带上数字核对", () => {
+  const r = parseReport(OK_TEXT);
+  const h = reportCardHtml({
+    facts: { session: reportSession(new Date("2026-11-09T21:21:00").getTime(), "2026-11-09"), kind: "product", name: "X", nav: NAV, market: MK, watch: [], gaps: [] },
+    rep: r.report,
+    audit: { total: 9, unknown: ["99.9", "7.77", "5.5"], ratio: 0.3 },
+    ms: 34000,
+  });
+  assert.match(h, /这一跌是什么性质/);
+  assert.match(h, /数字核对/);
+  assert.match(h, /99\.9/);
+  assert.match(h, /rp-audit warn/, "3 个以上对不上要标黄");
+  assert.match(h, /用时 34 秒/);
+});
+
+test("卡片：只有 1 个数字对不上时不标黄，只列出来", () => {
+  const r = parseReport(OK_TEXT);
+  const h = reportCardHtml({
+    facts: { session: reportSession(0, "2026-11-09"), kind: "product", name: "X", nav: NAV, market: MK, watch: [], gaps: [] },
+    rep: r.report, audit: { total: 9, unknown: ["7.77"], ratio: 0.11 },
+  });
+  assert.ok(h.indexOf("rp-audit warn") < 0);
+  assert.match(h, /7\.77/);
+});
+
+test("卡片：模型写的尖括号一律转义", () => {
+  const r = parseReport("结论：watch\n标题：<b>粗</b>\n## 一\n<svg onload=alert(1)>");
+  const h = reportNarrativeHtml(r.report);
+  assert.ok(h.indexOf("<svg") < 0);
+  assert.ok(h.indexOf("<b>粗") < 0);
+});
+
+test("摘要：喂给追问的上文是段落，不是 JSON", () => {
+  const r = parseReport(OK_TEXT);
+  const s = reportSummaryText(r.report);
+  assert.match(s, /【上一份研报 · 继续观察】/);
+  assert.match(s, /这一跌是什么性质：/);
+  assert.ok(s.indexOf("{") < 0);
+  assert.ok(s.length <= 1200);
+});
+
+/* ---------- 组合层 ---------- */
+
+test("组合：每只一行，距前高按各自序列算", () => {
+  const rows = reportPortfolioRows([
+    { name: "A", nav: 1.01, navDate: "2026-10-28", metrics: { d30: 0.12, dd: -0.2 }, series: SERIES },
+    { name: "B", nav: 1.02, navDate: "2026-10-28", metrics: { d30: -0.05, dd: -0.4 }, series: SERIES.slice(0, 10) },
+  ]);
+  assert.equal(rows.length, 2);
+  assert.ok(Math.abs(rows[0].gapBp - 5.84) < 0.01);
+  assert.ok(rows[1].gapBp !== null);
+});

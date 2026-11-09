@@ -543,6 +543,70 @@ html:not(.inApp) .app-only{display:none}
   font-weight:600;padding:5px 11px;border-radius:20px;font-family:inherit}
 .bf-chip.on{background:var(--brand);border-color:var(--brand);color:#fff}
 .bf-chip[disabled]{opacity:.55}
+
+/* ---------- v112 研报体（report-1） ----------
+   与 bf-* 的关系：bf-* 是「状态卡」（空态/运行/错误/降级原文），rp-* 是「正文卡」。
+   两套并存：降级时同一屏里会同时出现 rp（事实区）与 bf（原文），不能合并。 */
+.rp{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:12px 13px;margin:10px 0}
+.rp-hd{display:flex;align-items:flex-start;gap:8px}
+.rp-hd-l{min-width:0;flex:1}
+.rp-name{font-size:15px;font-weight:650;letter-spacing:-.2px;line-height:1.35}
+.rp-sub{font-size:11.5px;color:var(--ink2);margin-top:3px;font-variant-numeric:tabular-nums}
+.rp-cos{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+.rp-co{font-size:10.5px;color:#5a5f7d;background:rgba(91,91,214,.07);border:1px solid rgba(91,91,214,.13);
+  border-radius:7px;padding:1px 7px;font-variant-numeric:tabular-nums}
+.rp-co.warn{background:#fdf6e6;border-color:#eedfb8;color:#8a6100}
+.rp-lead{margin-top:11px}
+.rp-hl{font-size:14px;font-weight:650;line-height:1.5;letter-spacing:.1px}
+.rp-m{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.rp-bar{flex:1;max-width:110px;height:4px;border-radius:99px;background:rgba(120,125,170,.14);overflow:hidden}
+.rp-bar>i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--brand2),var(--brand))}
+.rp-sec{margin-top:11px;padding-top:10px;border-top:1px dashed var(--line)}
+.rp-sh{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.rp-sh h4{font-size:11.5px;font-weight:700;color:var(--ink2);letter-spacing:.4px}
+.rp-tag{font-size:9.5px;padding:1px 6px;border-radius:5px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
+.rp-tag.local{background:rgba(90,110,150,.1);color:#5a6a8c;border:1px solid rgba(90,110,150,.16)}
+.rp-tag.calc{background:#eef7f0;color:#2f6b3d;border:1px solid #cfe6d5}
+.rp-tag.model{background:#f3eefb;color:#6a4a9e;border:1px solid #ddd0ee}
+.rp-tb{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.rp-tb th{font-size:10px;font-weight:500;color:var(--ink3);text-align:right;padding:0 0 5px;letter-spacing:.3px}
+.rp-tb th:first-child{text-align:left}
+.rp-tb td{font-size:12px;padding:5px 0;border-top:1px solid var(--line);text-align:right;color:var(--ink)}
+.rp-tb td:first-child{text-align:left;color:var(--ink2)}
+.rp-hi td{background:#fdf6e6}
+.rp-lo td{background:#fdeeea}
+.rp-up{color:var(--up)} .rp-down{color:var(--down)} .rp-flat{color:var(--ink3)}
+.rp-mk{font-style:normal;font-size:9.5px;color:#8a6100;margin-left:4px}
+.rp-mk.b{color:#a8391f}
+.rp-sum{margin-top:8px;font-size:11.5px;line-height:1.65;color:#3a4060;
+  background:#eef7f0;border-left:2.5px solid #9ed3b0;border-radius:0 8px 8px 0;padding:7px 9px}
+.rp-sum b{color:#2f6b3d;font-weight:650}
+.rp-sum.alt{background:#eef1fa;border-left-color:#b9c3e6}
+.rp-prose{font-size:12.5px;line-height:1.75;color:var(--ink)}
+.rp-prose p{margin:0 0 8px}
+.rp-prose p:last-child{margin-bottom:0}
+.rp-ph{display:block;font-weight:650;color:#4a4ab0;font-size:12px;margin-bottom:2px}
+.rp-ws{display:flex;flex-direction:column;gap:6px}
+.rp-w{display:flex;gap:7px;font-size:11.5px;line-height:1.6;color:var(--ink)}
+.rp-w i{flex:none;width:15px;height:15px;border-radius:5px;font-style:normal;display:flex;
+  align-items:center;justify-content:center;font-size:9.5px;font-weight:700;margin-top:2px}
+.rp-w i.a{background:#fdeeea;color:#a8391f}
+.rp-w i.b{background:#fdf6e6;color:#8a6100}
+.rp-w i.c{background:#eef1fa;color:#4a5680}
+.rp-w em{font-style:normal;color:var(--ink3);font-size:10.5px;display:block;margin-top:1px}
+.rp-gap{font-size:11.5px;line-height:1.65;color:var(--ink2);background:rgba(120,125,170,.055);border-radius:9px;padding:8px 10px}
+.rp-gap b{display:block;font-size:11px;color:var(--ink2);margin-bottom:3px}
+.rp-gap ul{margin:0;padding-left:14px}
+.rp-gap li{margin:2px 0}
+.rp-audit{margin-top:10px;font-size:11px;line-height:1.7;color:var(--ink2);
+  background:rgba(120,125,170,.05);border:1px dashed var(--line);border-radius:8px;padding:7px 9px}
+.rp-audit b{margin-right:4px}
+.rp-audit.warn{background:#fdf6e6;border-color:#eedfb8;color:#8a6100}
+.rp-audit code{font-family:inherit;font-variant-numeric:tabular-nums;background:#fff;border-radius:3px;
+  padding:0 4px;margin-left:3px;border:1px solid var(--line);color:inherit}
+.rp-drop{margin-top:8px;font-size:10.5px;color:var(--ink3)}
+.rp-none{font-size:12px;color:var(--ink2);line-height:1.7}
+.rp-foot{margin-top:11px;padding-top:9px;border-top:1px solid var(--line);font-size:10.5px;color:var(--ink3);line-height:1.6}
 </style>
 </head>
 <body>
