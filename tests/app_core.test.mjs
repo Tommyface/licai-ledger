@@ -1209,7 +1209,10 @@ test("放宽只用于显示与文案，不许用于真调用：登录 / 抓取 /
   };
   const DISPLAY = ["syncAppOnly", "armAppOnlyRetry", "inShellHost"];
   const MSG = ["bridgeMissingMsg", "ocrPick", "ocrBridge", "qrBridge", "qrPick",
-               "llmStatusLine", "llmSetKey", "openLlm", "llmSend"];
+               "llmStatusLine", "llmSetKey", "openLlm", "llmSend",
+               /* v104：openLlm 的渲染体拆到 renderLlmSheet，inShellHost 仍在
+                  llmDegrade 那句文案里，位置没变 —— 只是登记新函数宿主。 */
+               "renderLlmSheet"];
   const hits = [...APP_SRC.matchAll(/inShellHost\(\)/g)];
   assert.ok(hits.length >= 8, `只读到 ${hits.length} 处 inShellHost()，锚点变了要同步改这条`);
   for (const m of hits) {
@@ -1237,8 +1240,10 @@ test("放宽只用于显示与文案，不许用于真调用：登录 / 抓取 /
     assert.ok(/if \(!nativeFetchAvailable\(\)\) \{ box\.innerHTML = ""; return; \}/.test(fnBody(name)),
       `${name} 的内容守卫改信宽松判定了`);
   }
-  /* v68 那四处「桥没挂上」的文案点：先判桥，再说话 —— 顺序反了就是「以为能调、结果调不到」 */
-  for (const name of ["llmStatusLine", "openLlm"]) {
+  /* v68 那四处「桥没挂上」的文案点：先判桥，再说话 —— 顺序反了就是「以为能调、结果调不到」。
+     v104：openLlm 拆成「设 host 的入口」，判桥与文案随之落到 renderLlmSheet ——
+     守卫强度不变，只把登记的宿主函数换成真正说那句话的那个。 */
+  for (const name of ["llmStatusLine", "renderLlmSheet"]) {
     assert.ok(/if \(!llmBridge\(\)\)/.test(fnBody(name)),
       `${name} 少了那句 if (!llmBridge())：文案再怎么宽松，说话的人得先确认桥真不在`);
   }
@@ -1552,7 +1557,9 @@ test("v66 发之前先把「本轮要带什么」写在屏幕上，勾与不勾�
     "勾选框的入口变了：改了状态不重画，屏幕上那句「本轮会带上」就是上一轮的");
   assert.match(block, /\$\{llmSnapLine\(\)\}/, "没把本轮要带的只数与字数写出来");
   assert.match(block, /现在没带台账数据：模型只听得到你敲进框里那一句/, "没勾时说得含糊：模型到底看见什么得写明");
-  assert.match(block, /function llmDataToggle\(\)[\s\S]{0,200}\bopenLlm\(\);/,
+  /* v104：内部重绘统一走 llmRepaint()（按 host 分派，债市页不会被换回模型接入页）。
+     断言语义不变：开关拨了必须重画当前弹层；只是调用名随分派层同步。 */
+  assert.match(block, /function llmDataToggle\(\)[\s\S]{0,200}\bllmRepaint\(\);/,
     "开关拨了不重画弹层");
   const k = block.indexOf("Object.assign(window, {");
   assert.ok(k === -1 || block.slice(k).includes("llmDataToggle"), "内联入口没挂上 llmDataToggle");

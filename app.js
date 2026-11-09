@@ -73,7 +73,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v103";
+const APP_VER = "v104";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -563,8 +563,9 @@ function annualize(profit, y, m) {
 function renderHome() {
   const pf = portfolio();
   $("totalAsset").textContent = shown(money(pf.totalAsset));
-  $("tradeHint").textContent = `共 ${DATA.trades.length} 笔交易 · ${pf.rows.length} 只持仓`
-    + (pf.pendingRows.length ? ` · ${pf.pendingRows.length} 只在途` : "");
+  /* v104：首页这行改挂债市晴雨表，副标题由 marketHintText() 按 MARKET 现况给
+     （数据日期 / 核验状态 / 红绿白蓝统计）；没读到快照就说没读到，不编数字。 */
+  if ($("marketHint")) $("marketHint").textContent = marketHintText();
   /* 资产月报入口那行提示（v55）：让用户不点开也知道这个月赚了多少、值不值得看 */
   if ($("monthlyHint")) $("monthlyHint").textContent = monthlyHintText();
   /* 今日/区间收益 */
@@ -2131,8 +2132,12 @@ function openAnaIndex() {
 /* 一轮问答的全部状态。不落 localStorage：换设备 / 刷新就该重问，不留半成品。
    v65 起多了两个字段（turns / turn）—— 会话内容里多半夹着产品名与持仓，
    把它写进浏览器存储等于把台账多一份没人管的副本，所以只留在内存。 */
+/* v104：host = 当前弹层宿主。llm = 设置页「模型接入」；market = 首页「债市晴雨表」。
+   两者共用同一套 LLM 对话状态机，但内部重绘必须按 host 分派（llmRepaint）——
+   否则在债市页发一句，答案回来会被替换成「模型接入」页，行情当场消失。 */
 const LLM = { phase: "idle", id: "", buf: null, meta: null, res: null, q: "", err: "",
-  timer: 0, cfg: null, hasKey: false, costWarn: false, turns: [], turn: null, withData: false };
+  timer: 0, cfg: null, hasKey: false, costWarn: false, turns: [], turn: null, withData: false,
+  host: "llm" };
 /** 这个会话已经发出去几个请求（含失败与超时的那些 —— 它们多半已经计费了，占额度）。 */
 function llmUsed() { return LLM.turns.length + (LLM.turn ? 1 : 0); }
 /** 台账快照的入参数组：只挑 llmSnapshot 认的那十个字段。
@@ -2177,7 +2182,7 @@ function llmSnapLine() {
 function llmDataToggle() {
   const el = $("llmData");
   LLM.withData = !!(el && el.checked);
-  openLlm();
+  llmRepaint();
 }
 
 /* v100：复制债市 aiText。App WebView 的 navigator.clipboard 未必在安全上下文里，
@@ -2286,7 +2291,7 @@ function llmSaveCfg() {
   /* 设置页那一行的状态文案是上一次渲染的，端点变了不重画就会停在「端点未配置」 */
   renderLlm();
   toast(canStyle ? "已保存端点、模型与协议" : "已保存端点与模型", 2400);
-  openLlm();
+  llmRepaint();
 }
 /** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout / cancelled 六种。
     标题那行「第 N 轮 · 问」是为了发出去之后还看得见发的是哪一句 —— 输入框发完就清了。 */
@@ -2334,27 +2339,88 @@ function llmHistoryHtml() {
   return `<div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">上文（${LLM.turns.length} 轮）</h2>
     <span class="hint">只在本机内存里 · 发下一轮时压成文本带上</span></div>${rows}`;
 }
-function openLlm() {
-  closeSheet();
-  if (!llmBridge()) { renderLlm(); return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4200); }
-  llmReadCfg();
-  const c = LLM.cfg || {};
-  /* 额度在打开时算一次就够：这一屏里每发一轮都会重开一次 openLlm()。 */
+/* v104：模型对话的两个宿主共用同一套 LLM 状态机。
+   openLlm / openMarket 是「从哪儿进来」的入口，只负责设 host；
+   llmRepaint 是「这一轮又重画一次」的唯一通道 —— 发问 / 回传 / 超时 / 取消 /
+   清上文 / 勾台账 / 存配置全部走它，按 host 分派。若这些点直接调 openLlm()，
+   在债市晴雨表页发一句，答案回来会被换成「模型接入」页，行情当场消失。 */
+function openLlm() { LLM.host = "llm"; renderLlmSheet(); }
+function openMarket() { LLM.host = "market"; renderMarketSheet(); }
+function llmRepaint() {
+  if (LLM.host === "market") renderMarketSheet();
+  else renderLlmSheet();
+}
+/** 首页「债市晴雨表」入口副标题：把数据日期与核验状态摆到点开之前。
+    没数据就说实话，不编日期也不编数字。 */
+function marketHintText() {
+  if (!MARKET) return "债市行情 · 未读取到快照（需配置数据同步）";
+  const st = marketStat(MARKET);
+  const ok = !!(MARKET.meta && MARKET.meta.verified === true);
+  return `${MARKET.weather.asOf} · ${ok ? "已核验" : "未核验"} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}`;
+}
+/** 债市页上部：行情矩阵 + 复制快照。MARKET=null 给降级说明（不编造数字）。 */
+function marketHeroHtml() {
+  if (!MARKET) return `<div class="note b">暂无行情数据：债市快照来自私有仓 market.json，
+    请先在「设置 → 数据同步」配置好再拉取。没读到就按没有处理，页面不编造任何数字。</div>`;
+  return marketPanelHtml(MARKET)
+    + (marketAiTextSafe(MARKET)
+      ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>`
+      : "");
+}
+/** 共用的「接着问」对话区。withMarket=true 时把行情块嵌在快照行之后
+    （设置页「模型接入」保持原样）；债市页传 false —— 行情已在上部单独渲染，
+    不重复渲染第二遍。heading 由宿主决定。 */
+function llmPanelHtml(withMarket, heading) {
   const used = llmUsed();
   const bg = llmBudget(used);
   const run = LLM.phase === "running";
-  /* 协议形制（v67 · R1）：Responses 走 /responses（input + instructions），
-     Chat Completions 走 /chat/completions（messages[]）—— OpenAI 兼容网关多半是后者。
-     两种请求体都由原生侧拼（LlmBridge.ask），页面只交这一个选择：
-     同一个形状两处各写一遍迟早对不上，而对不上的那一份是花钱的请求。 */
-  const canStyle = llmCanStyle();
-  const style = c.apiStyle === "chat" ? "chat" : "responses";
   /* 重试只在「这一轮失败了」时出现。拿到答案的那轮不给重试 —— 再发一次同样的话
      只是再花一次钱，要接着问就走输入框，那一发是新的一个问题。 */
   const retryable = !run && !!LLM.turn && ["error", "timeout", "cancelled"].includes(LLM.phase);
   const btn = run ? "等待中…"
     : (!bg.ok ? "已到 " + LLM_MAX_ROUNDS + " 轮上限"
       : (used ? "问下一句（已用 " + used + "/" + LLM_MAX_ROUNDS + " 轮）" : "发起（本会话最多 " + LLM_MAX_ROUNDS + " 轮）"));
+  return `<div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">${esc(heading)}</h2>
+      <span class="hint">答案不自动入账 · 已发 ${used}/${LLM_MAX_ROUNDS} 轮</span></div>
+    <div class="chk-row"><label><input type="checkbox" id="llmData" ${LLM.withData ? "checked" : ""}
+      onchange="llmDataToggle()"> 这一轮带上我的台账</label></div>
+    ${llmSnapLine()}
+    ${withMarket ? marketPanelHtml(MARKET) : ""}
+    ${withMarket && (MARKET && marketAiTextSafe(MARKET)) ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>` : ""}
+    ${llmHistoryHtml()}
+    <div class="field" style="margin-top:10px"><textarea id="llmQ" rows="3" placeholder="接着上一轮问，或换个新问题">${esc(LLM.q)}</textarea></div>
+    <div class="row-btn" style="margin-top:8px">
+      <button class="btn pri" style="flex:1" onclick="llmAsk()">${btn}</button>
+    </div>
+    ${run ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="llmCancel()">取消这一轮（不再等 · 已发出的那一发撤回不了）</button></div>` : ""}
+    ${retryable ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="llmRetry()">重试这一轮（原句再发一次，另占一轮额度）</button></div>` : ""}
+    ${LLM.costWarn ? `<div class="note r" style="margin-top:8px">这一句发出去就是<b>一次新的计费</b>；
+      上一轮如果已经到端点，那一次也算 —— 代码不会自己重发，重发只由你点。</div>` : ""}
+    <div id="llmOut" style="margin-top:10px">${llmResultHtml()}</div>
+    ${used ? `<div class="row-btn" style="margin-top:10px"><button class="btn gh" style="flex:1" onclick="llmClearChat()">清空上文（重新计数）</button></div>` : ""}
+    <div class="cap" style="padding:12px 0 0">
+      原生侧只负责发请求与回原文，解析与来源分级全在页面里（js/domain/llm.js，有测试）。
+      上文只在<b>这台机器的内存</b>里：不写本机存储、不推云端，刷新就没了。
+      勾上「带上我的台账」才把数据发出机器：只带那十个字段（名称 / 机构 / 代码 / 风险级 / 净值与它的日期 /
+      份额 / 成本 / 持有天数 / 状态），本机开着「隐藏金额」时份额与成本也跟着藏；不勾就是一句光的问题。
+      发满 ${LLM_MAX_ROUNDS} 轮就停手（失败与超时的那几轮也算），要接着问得先清空 —— 闸门拦的是连着点、连着计费。
+      请求体按上面选的协议形制拼（Responses 带 web_search_preview，Chat Completions 带 web_search），
+      路径也跟着换 —— <b>沙箱里没有凭据，真实端点仍未实测</b>：
+      认不得就明说认不得，不补字段、不自动重发。
+    </div>`;
+}
+/** 宿主一：设置页「模型接入」。端点与模型配置只在这一页出现。 */
+function renderLlmSheet() {
+  closeSheet();
+  if (!llmBridge()) { renderLlm(); return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4200); }
+  llmReadCfg();
+  const c = LLM.cfg || {};
+  /* 协议形制（v67 · R1）：Responses 走 /responses（input + instructions），
+     Chat Completions 走 /chat/completions（messages[]）—— OpenAI 兼容网关多半是后者。
+     两种请求体都由原生侧拼（LlmBridge.ask），页面只交这一个选择：
+     同一个形状两处各写一遍迟早对不上，而对不上的那一份是花钱的请求。 */
+  const canStyle = llmCanStyle();
+  const style = c.apiStyle === "chat" ? "chat" : "responses";
   openSheet(`<div class="sheet-t"><h3>模型接入</h3><button class="x" onclick="closeSheet()">✕</button></div>
     ${llmStatusLine()}
     <div class="card-t" style="margin:14px 0 6px"><h2 style="font-size:14px">端点与模型</h2>
@@ -2376,34 +2442,16 @@ function openLlm() {
       <button class="btn gh" style="flex:1" onclick="llmSaveCfg()">保存端点</button>
       <button class="btn gh" style="flex:1" onclick="llmClearKey()">清除密钥</button>
     </div>
-    <div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">接着问</h2>
-      <span class="hint">答案不自动入账 · 已发 ${used}/${LLM_MAX_ROUNDS} 轮</span></div>
-    <div class="chk-row"><label><input type="checkbox" id="llmData" ${LLM.withData ? "checked" : ""}
-      onchange="llmDataToggle()"> 这一轮带上我的台账</label></div>
-    ${llmSnapLine()}
-    ${marketPanelHtml(MARKET)}
-    ${(MARKET && marketAiTextSafe(MARKET)) ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>` : ""}
-    ${llmHistoryHtml()}
-    <div class="field" style="margin-top:10px"><textarea id="llmQ" rows="3" placeholder="接着上一轮问，或换个新问题">${esc(LLM.q)}</textarea></div>
-    <div class="row-btn" style="margin-top:8px">
-      <button class="btn pri" style="flex:1" onclick="llmAsk()">${btn}</button>
-    </div>
-    ${run ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="llmCancel()">取消这一轮（不再等 · 已发出的那一发撤回不了）</button></div>` : ""}
-    ${retryable ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="llmRetry()">重试这一轮（原句再发一次，另占一轮额度）</button></div>` : ""}
-    ${LLM.costWarn ? `<div class="note r" style="margin-top:8px">这一句发出去就是<b>一次新的计费</b>；
-      上一轮如果已经到端点，那一次也算 —— 代码不会自己重发，重发只由你点。</div>` : ""}
-    <div id="llmOut" style="margin-top:10px">${llmResultHtml()}</div>
-    ${used ? `<div class="row-btn" style="margin-top:10px"><button class="btn gh" style="flex:1" onclick="llmClearChat()">清空上文（重新计数）</button></div>` : ""}
-    <div class="cap" style="padding:12px 0 0">
-      原生侧只负责发请求与回原文，解析与来源分级全在页面里（js/domain/llm.js，有测试）。
-      上文只在<b>这台机器的内存</b>里：不写本机存储、不推云端，刷新就没了。
-      勾上「带上我的台账」才把数据发出机器：只带那十个字段（名称 / 机构 / 代码 / 风险级 / 净值与它的日期 /
-      份额 / 成本 / 持有天数 / 状态），本机开着「隐藏金额」时份额与成本也跟着藏；不勾就是一句光的问题。
-      发满 ${LLM_MAX_ROUNDS} 轮就停手（失败与超时的那几轮也算），要接着问得先清空 —— 闸门拦的是连着点、连着计费。
-      请求体按上面选的协议形制拼（Responses 带 web_search_preview，Chat Completions 带 web_search），
-      路径也跟着换 —— <b>沙箱里没有凭据，真实端点仍未实测</b>：
-      认不得就明说认不得，不补字段、不自动重发。
-    </div>`);
+    ${llmPanelHtml(true, "接着问")}`);
+}
+/** 宿主二：首页「债市晴雨表」。上部行情、下部对话框，一次弹层里两件事都在。
+    网页版没有模型桥时行情照显，对话框给降级提示（llmStatusLine 内已收口）。 */
+function renderMarketSheet() {
+  closeSheet();
+  openSheet(`<div class="sheet-t"><h3>债市晴雨表</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    ${marketHeroHtml()}
+    ${llmStatusLine()}
+    ${llmPanelHtml(false, "代入台账接着问模型")}`);
 }
 /** 发一轮。要发的话由调用方给：新问从输入框取，重试把上一轮那句原样再给一次。
     顺序是「先闸门后动手」：额度到数就连一个字符都不该发出去，不是等请求做完才提示。 */
@@ -2441,7 +2489,7 @@ function llmSend(text) {
     clearTimeout(dead); LLM.timer = 0; LLM.phase = "error"; LLM.err = "桥调用失败：" + e;
     LLM.turn.err = "桥调用失败：" + e;
   }
-  openLlm();
+  llmRepaint();
 }
 function llmAsk() { const el = $("llmQ"); llmSend(el ? String(el.value || "") : LLM.q); }
 /** v76 · 取消这一轮。口径三条，一条都不能少：
@@ -2459,7 +2507,7 @@ function llmCancel() {
   LLM.phase = "cancelled"; LLM.res = null; LLM.err = ""; LLM.buf = null; LLM.meta = null;
   if (LLM.turn) LLM.turn.err = LLM_CANCEL_TEXT;   /* 上文里下一轮看得见：这一轮是人停的，不是模型答的 */
   if (b && b.cancel) { try { b.cancel(id); } catch (e) { /* 原生没接上也只是继续断开连接，屏上的话不变 */ } }
-  openLlm();
+  llmRepaint();
   toast("已取消这一轮（不再等它，但那一发可能已经计费）", 4200);
 }
 /** 重试 = 把上一轮（连同它那次失败）记进上文，再原样发一次同一个问题。
@@ -2475,7 +2523,7 @@ function llmClearChat() {
   if (!n) return toast("上文本来就是空的", 2200);
   LLM.turns = []; LLM.turn = null; LLM.res = null; LLM.err = "";
   LLM.phase = "idle"; LLM.costWarn = false; LLM.buf = null; LLM.meta = null;
-  openLlm();
+  llmRepaint();
   toast("已清空上文（" + n + " 轮的额度也重新计数了）", 3400);
 }
 function llmTimeout(id) {
@@ -2483,7 +2531,7 @@ function llmTimeout(id) {
   LLM.phase = "timeout"; LLM.err = ""; LLM.buf = null;
   /* 超时这一轮写进上文时带的是「没回」，不是空字符串 —— 下一轮的模型看得见上一轮没答上。 */
   if (LLM.turn) LLM.turn.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一次可能已经计费）";
-  openLlm();
+  llmRepaint();
 }
 /* 原生回传的两个全局函数：名字与 LlmBridge.java 里拼的 JS 必须逐字一致，
    scripts/verify-web.sh 第 3 项就是比对这个（对不上是「点了没反应」，构建不会红）。 */
@@ -2494,7 +2542,7 @@ window.__llmChunk = function (id, seq, total, text) {
   if (r.error) {
     LLM.phase = "error"; LLM.err = "分块组装失败：" + r.error;
     if (LLM.turn) LLM.turn.err = LLM.err;
-    openLlm();
+    llmRepaint();
   }
 };
 window.__llmDone = function (id, metaJson) {
@@ -2516,7 +2564,7 @@ window.__llmDone = function (id, metaJson) {
     if (meta && meta.status) LLM.err += "（HTTP " + meta.status + "）";
     LLM.buf = null;
     if (LLM.turn) LLM.turn.err = LLM.err;              /* 失败也进上文：下一轮得知道上一轮没答上 */
-    openLlm(); return;
+    llmRepaint(); return;
   }
   let obj = null;
   try { obj = JSON.parse(body); } catch (e) { obj = null; }
@@ -2534,7 +2582,7 @@ window.__llmDone = function (id, metaJson) {
     LLM.turn.shape = res.shape;
     LLM.turn.usage = res.usage;
   }
-  openLlm();
+  llmRepaint();
 };
 /* 原生侧改完配置 / 密钥后叫这一下，页面重读一次再重画。
    msg 非空是原生在回一句话（多半是「这次没保存」），不显示出来用户只会觉得点了没反应。 */
@@ -2543,7 +2591,7 @@ window.__llmCfg = function (msg) {
   llmReadCfg();
   renderLlm();
   const s = $("mask");
-  if (s && s.classList.contains("show")) openLlm();
+  if (s && s.classList.contains("show")) llmRepaint();
   if (m) toast(m, 4200);
 };
 
@@ -5894,7 +5942,7 @@ async function importFullBackup() {
 Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,

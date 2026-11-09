@@ -480,10 +480,12 @@ html:not(.inApp) .app-only{display:none}
         <div class="tx"><b>资产月报</b><span id="monthlyHint">按月看收益、构成与资产变动</span></div>
         <button class="go" onclick="event.stopPropagation();openMonthly()">查看</button>
       </div>
-      <div class="entry" onclick="go('pg-trade')">
-        <div class="ic">⇄</div>
-        <div class="tx"><b>交易中心</b><span id="tradeHint">按时间查看买入、赎回与收益</span></div>
-        <button class="go" onclick="event.stopPropagation();openTrade()">进入</button>
+      <!-- v104：首页原「交易中心」快捷入口换成「债市晴雨表」。交易记录/新增交易
+           仍从底部「交易」tab 进（pg-trade 内 + 新增交易按钮不变），功能不丢。 -->
+      <div class="entry" onclick="openMarket()">
+        <div class="ic">晴</div>
+        <div class="tx"><b>债市晴雨表</b><span id="marketHint">债市行情 · 代入台账问模型</span></div>
+        <button class="go" onclick="event.stopPropagation();openMarket()">查看</button>
       </div>
       <!-- v63：体检的台账页入口。放整行而不是产品名后面挂个小链接 ——
            它是「组合级」的动作（选一只来查），跟资产月报、交易中心是同一层。 -->
