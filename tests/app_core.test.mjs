@@ -1212,7 +1212,9 @@ test("放宽只用于显示与文案，不许用于真调用：登录 / 抓取 /
                "llmStatusLine", "llmSetKey", "openLlm", "llmSend",
                /* v104：openLlm 的渲染体拆到 renderLlmSheet，inShellHost 仍在
                   llmDegrade 那句文案里，位置没变 —— 只是登记新函数宿主。 */
-               "renderLlmSheet"];
+               "renderLlmSheet",
+               /* v108：AI 研判的入口同样以 llmDegrade 说那句话，位置与 llmSend 一模一样。 */
+               "briefRun"];
   const hits = [...APP_SRC.matchAll(/inShellHost\(\)/g)];
   assert.ok(hits.length >= 8, `只读到 ${hits.length} 处 inShellHost()，锚点变了要同步改这条`);
   for (const m of hits) {
@@ -1677,9 +1679,15 @@ test("v69 __llmDone 只经由 llmMetaOf 读元信息，那句兜底话不许当�
   assert.ok(i > 0, "__llmDone 的签名变了：两侧回调的契约门禁（verify-web 第 2f 项）要跟着改");
   const body = src.slice(i + sig.length, src.indexOf("\n};", i));
   const uses = (body.match(/metaJson/g) || []).length;
-  assert.equal(uses, 1, "handler 里又出现一次 metaJson（共 " + uses + " 次）：元信息的读法只许 llmMetaOf 一处，"
+  /* v108：__llmDone 成了分发器（研判 / 追问各一条支路），研判那一支把原文**原样转交**
+     给 briefDone —— 那里同样只经由 llmMetaOf 读。所以这里允许 2 处，但除「转交」与
+     「交给 llmMetaOf」之外不许出现第三种用法；「读法只许一处」这条不变量一个字没松。 */
+  assert.ok(uses <= 2, "handler 里又出现一次 metaJson（共 " + uses + " 次）：元信息的读法只许 llmMetaOf 一处，"
     + "1.0.220 那次「名字对得上、类型对不上」就是两处各读各的读法");
   assert.match(body, /llmMetaOf\(metaJson\)/, "handler 没把元信息交给 llmMetaOf");
+  const rest = body.replace(/llmMetaOf\(metaJson\)/g, "").replace(/briefDone\(metaJson\)/g, "");
+  assert.ok(!/metaJson/.test(rest),
+    "handler 里出现了第三种读法：" + (rest.match(/.{0,60}metaJson.{0,60}/) || [""])[0]);
   assert.match(body, /llmMetaErr\(meta, rd\.why, body\.length\)/, "失败那一行的话不是由 llmMetaErr 说的");
   assert.ok(!/["`]原生侧没回元信息["`]/.test(src),
     "「原生侧没回元信息」又被当成文案：真没回是 120 秒超时那条路径说的，"

@@ -33,18 +33,54 @@ export const MARKET_DIR_LABEL = {
 };
 /** BP 窗口（bpTable 里的键顺序）：与私有仓 WINDOWS 同一张表。 */
 export const MARKET_BP_WINDOW_LABEL = ["1日", "5日", "20日", "60日"];
+/** 债市现券收盘时点：银行间债券市场现券买卖 9:00-12:00 / 13:30-17:00。
+    快照 weather.asOf 是「该交易日的日终估值」，所以截止时间就是这个收盘时点。
+    ⚠️ 它是**市场收盘时刻**，不是中债发布时刻（发布在此之后）—— 文案里不许写成
+    「17:00 发布」，那是在替数据源编一个我们并不知道的时间。 */
+export const MARKET_CLOSE_HHMM = "17:00";
 /** 行情来源只认这两档：media/unknown 的「行情」不是行情。 */
 const MARKET_TIERS = ["official", "disclosure"];
 /** aiText 长度上限：防异常大文本撑爆 LLM 快照与弹窗。 */
 const AI_TEXT_MAX = 2000;
 
-import { esc } from "./util.js";
+import { esc, pad } from "./util.js";
 
 /** 严格 YYYY-MM-DD 且是真日期（EM 的「2026-11-06 00:00:00」后缀不许漏进来）。 */
 export function isIsoDate(s) {
   if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const d = new Date(s + "T00:00:00Z");
   return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+/**
+ * 快照截止时间：「截至 2026-11-06 17:00」。
+ * asOf 当天的收盘时点还没到（数据异常 / 系统时间被改）→ 只给日期，
+ * 绝不显示一个尚未发生的时点。无快照、asOf 不合法 → 空串（调用方据此不出那一行）。
+ */
+export function marketCutoffText(m, now = Date.now()) {
+  const asOf = m && m.weather && m.weather.asOf;
+  if (!isIsoDate(asOf)) return "";
+  const close = new Date(`${asOf}T${MARKET_CLOSE_HHMM}:00+08:00`).getTime();
+  if (!isFinite(close)) return `截至 ${asOf}`;
+  return close > now ? `截至 ${asOf}` : `截至 ${asOf} ${MARKET_CLOSE_HHMM}`;
+}
+
+/**
+ * 本机取数时刻的相对时间：「刚刚 / 12 分钟前 / 3 小时前 / 11-08 17:15」。
+ * 跨天就直接给具体时刻 —— 「21 小时前」读起来比「11-08 17:15」费劲得多。
+ * at 为空 → 空串 —— 不许写成「0 秒前」这种假话，调用方拿空串就当没这行。
+ */
+export function marketAgeText(at, now = Date.now()) {
+  const t = Number(at);
+  if (!t || !isFinite(t) || t <= 0) return "";
+  const n = Number(now) || Date.now();
+  const d = Math.max(0, n - t);
+  if (d < 60e3) return "刚刚";
+  if (d < 3600e3) return `${Math.floor(d / 60e3)} 分钟前`;
+  const a = new Date(t), b = new Date(n);
+  if (a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate())
+    return `${Math.floor(d / 3600e3)} 小时前`;
+  return `${pad(a.getMonth() + 1)}-${pad(a.getDate())} ${pad(a.getHours())}:${pad(a.getMinutes())}`;
 }
 
 const isFiniteNum = (v) => typeof v === "number" && isFinite(v);
@@ -191,19 +227,25 @@ function matrixHtml(cells, rows, cols, caption) {
  * 弹窗面板 HTML（「模型接入」弹层里的债市行情区块）。
  * m 为 null（云端还没写过 / 读取失败 / 校验没过）→ 空串，区块整个不出现；
  * verified=false → 照常展示但标「未核验」，不给核验章。
+ * opts.cut=false → 不渲染截止时间那行：债市页的状态条已经把它写在最上面了，
+ *   同一个时点在同一屏出现两遍只会让人以为自己看错了。模型接入页没有状态条，
+ *   所以那边默认照常显示。
  */
-export function marketPanelHtml(m) {
+export function marketPanelHtml(m, opts = {}) {
   if (!m || typeof m !== "object") return "";
-  const w = m.weather;
   const st = marketStat(m);
   const groups = marketGroups(m);
   const verified = !!(m.meta && m.meta.verified === true);
   const badge = verified
     ? `<span class="mkt-ok">已核验</span>`
     : `<span class="mkt-bad">未核验</span>`;
+  /* v107：截止时间。原来标题里只挂 asOf，用户看不出「这份行情到几点为止」；
+     现在按「该交易日现券收盘」补上时点，口径写在小字里。 */
+  const cut = opts && opts.cut === false ? "" : marketCutoffText(m);
   return `<div class="mkt-wrap" style="margin-top:12px">
-    <div class="card-t"><h2 style="font-size:14px">债市行情 ${esc(w.asOf)}</h2>
+    <div class="card-t" style="margin-bottom:6px"><h2 style="font-size:14px">债市行情</h2>
       <span class="hint">${badge} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}（33 格）</span></div>
+    ${cut ? `<div class="mkt-cut"><b>${esc(cut)}</b><span class="mkt-cut-x">日终估值 · 现券 ${esc(MARKET_CLOSE_HHMM)} 收盘</span></div>` : ""}
     ${matrixHtml(groups.rate, MARKET_RATE_ISSUERS, MARKET_RATE_TENORS, "利率债（收益率曲线每日方向）")}
     ${matrixHtml(groups.credit, MARKET_CREDIT_ISSUERS, MARKET_CREDIT_TENORS, "信用债（中短票据曲线，AA+/AA 只发布至 1 年）")}
     <div class="cap" style="padding-top:4px">${esc((m.meta && m.meta.disclaimer) || "")}</div>

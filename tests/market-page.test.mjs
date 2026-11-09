@@ -17,8 +17,8 @@ const sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");
 const ref = JSON.parse(fs.readFileSync(path.join(root, "data/market.reference.json"), "utf8"));
 
 /* 切出一组顶层函数（含 async），拼进同一 new Function 作用域。
-   这两函数依赖 MARKET / marketStat / marketPanelHtml / marketAiTextSafe，
-   由调用方以参数注入，故提取后能真跑。 */
+   这几函数依赖 MARKET / MARKET_ST / marketStat / marketPanelHtml / marketAiTextSafe /
+   marketCutoffText / marketStateBar，由调用方以参数注入，故提取后能真跑。 */
 function grabFns(names) {
   const parts = [];
   for (const n of names) {
@@ -33,7 +33,7 @@ function grabFns(names) {
   parts.push(`return {${names.join(",")}};`);
   return new Function(parts.join("\n"))();
 }
-const F = grabFns(["marketHintText", "marketHeroHtml"]);
+const F = grabFns(["marketHintText", "marketStateBar", "marketHeroHtml", "marketRefresh"]);
 const stat = m => {
   const st = { up: 0, down: 0, flat: 0, none: 0 };
   for (const c of (m?.weather?.cells || [])) if (st[c.dir] !== undefined) st[c.dir] += 1;
@@ -41,11 +41,34 @@ const stat = m => {
 };
 const panelOk = m => `<PANEL ${m.weather.asOf}>`;                 /* 替身：只判有没有调 */
 const aiOk = m => (m.meta && m.meta.verified === true) ? "aiText" : "";
+const barOk = () => "<BAR>";
+/* 与源码同口径的截止时间替身（asOf 一律已过 17:00，测试不依赖跑测的系统时间） */
+const cutOk = m => (m && m.weather && m.weather.asOf) ? `截至 ${m.weather.asOf} 17:00` : "";
+const ST_IDLE = { phase: "idle", at: 0, err: "", cached: false };
 /* 把被切出的函数与它的自由变量放进同一 new Function 作用域，再执行一次。 */
-const runHint = m => new Function("MARKET", "marketStat",
-  `${F.marketHintText.toString()}; return marketHintText();`)(m, stat);
-const runHero = m => new Function("MARKET", "marketPanelHtml", "marketAiTextSafe", "esc",
-  `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(m, panelOk, aiOk, s => String(s));
+const runHint = (m, st = ST_IDLE) => new Function("MARKET", "MARKET_ST", "marketStat", "marketCutoffText",
+  `${F.marketHintText.toString()}; return marketHintText();`)(m, st, stat, cutOk);
+const runHero = (m, st = ST_IDLE) => new Function("MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
+  `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(m, st, panelOk, aiOk, s => String(s), barOk);
+/* 把 marketRefresh 整段切出来放进一个独立作用域跑：MARKET / _mktBusy 在作用域里声明，
+   其余依赖全部注入 —— 这样成功 / 失败 / 在途去重三条路径都是真跑，不是读源码猜。 */
+function mkRefresh({ cfg = () => true, fetchIt = async () => ref, sync = { owner: "o", repo: "r" } } = {}) {
+  const calls = { paint: 0, save: 0, toast: [] };
+  const st = ST();
+  const factory = new Function(
+    "syncCfgOk", "fetchMarket", "MARKET_ST", "SYNC", "marketPaint", "marketCacheSave", "toast",
+    `let MARKET = null; let _mktBusy = null;
+     ${F.marketRefresh.toString()}
+     return { r: marketRefresh, getM: () => MARKET, setM: v => { MARKET = v; } };`);
+  const inst = factory(cfg, fetchIt, st, sync,
+    () => calls.paint++, () => calls.save++, m => calls.toast.push(m));
+  return { ...inst, calls, st };
+}
+
+const ageOk = at => (at ? "5 分钟前" : "");
+const runBar = (m, st) => new Function("MARKET", "MARKET_ST", "esc", "marketCutoffText", "marketAgeText", "marketStaleText",
+  `${F.marketStateBar.toString()}; return marketStateBar();`)(m, st, s => String(s), cutOk, ageOk, () => "");
+const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */
 test("首页原交易中心快捷入口已换成债市晴雨表，底部交易 tab 保留", () => {
@@ -80,8 +103,11 @@ test("LLM.host 默认 llm；两个入口各设各的宿主", () => {
   assert.ok(/host: "llm"/.test(app), "LLM 初始 host 不是 llm");
   assert.ok(/function openLlm\(\) \{ LLM\.host = "llm"; renderLlmSheet\(\); \}/.test(app),
     "openLlm 入口没设 host=llm / 没渲染模型接入页");
-  assert.ok(/function openMarket\(\) \{ LLM\.host = "market"; renderMarketSheet\(\); \}/.test(app),
-    "openMarket 入口没设 host=market / 没渲染债市页");
+  /* v107：openMarket 多了「打开即刷」，不再是单行 —— 按函数体断言，不锁形状 */
+  const i = app.indexOf("function openMarket()");
+  const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
+  assert.ok(src.includes('LLM.host = "market"'), "openMarket 没设 host=market");
+  assert.ok(src.includes("renderMarketSheet()"), "openMarket 没渲染债市页");
 });
 
 test("llmRepaint 按 host 分派到两个宿主渲染", () => {
@@ -146,9 +172,12 @@ test("llmPanelHtml 共用一份：withMarket 控制行情是否内嵌，heading 
 });
 
 /* ---------- 4. 降级口径真跑 ---------- */
-test("marketHintText：有数据显示日期/核验/红绿白蓝；无数据不编数字", () => {
+test("marketHintText：有数据显示截止时点/核验/红绿白蓝；无数据不编数字", () => {
   const good = runHint(ref);
-  assert.ok(good.includes(ref.weather.asOf), "副标题没带数据日期");
+  /* 首页一行宽度有限：日期省年份，时点必须留着（用户要的就是「到几点为止」） */
+  assert.ok(good.includes(ref.weather.asOf.slice(5)), `副标题没带数据日期：${good}`);
+  assert.ok(good.includes("17:00"), `副标题没带截止时点：${good}`);
+  assert.ok(!good.includes("截至"), "首页这行不该再带「截至」二字（宽度不够）");
   assert.ok(good.includes("已核验"), "已核验快照没标已核验");
   assert.ok(good.includes("红 26") && good.includes("绿 3") && good.includes("蓝 4"),
     `统计不对：${good}`);
@@ -170,7 +199,152 @@ test("marketHeroHtml：有数据渲染面板 + 复制按钮；无数据给降级
   assert.ok(!/bp|红 \d|绿 \d/.test(none), "降级文案里却出现了行情数字");
 });
 
-/* ---------- 5. 版本与清单一致（动态读版本，不硬编码 —— 版本钉子已收敛到
+/* ---------- 5. v107：截止时间 / 更新按钮 / 自动刷新 ---------- */
+test("状态条：截止时点 + 本机取数时刻 + 「↻ 更新」，更新中禁用按钮", () => {
+  const i = app.indexOf("function marketStateBar()");
+  assert.ok(i > 0, "找不到 marketStateBar");
+  const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
+  assert.ok(src.includes("marketCutoffText(MARKET)"), "状态条没取截止时间");
+  assert.ok(src.includes("marketAgeText(s.at)"), "状态条没显示本机取数时刻");
+  assert.ok(src.includes('onclick="marketRefresh()"'), "更新按钮没接 marketRefresh");
+  assert.ok(src.includes("↻ 更新"), "按钮文案不是「↻ 更新」");
+  assert.ok(src.includes('run ? "disabled" : ""'), "更新中没禁用按钮（连点会重复发请求）");
+  /* 两块时间必须分开：数据截止 ≠ 本机取数时刻 */
+  assert.ok(src.includes("mkt-bar-l") && src.includes("mkt-live"), "两块时间没分开展示");
+});
+
+test("状态条三态真跑：空闲给截止+本机时刻、更新中禁用按钮、失败给原因且不丢旧数据", () => {
+  /* ① 空闲且有数据 */
+  const idle = runBar(ref, ST({ at: Date.now() - 5 * 60e3 }));
+  assert.ok(idle.includes("截至 2026-11-06 17:00"), `空闲态没显示截止时间：${idle}`);
+  assert.ok(idle.includes("本机更新 5 分钟前"), "空闲态没显示本机取数时刻");
+  assert.ok(idle.includes("↻ 更新") && !idle.includes("disabled"), "空闲态按钮不可用");
+  /* ② 更新中：按钮变「更新中…」并禁用（连点会重复发请求） */
+  const run = runBar(ref, ST({ phase: "loading", at: 1 }));
+  assert.ok(run.includes("正在向私有仓取最新快照"), "更新中没给进度文案");
+  assert.ok(run.includes("更新中…") && run.includes("disabled"), "更新中按钮没禁用");
+  /* ③ 失败：给原因，且明说下面仍是旧数据 */
+  const err = runBar(ref, ST({ phase: "err", at: 1, err: "HTTP 401 bad credentials" }));
+  assert.ok(err.includes("更新失败") && err.includes("HTTP 401"), "失败态没给原因");
+  assert.ok(err.includes("仍是上次取到的数据"), "失败态没交代旧数据仍在");
+  /* ④ 缓存：标明来源，别把缓存说成刚更新的 */
+  const cache = runBar(ref, ST({ at: Date.now() - 3 * 3600e3, cached: true }));
+  assert.ok(cache.includes("本机缓存"), "缓存没标来源");
+  assert.ok(!cache.includes("本机更新"), "缓存被说成了本机更新");
+  /* ⑤ 从没取过：不许编时间 */
+  const none = runBar(null, ST());
+  assert.ok(none.includes("还没取过数据"), "空状态没说实话");
+  assert.ok(!/分钟前|小时前/.test(none), "空状态却编了个时间");
+});
+
+test("marketHeroHtml：状态条排在最前；降级分支也带状态条（没数据时按钮是唯一出路）", () => {
+  const i = app.indexOf("function marketHeroHtml()");
+  const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
+  const b = src.indexOf("marketStateBar()");
+  const p = src.indexOf("marketPanelHtml(MARKET");
+  assert.ok(b > 0 && p > b, "状态条必须排在行情面板之前");
+  /* 截止时间只在状态条出现一次；面板里那行在债市页要关掉（同一屏两遍会让人以为看错了） */
+  assert.ok(src.includes("{ cut: false }"), "债市页面板没关掉重复的截止时间行");
+  assert.ok(/const bar = marketStateBar\(\);/.test(src), "状态条没被两个分支共用");
+  const none = runHero(null);
+  assert.ok(none.includes("<BAR>"), "没数据时状态条被吞了，用户点不到「更新」");
+});
+
+test("债市页把行情区包进 #mktHero；刷新只重画这一块，不整页重绘", () => {
+  const i = app.indexOf("function renderMarketSheet()");
+  const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
+  assert.ok(src.includes('<div id="mktHero">'), "行情区没有 #mktHero 挂点，局部重绘无处落笔");
+  const p = app.indexOf("function marketPaint()");
+  const ps = app.slice(p, app.indexOf("\nfunction ", p + 5));
+  assert.ok(ps.includes('$("mktHero")'), "marketPaint 没重画 #mktHero");
+  assert.ok(!ps.includes("renderMarketSheet()"), "marketPaint 整页重绘会冲掉用户正在输、还没发的对话框内容");
+});
+
+test("自动刷新：启动先装缓存再静默拉；打开债市页按 TTL 触发", () => {
+  const i = app.indexOf("function marketBoot()");
+  const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
+  assert.ok(src.includes("marketCacheLoad()"), "启动没先装本机缓存");
+  assert.ok(src.includes("marketRefresh({ silent: true })"), "启动没静默拉一次最新");
+  assert.ok(/\n  marketBoot\(\);/.test(app), "init 里没调 marketBoot");
+  const j = app.indexOf("function openMarket()");
+  const os = app.slice(j, app.indexOf("\nfunction ", j + 5));
+  assert.ok(os.includes("MARKET_TTL"), "openMarket 没按 TTL 判要不要刷");
+  assert.ok(os.includes("marketRefresh({ silent: true })"), "openMarket 没触发静默刷新");
+});
+
+test("marketRefresh 挂 window（更新按钮走内联 onclick）", () => {
+  const i = app.indexOf("Object.assign(window, {");
+  const j = app.indexOf("});", i);
+  assert.ok(app.slice(i, j).includes("marketRefresh"), "window 桥接清单漏了 marketRefresh");
+});
+
+test("本机缓存按 owner/repo 隔离，读回来还要过 validateMarket；写缓存不走 saveLocal", () => {
+  const i = app.indexOf("function marketCacheLoad()");
+  const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
+  assert.ok(src.includes("o.owner !== SYNC.owner"), "缓存没按 owner 隔离（换库会串台）");
+  assert.ok(src.includes("o.repo !== SYNC.repo"), "缓存没按 repo 隔离");
+  assert.ok(src.includes("validateMarket(o.m)"), "缓存没复验 —— 磁盘上的东西同样不可信");
+  const j = app.indexOf("function marketCacheSave()");
+  const ss = app.slice(j, app.indexOf("\nfunction ", j + 5));
+  assert.ok(!ss.includes("saveLocal()"), "写缓存不该走 saveLocal（会把 DIRTY 置脏、白推 GitHub）");
+});
+
+test("刷新失败不清空旧快照（网络抖动不该让人丢掉本来能看的行情）", () => {
+  const i = app.indexOf("function marketRefresh(");
+  const src = app.slice(i, app.indexOf("\nfunction marketBoot()"));
+  /* 成功分支才赋值；失败分支只写状态，不许把 MARKET 清成 null */
+  assert.ok(src.includes("MARKET = m;"), "成功分支没把新快照装进内存");
+  assert.ok(!/catch[\s\S]*?MARKET = null/.test(src), "失败分支把旧快照清空了");
+  /* 整包同步那条路同样不许无条件覆盖：赋值必须被 if (mkt) 包着 */
+  const k = app.indexOf("MARKET = mkt;");
+  assert.ok(k > 0, "syncPull 没把顺带取到的快照装进内存");
+  assert.ok(app.slice(Math.max(0, k - 80), k).includes("if (mkt) {"),
+    "syncPull 还是无条件 MARKET = mkt（拿不到就清空）");
+});
+
+test("marketRefresh 真跑：成功置 ok / 写缓存 / 重绘；失败留旧数据；在途去重只发一次", async () => {
+  /* ① 成功 */
+  const a = mkRefresh();
+  a.setM({ marker: "old" });
+  const ok = await a.r({ silent: true });
+  assert.equal(ok, true, "拿到快照却报失败");
+  assert.equal(a.st.phase, "ok", "成功没把状态置 ok");
+  assert.ok(a.st.at > 0, "成功没记本机取数时刻");
+  assert.equal(a.st.cached, false, "成功刷新后还标着缓存");
+  assert.equal(a.calls.save, 1, "成功没写缓存（下次冷启动又空白）");
+  assert.equal(a.getM(), ref, "快照没装进内存");
+  assert.ok(a.calls.paint >= 2, "成功前后都该重绘（先转圈、后落数据）");
+  assert.equal(a.calls.toast.length, 0, "静默刷新不该弹 toast");
+
+  /* ② 失败：旧数据必须还在，且给出原因 */
+  const b = mkRefresh({ fetchIt: async () => null });
+  const old = { marker: "keep-me" };
+  b.setM(old);
+  const bad = await b.r({ silent: true });
+  assert.equal(bad, false, "拿不到快照却报成功");
+  assert.equal(b.st.phase, "err", "失败没置 err");
+  assert.ok(b.st.err.includes("没读到快照"), `失败原因不对：${b.st.err}`);
+  assert.equal(b.getM(), old, "失败把旧快照清空了 —— 网络抖动不该让人丢掉能看的行情");
+  assert.equal(b.calls.save, 0, "失败还写了缓存");
+
+  /* ③ 在途去重：连点「更新」只发一次请求 */
+  let n = 0;
+  const c = mkRefresh({ fetchIt: async () => { n++; await new Promise(r => setTimeout(r, 20)); return ref; } });
+  const [r1, r2] = await Promise.all([c.r({ silent: true }), c.r({ silent: true })]);
+  assert.equal(n, 1, `连点发了 ${n} 次请求，应只发 1 次`);
+  assert.equal(r1, true);
+  assert.equal(r2, true);
+
+  /* ④ 没配同步：不发请求，直接给可执行的下一步 */
+  let n2 = 0;
+  const d = mkRefresh({ cfg: () => false, sync: { owner: "", repo: "" }, fetchIt: async () => { n2++; return ref; } });
+  const noCfg = await d.r({ silent: true });
+  assert.equal(noCfg, false);
+  assert.equal(n2, 0, "没配同步还发了请求");
+  assert.ok(d.st.err.includes("未配置数据同步"), `文案没指路：${d.st.err}`);
+});
+
+/* ---------- 7. 版本与清单一致（动态读版本，不硬编码 —— 版本钉子已收敛到
    handlers.test.mjs 一处，这里有写死的版本号会被它拦下） ---------- */
 test("APP_VER / SW CACHE 同步，market.js 仍在离线清单", () => {
   const ver = app.match(/const APP_VER = "(v\d+)"/)?.[1];

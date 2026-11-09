@@ -23,7 +23,8 @@ import { navStatsPush, navStatsSummary, NAVSTATS_TMO_RE } from "./js/core/navsta
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
   computePosition } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
-import { configureCalendar, suggestTradeDates, tradeDaysBetween } from "./js/domain/calendar.js";
+import { configureCalendar, suggestTradeDates, tradeDaysBetween,
+  isTradeDay, prevTradeDay } from "./js/domain/calendar.js";
 import { normTomb, mergeTombs, purgeTombs, applyTombs as applyTombsIn } from "./js/domain/tomb.js";
 import { mergeForPush, stampMs } from "./js/domain/sync.js";
 import { syncBadge, syncLine } from "./js/domain/syncstatus.js";
@@ -49,7 +50,7 @@ import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
 /* v100：债市晴雨表（私有仓每日官方曲线推导，公开仓只读）。校验/分组/面板/快照块
    判据全收口在 js/core/market.js（tests/market.test.mjs 与私有仓同一条契约）。 */
 import { MARKET_SCHEMA, validateMarket, marketAiBlock, marketAiTextSafe,
-  marketPanelHtml, marketStat } from "./js/core/market.js";
+  marketPanelHtml, marketStat, marketCutoffText, marketAgeText } from "./js/core/market.js";
 /* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
    只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。
    v98：补 shelfFreshness（快照过期判据）与 agentViaTag（代销口径短标签），
@@ -57,6 +58,13 @@ import { MARKET_SCHEMA, validateMarket, marketAiBlock, marketAiTextSafe,
 import WEBANK_SHELF from "./js/core/webank-shelf.js";
 import { matchShelf, shelfTags, shelfClass, agentBanks, hasAgents, groupedFields,
   shelfMeta, shelfFreshness } from "./js/core/webank.js";
+/* v108：AI 研判（T4）—— 把「专家怎么想」收口成编排层。
+   这一层只做四件事：装配数据块 / 算指纹 / 容错解析 + 逐条校验 / 画卡片。
+   口径（数字本地算、明细档默认、不做收益预测、每条带依据、不修补坏 JSON）全部
+   收口在 js/domain/brief.js 的文件头注释里，改动前先读那五条。 */
+import { BRIEF_PROMPT_VER, BRIEF_MAX_CHARS, BRIEF_TIER_DETAIL, BRIEF_TIER_AGG, BRIEF_TIER_LABEL,
+  BRIEF_QUESTION, briefMetrics, briefBuild, briefFingerprint, extractJson, normBrief,
+  briefCardHtml, briefRawHtml, briefEmptyHtml, briefSummaryText } from "./js/domain/brief.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -76,7 +84,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v106";
+const APP_VER = "v108";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -163,6 +171,20 @@ const OFFICIAL_FEED_PATH = "official-rules.json";
    与 MARKET_SCHEMA 是同一条契约，校验收口在 js/core/market.js。 */
 const MARKET_PATH = "market.json";
 let MARKET = null;
+/* ---------- v107：债市快照的取数与刷新状态 ----------
+   为什么另开一条通道：v100-v106 的 MARKET 只在 syncPull（整包拉 licai-data.json）
+   里取，而且只进内存 —— 冷启动到同步完成之间、以及没配同步时，债市页永远是
+   「暂无行情数据」。这条通道只拉 market.json 一个文件（约 10KB），三个时机触发：
+     ① 启动（配了同步就静默拉一次）
+     ② 打开债市页、且距上次成功超过 MARKET_TTL
+     ③ 用户点「更新」
+   读不到不清空旧快照：一次网络抖动不该让人丢掉本来能看的行情，只在状态行说实话。
+   缓存进 localStorage 而不是 DATA —— 进账本就跟着整文件同步来回搬，还会把
+   一个「附带信息」变成推送负载。 */
+const LS_MARKET = "licai.marketCache";
+const MARKET_TTL = 10 * 60 * 1000;      /* 打开债市页的自动刷新阈值 */
+const MARKET_ST = { phase: "idle", at: 0, err: "", cached: false };
+let _mktBusy = null;                    /* 在途去重：连点「更新」只发一次请求 */
 let RULES_QUOTES = {};
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳；
    v95：seen = 已提醒过的「产品id@披露日」去重集（B1）；quiet/thresh 默认档出自
@@ -2056,6 +2078,9 @@ function renderAna(force) {
       切换「隐藏金额」不会让它作废。结论缓存在本机，不进 licai-data.json，也不推云端。
     </div>
     <div class="row-btn" style="margin-top:12px">
+      <button class="btn pri" style="flex:1" onclick="openBriefProduct('${p.id}')">用 AI 把这一只读一遍</button>
+    </div>
+    <div class="row-btn" style="margin-top:6px">
       <button class="btn gh" style="flex:1" onclick="refreshAna('${p.id}')">强制重算</button>
       <button class="btn gh" style="flex:1" onclick="clearAnaCache()">清空缓存</button>
     </div>`);
@@ -2105,7 +2130,11 @@ function openAnaIndex() {
     </div>
     ${rows}
     ${anaPortfolioLine()}
-    <div class="cap" style="padding:10px 0 0">结论缓存在本机，不进 licai-data.json，也不推云端。</div>`);
+    <div class="row-btn" style="margin-top:10px">
+      <button class="btn pri" style="flex:1" onclick="openBriefPortfolio()">用 AI 把整个组合读一遍</button>
+    </div>
+    <div class="cap" style="padding:10px 0 0">结论缓存在本机，不进 licai-data.json，也不推云端。
+      上面那颗按钮是另一条路：它会把明细发到你自己配的模型端点，产出的是<b>信息整理</b>，不构成投资建议。</div>`);
 }
 
 /* ============================================================
@@ -2143,6 +2172,7 @@ const LLM = { phase: "idle", id: "", buf: null, meta: null, res: null, q: "", er
   host: "llm" };
 /** 这个会话已经发出去几个请求（含失败与超时的那些 —— 它们多半已经计费了，占额度）。 */
 function llmUsed() { return LLM.turns.length + (LLM.turn ? 1 : 0); }
+
 /** 台账快照的入参数组：只挑 llmSnapshot 认的那十个字段。
     这里刻意不碰 SYNC、不碰任何凭据与仓库信息 —— 少一个入口少一处能漏的地方。 */
 function llmSnapItems() {
@@ -2333,6 +2363,12 @@ function llmResultHtml() {
 function llmHistoryHtml() {
   if (!LLM.turns.length) return "";
   const rows = LLM.turns.map((t, i) => {
+    /* v108：研判那一轮不在这里铺开 —— 它的完整结论就在上方卡片里，
+       再抄一遍等于同一份东西占两屏。它仍然会作为上文发给模型（llmTranscript 只读 q/a）。 */
+    if (t && t.briefRound) {
+      return `<div class="note" style="margin-top:8px">第 ${i + 1} 轮 · ${esc(t.q)}
+        <div class="cap" style="padding-top:4px">研判请求 · 结论不在此重复（追问时会作为上文发出去）</div></div>`;
+    }
     const src = (t.sources && t.sources.length)
       ? `<div class="cap" style="padding-top:4px">出处 ${t.sources.length} 条 · 形状 ${esc(t.shape || "—")}</div>`
       : `<div class="cap" style="padding-top:4px">这一轮没有可核实的出处</div>`;
@@ -2348,24 +2384,68 @@ function llmHistoryHtml() {
    清上文 / 勾台账 / 存配置全部走它，按 host 分派。若这些点直接调 openLlm()，
    在债市晴雨表页发一句，答案回来会被换成「模型接入」页，行情当场消失。 */
 function openLlm() { LLM.host = "llm"; renderLlmSheet(); }
-function openMarket() { LLM.host = "market"; renderMarketSheet(); }
+function openMarket() {
+  LLM.host = "market";
+  renderMarketSheet();
+  /* v107 打开即刷：手里这份超过 TTL 就静默拉一次（先显示旧数据，回来只重画行情区）。
+     不 await —— 网络慢不该让「点开债市」这件事卡在转圈上。 */
+  if (Date.now() - (MARKET_ST.at || 0) > MARKET_TTL) marketRefresh({ silent: true });
+}
 function llmRepaint() {
   if (LLM.host === "market") renderMarketSheet();
+  else if (LLM.host === "brief") renderBriefSheet();
   else renderLlmSheet();
 }
-/** 首页「债市晴雨表」入口副标题：把数据日期与核验状态摆到点开之前。
+/** 首页「债市晴雨表」入口副标题：把数据截止时点与核验状态摆到点开之前。
     没数据就说实话，不编日期也不编数字。 */
 function marketHintText() {
-  if (!MARKET) return "债市行情 · 未读取到快照（需配置数据同步）";
+  if (!MARKET) {
+    if (MARKET_ST.phase === "loading") return "债市行情 · 正在读取最新快照…";
+    if (MARKET_ST.phase === "err") return "债市行情 · 没读到快照（点开可重试）";
+    return "债市行情 · 未读取到快照（需配置数据同步）";
+  }
   const st = marketStat(MARKET);
   const ok = !!(MARKET.meta && MARKET.meta.verified === true);
-  return `${MARKET.weather.asOf} · ${ok ? "已核验" : "未核验"} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}`;
+  /* 首页这一行只有一行宽度：截止时点省掉「截至」二字，日期省掉年份（债市数据不会
+     落后一年），时点保留 —— 4 个统计数字一个都不能省，省哪个都会让「红绿白蓝加起来
+     不等于 33」变得看不出来。完整日期在弹层状态条里给。 */
+  const cut = marketCutoffText(MARKET).replace(/^截至 (\d{4}-)?/, "") || MARKET.weather.asOf;
+  return `${cut} · ${ok ? "已核验" : "未核验"} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}`;
 }
-/** 债市页上部：行情矩阵 + 复制快照。MARKET=null 给降级说明（不编造数字）。 */
+/** 截止时间 + 本机取数时刻 + 更新按钮。两块时间分开写、不合并：
+    上面那行是「数据截止到哪个时点」（行情本身的属性），
+    下面那行是「我们这台机器什么时候取到的」（本机行为）—— 混成一句就成了含糊的「更新时间」。 */
+function marketStateBar() {
+  const s = MARKET_ST;
+  const run = s.phase === "loading";
+  const cut = MARKET ? marketCutoffText(MARKET) : "";
+  const stale = MARKET ? marketStaleText(MARKET) : "";
+  const age = marketAgeText(s.at);
+  let live;
+  if (run) live = `<span class="mkt-live">正在向私有仓取最新快照…</span>`;
+  else if (s.phase === "err") {
+    /* 拆两行：s.err 自己常带括号，再套一层「（下面仍是…）」就成了括号套括号，
+       读起来要倒回去数。失败原因一行、旧数据仍在另一行，各说一件事。 */
+    live = `<span class="mkt-live mkt-live-bad">更新失败：${esc(s.err)}</span>`
+      + (MARKET ? `<span class="mkt-live">下面仍是上次取到的数据，可以继续看</span>` : "");
+  }
+  else if (age) live = `<span class="mkt-live">${s.cached ? "本机缓存" : "本机更新"} ${esc(age)}</span>`;
+  else live = `<span class="mkt-live">还没取过数据</span>`;
+  return `<div class="mkt-bar">
+    <div class="mkt-bar-l">
+      <b>${cut ? `${esc(cut)}<span class="mkt-cut-x" style="margin-left:7px;font-weight:400">现券收盘</span>` : "暂无快照"}</b>
+      ${stale ? `<span class="mkt-stale">${esc(stale)}</span>` : ""}
+      ${live}
+    </div>
+    <button class="mkt-upd" ${run ? "disabled" : ""} onclick="marketRefresh()">${run ? "更新中…" : "↻ 更新"}</button>
+  </div>`;
+}
+/** 债市页上部：状态条 + 行情矩阵 + 复制快照。MARKET=null 给降级说明（不编造数字）。 */
 function marketHeroHtml() {
-  if (!MARKET) return `<div class="note b">暂无行情数据：债市快照来自私有仓 market.json，
-    请先在「设置 → 数据同步」配置好再拉取。没读到就按没有处理，页面不编造任何数字。</div>`;
-  return marketPanelHtml(MARKET)
+  const bar = marketStateBar();
+  if (!MARKET) return `${bar}<div class="note b" style="margin-top:10px">暂无行情数据：债市快照来自私有仓 market.json，
+    点上面的「↻ 更新」立刻拉一次；拉不到就按没有处理，页面不编造任何数字。</div>`;
+  return bar + marketPanelHtml(MARKET, { cut: false })
     + (marketAiTextSafe(MARKET)
       ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>`
       : "");
@@ -2452,7 +2532,7 @@ function renderLlmSheet() {
 function renderMarketSheet() {
   closeSheet();
   openSheet(`<div class="sheet-t"><h3>债市晴雨表</h3><button class="x" onclick="closeSheet()">✕</button></div>
-    ${marketHeroHtml()}
+    <div id="mktHero">${marketHeroHtml()}</div>
     ${llmStatusLine()}
     ${llmPanelHtml(false, "代入台账接着问模型")}`);
 }
@@ -2538,8 +2618,11 @@ function llmTimeout(id) {
 }
 /* 原生回传的两个全局函数：名字与 LlmBridge.java 里拼的 JS 必须逐字一致，
    scripts/verify-web.sh 第 3 项就是比对这个（对不上是「点了没反应」，构建不会红）。 */
+
 window.__llmChunk = function (id, seq, total, text) {
-  if (!id || String(id) !== LLM.id || LLM.phase !== "running") return;   /* 迟到的一律丢，别串到下一轮 */
+  const who = llmRoute(id);
+  if (who === "brief") { briefChunk(seq, total, text); return; }
+  if (who !== "llm" || LLM.phase !== "running") return;   /* 迟到的一律丢，别串到下一轮 */
   const r = llmChunkFeed(LLM.buf, Number(seq), Number(total), String(text == null ? "" : text));
   LLM.buf = r.st;
   if (r.error) {
@@ -2549,7 +2632,11 @@ window.__llmChunk = function (id, seq, total, text) {
   }
 };
 window.__llmDone = function (id, metaJson) {
-  if (!id || String(id) !== LLM.id) return;
+  /* v108：研判与追问共用这一个回调，先分流再各走各的。分流必须在 clearTimeout 之前 ——
+     研判的计时器归 BRIEF.timer，追问的归 LLM.timer，串了就有一边永远不清。 */
+  const who = llmRoute(id);
+  if (who === "brief") { briefDone(metaJson); return; }
+  if (who !== "llm") return;
   if (LLM.timer) { clearTimeout(LLM.timer); LLM.timer = 0; }
   if (LLM.phase !== "running") return;                 /* 已经按超时落定：迟到的答案不再翻案 */
   /* 「元信息用不了」有四样，v69 起分开说（读法与文案都挪到 js/domain/llm.js，有单测）。
@@ -4065,6 +4152,116 @@ async function fetchMarket() {
     return null;
   }
 }
+/* ---------- v107：债市快照刷新（缓存 / 自动 / 手动） ----------
+   三者共用 marketRefresh 一个出口 —— 复制第二份取数逻辑就等于第二处鉴权与降级口径，
+   这个项目已经在 fetchRulesFeed 上踩过一次（v83 Q5），不再犯第二遍。 */
+
+/** 读本机缓存。owner/repo 必须与当前配置一致 —— 换库之后旧库的行情不许借壳出现。
+    缓存也要过一遍 validateMarket：磁盘上的东西同样不可信。 */
+function marketCacheLoad() {
+  try {
+    const raw = localStorage.getItem(LS_MARKET);
+    if (!raw) return false;
+    const o = JSON.parse(raw);
+    if (!o || !o.m || o.owner !== SYNC.owner || o.repo !== SYNC.repo) return false;
+    const chk = validateMarket(o.m);
+    if (!chk.ok) { console.warn(`本机债市缓存校验未过，丢弃：${chk.why}`); return false; }
+    MARKET = o.m;
+    MARKET_ST.at = Number(o.at) || 0;
+    MARKET_ST.cached = true;
+    MARKET_ST.phase = "idle";
+    return true;
+  } catch (e) { return false; }
+}
+
+/** 写缓存。写失败（隐私模式 / 配额满）不影响这一轮的显示，静默跳过。 */
+function marketCacheSave() {
+  if (!MARKET) return;
+  try {
+    localStorage.setItem(LS_MARKET, JSON.stringify({
+      owner: SYNC.owner, repo: SYNC.repo, at: MARKET_ST.at, m: MARKET,
+    }));
+  } catch (e) { }
+}
+
+/** 最近一个「已经收盘、曲线该发出来」的交易日。
+    今天若是交易日但还没到 17:00，当日曲线本来就还没出 —— 期望值退回上一交易日，
+    否则每个交易日白天都会误报「落后 1 天」。 */
+function marketExpectedAsOf(now = new Date()) {
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (isTradeDay(today) && mins >= 17 * 60) return today;
+  return prevTradeDay(today);
+}
+
+/** 落后几个交易日（0 = 跟得上）。asOf 不合法 / 日历读不到 → 空串，宁可不提示。 */
+function marketStaleText(m) {
+  const asOf = m && m.weather && m.weather.asOf;
+  if (!asOf) return "";
+  const want = marketExpectedAsOf();
+  if (!want || asOf >= want) return "";
+  const n = tradeDaysBetween(asOf, want);
+  if (!n) return "";
+  return `行情落后 ${n} 个交易日（云端每日 3 次更新，最近一次若在收盘前，当日曲线要等下一轮）`;
+}
+
+/** 只重画「会变的那两块」：债市页的行情区 + 首页副标题。
+    不整页 renderMarketSheet —— 那会把用户正在输、还没发的对话框内容冲掉。 */
+function marketPaint() {
+  const hero = $("mktHero");
+  if (hero) hero.innerHTML = marketHeroHtml();
+  if ($("marketHint")) $("marketHint").textContent = marketHintText();
+}
+
+/**
+ * 拉一次最新快照。
+ * @param {{silent?: boolean}} [opts] silent=true 时不弹 toast（自动刷新用）
+ * @returns {Promise<boolean>} 是否拿到并通过校验
+ */
+function marketRefresh(opts = {}) {
+  if (_mktBusy) return _mktBusy;
+  if (!syncCfgOk()) {
+    MARKET_ST.phase = "err";
+    MARKET_ST.err = SYNC.owner || SYNC.repo
+      ? "同步未就绪（缺令牌，或本机 App 还是旧壳）"
+      : "未配置数据同步（设置 → 数据同步）";
+    marketPaint();
+    return Promise.resolve(false);
+  }
+  MARKET_ST.phase = "loading";
+  MARKET_ST.err = "";
+  marketPaint();
+  _mktBusy = (async () => {
+    try {
+      const m = await fetchMarket();
+      if (!m) throw new Error("没读到快照（文件不存在，或结构/符号/禁用词校验未过）");
+      MARKET = m;
+      MARKET_ST.phase = "ok";
+      MARKET_ST.err = "";
+      MARKET_ST.at = Date.now();
+      MARKET_ST.cached = false;
+      marketCacheSave();
+      marketPaint();
+      if (opts.reason === "manual") toast(`债市已更新 · ${m.weather.asOf}`, 2400);
+      return true;
+    } catch (e) {
+      MARKET_ST.phase = "err";
+      MARKET_ST.err = String((e && e.message) || e).slice(0, 140);
+      marketPaint();
+      if (!opts.silent) toast(`债市更新失败：${MARKET_ST.err}`, 3800);
+      return false;
+    } finally { _mktBusy = null; }
+  })();
+  return _mktBusy;
+}
+
+/** 启动时：先装缓存（有就立刻能看），再静默拉一次最新的。 */
+function marketBoot() {
+  marketCacheLoad();
+  if (!syncCfgOk()) return;      /* 没配同步就别白发一次必然失败的请求 */
+  marketRefresh({ silent: true });
+}
+
 /* 手动触发云端抓取（#延时对策，2026-09-16）：
    GitHub 免费仓库的 schedule 是「尽力而为」，实测延迟 2-9.5 小时且可能被跳过 ——
    点这个按钮用 workflow_dispatch 立刻触发一次（官方接口，非定时任务、无排队延迟）。
@@ -5240,7 +5437,17 @@ async function syncPull(manual) {
         { name: "信披主源", feed }, { name: "官网第二源", feed: offFeed }]);
       RULES_QUOTES = rulesStat.quotes;      /* 只给展示层，绝不写进 DATA */
     }
-    MARKET = mkt;
+    /* v107：这次整包同步若顺带拿到了债市快照，就把它记成「本机刚更新过」；
+       拿不到（404 / 校验没过 / 网络失败）**不清空手里那份** —— 旧行情仍然有效，
+       状态行会照实说「更新失败，下面仍是上次取到的数据」。 */
+    if (mkt) {
+      MARKET = mkt;
+      MARKET_ST.at = Date.now();
+      MARKET_ST.cached = false;
+      MARKET_ST.phase = "ok";
+      MARKET_ST.err = "";
+      marketCacheSave();
+    }
     saveLocal();
     applyCalendarConfig();   /* 云端可能补了新的年份 / 截止时间 */
     const pullVer = _POS_VER;
@@ -5987,15 +6194,397 @@ async function importFullBackup() {
    启动
    ============================================================ */
 
+/* ============================================================
+   T4 · AI 研判（v108）
+   ============================================================ */
+
+/* ---------- AI 研判（v108 · T4）----------
+   与上面的 LLM 会话是两套状态：研判是一次性任务（一次点击 = 一次请求），追问才是会话。
+   两套各自一个 id，回传靠 llmRoute() 分流 —— 共用 LLM.id 会让「研判回来的字」
+   串到「追问的缓冲」里，那种错从屏幕上完全看不出来。 */
+const LS_BRIEF = "licai.briefCache";
+/** 研判缓存最多留几份：按目标（组合/每只产品）各一份，超了丢最旧的。
+    只存本机 —— 它含持仓判断，推云端等于把「我对某只产品的看法」多存一份。 */
+const BRIEF_CACHE_MAX = 8;
+/** 一次会话里最多点几次研判。与 LLM_MAX_ROUNDS 同理：每一份都是一次真实计费。 */
+const BRIEF_MAX_RUNS = 6;
+const BRIEF = {
+  target: null,          /* {kind:"portfolio"} | {kind:"product", id} */
+  phase: "idle",         /* idle | building | running | done | error */
+  id: "", buf: null, fp: "", tier: BRIEF_TIER_DETAIL,
+  res: null, raw: "", err: "", at: 0, chars: 0, dropped: null, timer: 0,
+  runs: 0,               /* 本次页面生命周期内已发几次（刷新归零，与 LLM 轮次同一口径） */
+  stale: "",             /* 缓存命中但指纹已变时的那句话 */
+};
+/** 研判缓存键：组合与单只分开存，互不覆盖。 */
+function briefKey(t) {
+  const x = t || BRIEF.target || { kind: "portfolio" };
+  return x.kind === "product" ? "p:" + String(x.id || "") : "all";
+}
+function briefCacheRead() {
+  try {
+    const raw = localStorage.getItem(LS_BRIEF);
+    const o = raw ? JSON.parse(raw) : null;
+    return (o && typeof o === "object" && !Array.isArray(o)) ? o : {};
+  } catch (e) { return {}; }
+}
+function briefCachePut(entry) {
+  try {
+    const all = briefCacheRead();
+    all[briefKey()] = entry;
+    const keys = Object.keys(all);
+    /* 超量按 at 从旧到新丢 —— 缓存只是省一次请求，不是账本，丢了不心疼。 */
+    if (keys.length > BRIEF_CACHE_MAX) {
+      keys.sort((a, b) => (Number(all[a] && all[a].at) || 0) - (Number(all[b] && all[b].at) || 0));
+      for (const k of keys.slice(0, keys.length - BRIEF_CACHE_MAX)) delete all[k];
+    }
+    localStorage.setItem(LS_BRIEF, JSON.stringify(all));
+  } catch (e) { /* 存不下不影响这一次的结果：结论已经在屏幕上 */ }
+}
+function briefCacheGet() {
+  const e = briefCacheRead()[briefKey()];
+  if (!e || typeof e !== "object") return null;
+  if (Number(e.at) <= 0 || (!e.res && !e.raw)) return null;
+  return e;
+}
+/** 宿主三：AI 研判（v108）。上部是一份结论，下部是追问框 —— 追问走的就是宿主一那套
+    （同一个 llmPanelHtml、同一套轮次与计费口径），所以"和现在一样"是结构上的一样，
+    不是照着画了一遍。 */
+function renderBriefSheet() {
+  closeSheet();
+  let pack = null, packErr = "";
+  try { pack = briefPack(); } catch (e) { packErr = String(e); }
+  const label = briefTargetLabel();
+  const built = pack && pack.built;
+  const chars = built ? built.chars : (BRIEF.chars || 0);
+  const cap = BRIEF_MAX_CHARS[BRIEF.tier] || BRIEF_MAX_CHARS[BRIEF_TIER_DETAIL];
+  const running = BRIEF.phase === "running";
+  /* 指纹变了 = 台账或债市有更新，下面这份是旧的。这句话必须画在卡片上方，
+     画在卡片里会被当成"结论的一部分"读过去。 */
+  let stale = "";
+  if ((BRIEF.res || BRIEF.raw) && BRIEF.fp && pack && pack.fp && pack.fp !== BRIEF.fp) {
+    stale = "数据已变（这份生成于 " + briefTimeText(BRIEF.at) + "）—— 点「重新研判」看新的";
+  }
+  const hasOut = !!(BRIEF.res || BRIEF.raw);
+  const btnText = running ? "生成中…"
+    : (BRIEF.phase === "error" ? "重试（另计一次）"
+      : (hasOut ? "重新研判（另计一次）" : "生成研判（1 次请求）"));
+  const tierBtn = (t, txt) => `<button class="bf-chip${BRIEF.tier === t ? " on" : ""}"
+      onclick="briefTierSet('${t}')" ${running ? "disabled" : ""}>${txt}</button>`;
+  const area = briefCardArea(stale);
+  openSheet(`<div class="sheet-t"><h3>AI 研判</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    <div class="bf-bar">
+      <div class="bf-tgt"><b>${esc(label)}</b>
+        <span>${esc(BRIEF_TIER_LABEL[BRIEF.tier] || BRIEF_TIER_LABEL[BRIEF_TIER_DETAIL])} · 本次 ${chars} 字${chars > cap ? "（超上限，已砍块）" : ""}</span>
+      </div>
+      <button class="btn pri bf-go" ${running ? "disabled" : ""} onclick="briefRun(${hasOut ? "true" : "false"})">${btnText}</button>
+    </div>
+    <div class="bf-chips">${tierBtn(BRIEF_TIER_DETAIL, "明细档")}${tierBtn(BRIEF_TIER_AGG, "聚合档（不发产品名）")}</div>
+    ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：${built.blocks.map(b => esc(BRIEF_BLOCK_LABEL[b.key] || b.key) + " " + b.chars + " 字").join(" · ")}${built.dropped.length ? ` · <b>未带上 ${esc(built.dropped.map(k => BRIEF_BLOCK_LABEL[k] || k).join("、"))}</b>` : ""}</div>` : ""}
+    ${packErr ? `<div class="note r">装配数据块时出错：${esc(packErr)}</div>` : ""}
+    ${area}
+    <div class="cap" style="padding:10px 0 0">
+      发出去的是<b>产品明细</b>：名称、机构、代码、风险级、业绩基准、净值与日期、份额、成本、持有天数
+      ${DATA.settings.hideAmount ? "（本机开着「隐藏金额」，份额与成本已隐去）" : ""}。
+      结论只存本机，<b>不写台账、不推云端</b>；模型说的话不会自动改任何一条数据。
+      点一次按钮就是一次请求、一次计费 —— 数据没变时第二次点击不会再发（除非按「重新研判」）。
+    </div>
+    ${llmPanelHtml(false, "追问这一份研判")}`);
+}
+/** 卡片区：运行中 / 出错 / 结构化 / 原文降级 / 空态，五种，一一对应，不混着写。 */
+function briefCardArea(stale) {
+  if (BRIEF.phase === "running") {
+    return `<div class="bf bf-run"><div class="bf-dot"></div>
+      <div><b>正在生成这一份研判</b><div class="bf-run-s">一次请求 · 通常 15 到 35 秒 · 不会自动重发</div></div></div>
+      <div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="briefCancel()">取消这一份（不再等 · 已发出的那一发撤回不了）</button></div>`;
+  }
+  if (BRIEF.phase === "error") {
+    return `<div class="bf bf-err"><b>这一份没生成出来</b><div>${esc(BRIEF.err || "原因不明")}</div>
+      <div class="bf-run-s">错误原样摊开，没有替你猜原因；代码不会自己重发。</div></div>`;
+  }
+  if (BRIEF.res) return briefCardHtml(BRIEF.res, {
+    tier: BRIEF.tier, chars: BRIEF.chars, dropped: BRIEF.dropped, stale,
+    atText: briefTimeText(BRIEF.at),
+  });
+  if (BRIEF.raw) return briefRawHtml(BRIEF.raw, { stale, atText: briefTimeText(BRIEF.at) });
+  if (!llmBridge()) {
+    return briefEmptyHtml("网页版没有模型桥：密钥与端点都在 App 里，这个功能只在手机上可用。");
+  }
+  if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) {
+    return briefEmptyHtml("还没配端点或密钥。去「设置 → 模型接入」填好，回来点上面的按钮。");
+  }
+  return briefEmptyHtml("点上面的「生成研判」：把台账、体检与债市装配成一次请求。");
+}
+/**
+ * 打开研判层。
+ * @param {{kind?: string, id?: string}} [t]
+ */
+function openBrief(t) {
+  if (BRIEF.phase === "running") return toast("这一份还在生成，等它落定再切换目标", 3400);
+  BRIEF.target = t || { kind: "portfolio" };
+  LLM.host = "brief";
+  /* 切目标必须清干净：不清就会把上一只的结论画在新目标头上 —— 那种错看起来"很像真的"。 */
+  BRIEF.res = null; BRIEF.raw = ""; BRIEF.err = ""; BRIEF.dropped = null;
+  BRIEF.fp = ""; BRIEF.at = 0; BRIEF.phase = "idle";
+  const e = briefCacheGet();
+  if (e) {
+    BRIEF.tier = e.tier === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
+    BRIEF.fp = String(e.fp || ""); BRIEF.at = Number(e.at) || 0;
+    BRIEF.chars = Number(e.chars) || 0;
+    BRIEF.res = e.res || null; BRIEF.raw = String(e.raw || "");
+    BRIEF.dropped = e.dropped || null;
+    BRIEF.phase = (BRIEF.res || BRIEF.raw) ? "done" : "idle";
+  }
+  renderBriefSheet();
+}
+function openBriefPortfolio() { openBrief({ kind: "portfolio" }); }
+function openBriefProduct(pid) {
+  const p = DATA.products.find(x => x.id === pid);
+  if (!p) return toast("产品不存在，请刷新后重试");
+  openBrief({ kind: "product", id: pid });
+}
+function briefTierSet(t) {
+  if (BRIEF.phase === "running") return toast("生成中不能换档，等它落定", 3000);
+  BRIEF.tier = t === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
+  renderBriefSheet();
+}
+
+/* ---------- AI 研判：装配 / 发送 / 回传（v108 · T4）----------
+   与追问的最大区别：研判是**一次性任务**，一次点击 = 一次请求 = 一次计费。
+   所以这里没有多轮、没有自动重试，失败就是失败，重来的按钮在人手里。 */
+
+/** 每只产品的事实（供 briefBuild 装配）。
+    指标全在本地算完再交出去 —— 模型拿不到原始序列，也就没有"自己算一遍"的机会。 */
+function briefItems() {
+  return DATA.products.map(p => {
+    const pos = position(p);
+    return {
+      id: p.id, name: p.name, inst: p.inst, code: p.prodCode || p.code || "",
+      risk: p.riskLevel, benchmark: p.benchmark || "",
+      kind: p.inst || "未填",
+      nav: pos.lastNav, navDate: pos.lastDate || "",
+      shares: pos.shares, cost: pos.cost, holdDays: pos.holdDays,
+      state: pos.inTransit ? "在途（份额未确认）"
+        : (pos.shares > 0 ? "持仓中" : (hasAnyTradeIn(p, DATA.trades) ? "已清仓" : "从未建仓")),
+      metrics: briefMetrics(navSeries(p)),
+    };
+  });
+}
+/** 组合层汇总：市值合计、按市值加权的持有天数、品类数、在途笔数。
+    加权而不是算术平均 —— 一只 1 万的持 300 天，不该和一只 50 万的持 5 天平权。 */
+function briefTotals(items) {
+  let value = 0, wsum = 0, dsum = 0, inTransit = 0;
+  const kinds = {};
+  for (const it of items) {
+    const v = Number(it.shares) * Number(it.nav);
+    if (it.shares > 0 && isFinite(v) && v > 0) {
+      value += v;
+      if (Number(it.holdDays) > 0) { dsum += Number(it.holdDays) * v; wsum += v; }
+    }
+    if (/在途/.test(String(it.state || ""))) inTransit++;
+    if (it.inst) kinds[it.inst] = 1;
+  }
+  return { value, weightedDays: wsum > 0 ? dsum / wsum : 0, kinds: Object.keys(kinds).length, inTransit };
+}
+/** 组合层的体检：两条组合判据 + 各只的 warn/bad（最多 6 条，bad 优先）。
+    只把「要注意/有问题」交出去 —— 11 项全列会让模型把注意力摊到 8 个"正常"上。 */
+function briefPortfolioChecks(items) {
+  const rows = items.filter(it => it.shares > 0 && Number(it.nav) > 0)
+    .map(it => ({ id: it.id, name: it.name, market: it.shares * it.nav }));
+  const out = portfolioChecks(rows, DATA.products.length);
+  const td = today();
+  const bad = [];
+  for (const p of DATA.products) {
+    let cs = [];
+    try { cs = runChecks({ p, trades: DATA.trades, td, pos: position(p), st: navStats(p) }); }
+    catch (e) { continue; }   /* 单只算不出来不该让整份研判发不出去 */
+    for (const c of cs) {
+      if (c.level === "bad" || c.level === "warn") bad.push({ key: c.key, level: c.level, title: prodLabel(p) + " · " + c.title, text: c.text });
+    }
+  }
+  bad.sort((a, b) => (a.level === "bad" ? 0 : 1) - (b.level === "bad" ? 0 : 1));
+  return out.concat(bad.slice(0, 6));
+}
+/** 目标名（画在弹层标题与按钮上）。 */
+function briefTargetLabel() {
+  const t = BRIEF.target || { kind: "portfolio" };
+  if (t.kind === "product") {
+    const p = DATA.products.find(x => x.id === t.id);
+    return p ? prodLabel(p) : "这只产品";
+  }
+  return "整个组合";
+}
+/** 装配一次：数据块、指纹、字数。**不发请求**，所以可以随便调（重绘时也在调）。 */
+function briefPack() {
+  const t = BRIEF.target || { kind: "portfolio" };
+  const all = briefItems();
+  let items = all, checks = [];
+  if (t.kind === "product") {
+    items = all.filter(it => it.id === t.id);
+    const p = DATA.products.find(x => x.id === t.id);
+    if (p) {
+      try { checks = runChecks({ p, trades: DATA.trades, td: today(), pos: position(p), st: navStats(p) }); }
+      catch (e) { checks = []; }
+    }
+  } else {
+    checks = briefPortfolioChecks(all);
+  }
+  const totals = briefTotals(items);
+  const built = briefBuild({
+    target: t, items, checks, totals, market: MARKET, tier: BRIEF.tier,
+    hide: !!DATA.settings.hideAmount, today: today(),
+  });
+  const fp = briefFingerprint({
+    target: t, items,
+    marketAsOf: (MARKET && MARKET.weather && MARKET.weather.asOf) || "",
+    tier: BRIEF.tier, ver: BRIEF_PROMPT_VER,
+  });
+  return { built, fp, items, totals, checks };
+}
+/** 数据块的中文名：给用户看的字，不许把 portfolio/check 这些键名直接画到屏幕上。 */
+const BRIEF_BLOCK_LABEL = { portfolio: "台账", product: "产品", check: "体检", market: "债市" };
+/** 指纹一样的第二份不发 —— 省的不只是钱，还有「同一个东西看两遍」的困惑。 */
+function briefFpNow() {
+  try { return briefPack().fp; } catch (e) { return ""; }
+}
+function briefTimeText(at) {
+  const t = Number(at);
+  if (!t) return "时间不明";
+  const d = new Date(t);
+  const p = n => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 发起一次研判。
+ * @param {boolean} [force] true = 忽略「数据没变」这一条，照样重发（按钮上写明了另计一次）
+ */
+function briefRun(force) {
+  const b = llmBridge();
+  if (!b) return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4400);
+  if (BRIEF.phase === "running") return toast("这一份还在生成，等它落定（不要连点，连点就是连花）", 3600);
+  llmReadCfg();
+  if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) {
+    return toast("先在「模型接入」里配好端点与密钥，研判走的是同一条路", 4400);
+  }
+  if (BRIEF.runs >= BRIEF_MAX_RUNS) {
+    return toast("这一屏已经研判 " + BRIEF_MAX_RUNS + " 次，到数就停 —— 每一份都是一次计费。刷新页面可重新计数。", 6400);
+  }
+  const pack = briefPack();
+  if (!force && BRIEF.fp && BRIEF.fp === pack.fp && (BRIEF.res || BRIEF.raw)) {
+    BRIEF.stale = "";
+    briefRepaint();
+    return toast("数据没变，直接用上一份（没有再发请求）", 3200);
+  }
+  BRIEF.phase = "running";
+  BRIEF.id = "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  BRIEF.buf = null; BRIEF.err = ""; BRIEF.raw = ""; BRIEF.res = null; BRIEF.dropped = null;
+  BRIEF.chars = pack.built.chars; BRIEF.fp = pack.fp; BRIEF.at = 0; BRIEF.stale = "";
+  BRIEF.runs++;
+  BRIEF.timer = setTimeout(() => {
+    if (BRIEF.phase !== "running") return;
+    BRIEF.phase = "error";
+    BRIEF.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一发可能已经计费）";
+    BRIEF.buf = null; BRIEF.id = "";
+    briefRepaint();
+  }, LLM_TIMEOUT_MS);
+  try {
+    b.ask(BRIEF.id, JSON.stringify(llmReq({ input: pack.built.input, instructions: pack.built.instructions })));
+  } catch (e) {
+    clearTimeout(BRIEF.timer); BRIEF.timer = 0;
+    BRIEF.phase = "error"; BRIEF.id = ""; BRIEF.err = "桥调用失败：" + e;
+  }
+  briefRepaint();
+}
+/** 取消：与追问同一条口径 —— 这是「不再等」，不是「撤回」，可能已经计费。 */
+function briefCancel() {
+  if (BRIEF.phase !== "running") return toast("这一份已经落定了，没有要取消的东西", 3000);
+  const id = BRIEF.id, b = llmBridge();
+  if (BRIEF.timer) { clearTimeout(BRIEF.timer); BRIEF.timer = 0; }
+  BRIEF.id = ""; BRIEF.phase = "idle"; BRIEF.buf = null;
+  if (b && b.cancel) { try { b.cancel(id); } catch (e) { /* 原生没接上也只是继续断开连接 */ } }
+  briefRepaint();
+  toast("已取消这一份（不再等它，但那一发可能已经计费）", 4200);
+}
+/** 只重绘研判这一层。刻意不复用 llmRepaint：那一支在 host 被换成 market 时会把
+    债市弹层画出来，而研判的回传迟到时不该顺手改别的宿主。 */
+function briefRepaint() {
+  if (LLM.host === "brief") renderBriefSheet();
+}
+function briefChunk(seq, total, text) {
+  if (BRIEF.phase !== "running") return;
+  const r = llmChunkFeed(BRIEF.buf, Number(seq), Number(total), String(text == null ? "" : text));
+  BRIEF.buf = r.st;
+  if (r.error) {
+    BRIEF.phase = "error"; BRIEF.err = "分块组装失败：" + r.error; BRIEF.buf = null; BRIEF.id = "";
+    briefRepaint();
+  }
+}
+/** 研判回来的那一段：先认元信息，再抠 JSON，再逐条校验。三级降级就在这里落地。 */
+function briefDone(metaJson) {
+  if (BRIEF.timer) { clearTimeout(BRIEF.timer); BRIEF.timer = 0; }
+  if (BRIEF.phase !== "running") return;      /* 已经按超时/取消落定：迟到的答案不翻案 */
+  const rd = llmMetaOf(metaJson);
+  const meta = rd.meta;
+  const body = BRIEF.buf ? llmChunkJoin(BRIEF.buf) : "";
+  BRIEF.buf = null; BRIEF.id = "";
+  if (!meta || !meta.ok) {
+    BRIEF.phase = "error";
+    BRIEF.err = llmMetaErr(meta, rd.why, body.length);
+    if (meta && meta.status) BRIEF.err += "（HTTP " + meta.status + "）";
+    briefRepaint(); return;
+  }
+  const obj = extractJson(body);
+  if (!obj) {
+    /* L2：模型没按格式回。原文照登，但标明「未结构化」—— 不修补、不硬塞进卡片。 */
+    BRIEF.phase = "done"; BRIEF.res = null; BRIEF.raw = body; BRIEF.at = Date.now();
+    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: null, raw: body, chars: BRIEF.chars, dropped: null });
+    briefRepaint(); return;
+  }
+  const nr = normBrief(obj);
+  if (!nr.ok) {
+    BRIEF.phase = "error";
+    BRIEF.err = String(nr.why || "模型输出没能通过校验");
+    briefRepaint(); return;
+  }
+  BRIEF.phase = "done"; BRIEF.res = nr.brief; BRIEF.raw = ""; BRIEF.at = Date.now();
+  BRIEF.dropped = nr.dropped || null;
+  briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: nr.brief, raw: "", chars: BRIEF.chars, dropped: nr.dropped || null });
+  /* 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。
+     它占一轮额度（确实计了一次费），LLM.turns 的长度就是 already-used 的口径。
+     ★ a 存的是**摘要**不是原始 JSON：llmHistoryHtml 会把 a 原样画在屏幕上，
+       一整段 JSON 铺开既难读又占半屏，而结论已经在上面那张卡片里了。 */
+  LLM.turns.push({
+    q: "（上一轮是「" + briefTargetLabel() + "」的研判请求）",
+    a: briefSummaryText(nr.brief),
+    briefRound: true,
+    err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 },
+  });
+  briefRepaint();
+}
+/** 回传分流：两套状态各一个 id。认不出来的一律丢 —— 迟到的不许串到下一轮。 */
+function llmRoute(id) {
+  const s = id == null ? "" : String(id);
+  if (!s) return "";
+  if (LLM.id && s === LLM.id) return "llm";
+  if (BRIEF.id && s === BRIEF.id) return "brief";
+  return "";
+}
 /* ---------- 内联事件桥 ----------
    ES module 的顶层函数不再自动成为 window 属性，而 index.html 与各渲染函数里
    的内联 onclick/oninput 仍按全局查找。这里显式把入口挂回 window。
    ⚠️ 新增内联 handler 时必须同步加进这个清单 ——
    tests/handlers.test.mjs 会扫描 index.html / app.js 里的内联调用做双向校验。 */
+/* v108：AI 研判的 5 个内联入口（组合 / 单只 + 生成 / 取消 / 换档）。
+   openBrief 本身不进清单：它只被这两个入口调用、没有内联引用，
+   而 handlers.test.mjs 会把「清单里有、内联里没有」当错误报出来。
+   ⚠️ 这段注释必须留在 Object.assign 之外：清单的解析按逗号切分，
+   写在花括号里会把整段注释当成一个名字。 */
 Object.assign(window, {
+  openBriefPortfolio, openBriefProduct, briefRun, briefCancel, briefTierSet,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefresh, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
@@ -6009,6 +6598,10 @@ Object.assign(window, {
   /* 启动即做一次数据迁移：销售代码→产品代码、重复产品合并 */
   const migrated = migrateData();
   $("btnHide").textContent = DATA.settings.hideAmount ? "显示" : "隐藏";
+  /* v107：债市快照。先装本机缓存（有就立刻能看），再静默拉一次最新的。
+     它与下面那条 syncPull 各走各的：只拉 market.json 一个文件，
+     不 await、也不影响首屏 —— 谁先回来都不挡路。 */
+  marketBoot();
   renderHome(); renderSet();
   if (migrated) notifyMigrate();
   /* 上次手动抓取若在系统回收时还没跑完，启动后接着追踪（12 分钟上限自动兜底） */

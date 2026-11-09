@@ -18,6 +18,7 @@ import {
   MARKET_DIR_LABEL, MARKET_BP_WINDOW_LABEL,
   isIsoDate, validateMarket, marketGroups, marketStat,
   marketAiTextSafe, marketAiBlock, marketPanelHtml,
+  MARKET_CLOSE_HHMM, marketCutoffText, marketAgeText,
 } from "../js/core/market.js";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -254,4 +255,44 @@ test("常量契约：格数 33、BP 窗口 4 档标签、目录标签全中文",
   assert.deepEqual(MARKET_BP_WINDOW_LABEL, ["1日", "5日", "20日", "60日"]);
   assert.equal(MARKET_DIR_LABEL.up.includes("收益率下行"), true);
   assert.equal(MARKET_DIR_LABEL.down.includes("收益率上行"), true);
+});
+
+/* ---------- v107：截止时间与相对时间（纯函数，直接真跑） ----------
+   这一组的语义要点：
+   · 「截至 17:00」是**市场收盘**时点，不是数据发布时刻 —— 常量与文案不许写成「发布」；
+   · 未来时点绝不显示（asOf 当天的 17:00 还没到就只给日期）；
+   · 取数时刻为空就返回空串，不许写「0 秒前」这种假话。 */
+test("marketCutoffText：asOf + 17:00；无快照/坏日期给空串", () => {
+  const at = Date.parse("2026-11-10T09:00:00+08:00");     /* asOf 已过：正常显示时点 */
+  assert.equal(marketCutoffText(REF, at), `截至 2026-11-06 ${MARKET_CLOSE_HHMM}`);
+  assert.equal(marketCutoffText(null, at), "");
+  assert.equal(marketCutoffText({ weather: { asOf: "2026-11-31" } }, at), "");
+  assert.equal(marketCutoffText({ weather: {} }, at), "");
+});
+
+test("marketCutoffText：当日收盘时点还没到 → 只给日期，不显示没发生的时点", () => {
+  const before = Date.parse("2026-11-06T16:59:00+08:00");
+  assert.equal(marketCutoffText(REF, before), "截至 2026-11-06");
+  const after = Date.parse("2026-11-06T17:00:01+08:00");
+  assert.equal(marketCutoffText(REF, after), `截至 2026-11-06 ${MARKET_CLOSE_HHMM}`);
+});
+
+test("marketAgeText：刚刚 / 分钟 / 小时 / 跨天给月日时分；空值给空串", () => {
+  const now = Date.parse("2026-11-09T15:00:00+08:00");
+  assert.equal(marketAgeText(now - 30e3, now), "刚刚");
+  assert.equal(marketAgeText(now - 12 * 60e3, now), "12 分钟前");
+  assert.equal(marketAgeText(now - 3 * 3600e3, now), "3 小时前");
+  assert.equal(marketAgeText(Date.parse("2026-11-08T17:15:00+08:00"), now), "11-08 17:15");
+  assert.equal(marketAgeText(0, now), "");
+  assert.equal(marketAgeText(null, now), "");
+  assert.equal(marketAgeText("abc", now), "");
+  /* 时钟回拨（at 在未来）不许出现负数 */
+  assert.equal(marketAgeText(now + 60e3, now), "刚刚");
+});
+
+test("marketPanelHtml：截止时间进面板，「17:00」配的是收盘口径，不是发布口径", () => {
+  const html = marketPanelHtml(REF);
+  assert.ok(html.includes(`截至 ${REF.weather.asOf} ${MARKET_CLOSE_HHMM}`), "面板里没有截止时间");
+  assert.ok(html.includes("现券") && html.includes("收盘"), "截止时点没写口径");
+  assert.ok(!html.includes("17:00 发布") && !html.includes("发布时刻"), "把收盘时点说成了发布时刻");
 });
