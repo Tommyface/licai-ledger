@@ -278,11 +278,15 @@ test("marketCutoffText：当日收盘时点还没到 → 只给日期，不显�
 });
 
 test("marketAgeText：刚刚 / 分钟 / 小时 / 跨天给月日时分；空值给空串", () => {
-  const now = Date.parse("2026-11-09T15:00:00+08:00");
+  /* 这两个时刻必须用**本地时区**构造（new Date(y,m,d,...)），不能用 "…+08:00" 字面量。
+     函数是给本机用户看的：跨天那条走 getHours()，按运行时的本机时区格式化。
+     用 +08:00 字面量构造，UTC 的 CI 上就会读出「09:15」——那是测试写错了，不是函数错了。
+     构造与格式化同处一个时区，这条断言在任何 runner 时区下都成立。 */
+  const now = new Date(2026, 10, 9, 15, 0, 0).getTime();
   assert.equal(marketAgeText(now - 30e3, now), "刚刚");
   assert.equal(marketAgeText(now - 12 * 60e3, now), "12 分钟前");
   assert.equal(marketAgeText(now - 3 * 3600e3, now), "3 小时前");
-  assert.equal(marketAgeText(Date.parse("2026-11-08T17:15:00+08:00"), now), "11-08 17:15");
+  assert.equal(marketAgeText(new Date(2026, 10, 8, 17, 15, 0).getTime(), now), "11-08 17:15");
   assert.equal(marketAgeText(0, now), "");
   assert.equal(marketAgeText(null, now), "");
   assert.equal(marketAgeText("abc", now), "");
