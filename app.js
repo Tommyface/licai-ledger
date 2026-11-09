@@ -17,6 +17,9 @@ import { ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus,
   regCodeOf, regCodeFromCloud } from "./js/core/orgs.js";
 import { parseProductInput, rowAddable } from "./js/core/paste.js";
 import { navSeries, navAt, latestNav, navHit, inQuietWindow, filterNavNotify, newNavItems, navNotifyKey, NOTIFY_DEFAULTS } from "./js/domain/nav.js";
+/* v105 第 0 期：逐源耗时统计（纯函数，单测在 tests/navstats.test.mjs）。
+   只做记录，不参与任何抓取决策 —— 阈值要等这份实测分布出来再定。 */
+import { navStatsPush, navStatsSummary } from "./js/core/navstats.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
   computePosition } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
@@ -73,7 +76,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v104";
+const APP_VER = "v105";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -4120,8 +4123,17 @@ function manStatusHtml() {
        「结论文本里不写钱」是 v74/v75 立的口径，抓取状态属于结论那一侧，
        数字要看就去详情页那一栏（那里是数据展示，不是结论）。 */
     const assetLine = m.asset ? `<br>资产净值：${esc(m.asset)}` : "";
+    /* v105：本机实测的逐源耗时（第 0 期只为取数，不改任何抓取行为）。
+       只列前三慢/前三多，单位秒；后半句如实说口径 —— 这只统计本机、且只含
+       「同一只产品里至少有一条源成功」的那部分，整只超时的样本不在里面。 */
+    const _fs = (DATA.settings || {}).fetchStats;
+    const _sum = nat ? navStatsSummary(_fs) : [];
+    const statLine = _sum.length
+      ? `<br>逐源耗时（本机近 <b>${((_fs && _fs.rounds) || []).length}</b> 轮）：
+        ${_sum.slice(0, 3).map(x => `${esc(ORG_NAME[x.src] || x.src)} <b>${(x.p50 / 1000).toFixed(1)}s</b>/P95 ${(x.p95 / 1000).toFixed(1)}s`).join(" · ")}`
+      : "";
     return `<div class="note g"><b>✅ ${what}成功</b>
-      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}${ruleLine}${regLine}${assetLine}</div>${clear}</div>`;
+      <div class="tip" style="color:inherit;margin-top:4px">${nat ? "开始" : "触发"}时间 <b>${esc(at)}</b>${run} ｜ 耗时 <b>${durTxt(m.dur)}</b>${extra}${late}${warn}${ruleLine}${regLine}${assetLine}${statLine}</div>${clear}</div>`;
   }
   if (m.state === "fail")
     return `<div class="note"><b>❌ ${what}失败</b>${m.conclusion ? `（云端结论：${esc(m.conclusion)}）` : ""}
@@ -4926,6 +4938,9 @@ async function nativeFetchAll(forceExtra) {
 
   let added = 0, fail = 0, last = "";
   const fails = [], srcMap = {}, fetchedNavs = {}, ruleNotes = [], regNotes = [], assetNotes = [];
+  /* v105：本轮逐源耗时。只在本轮内存里攒，收尾时一次性并进 settings.fetchStats ——
+     不逐只落盘，免得每 3 分钟白推一次 GitHub。 */
+  const msBySrc = {}, errBySrc = {};
   let assetChanged = false;
   const runOne = async p => {
     /* 已经有今天的净值就没必要再问秒讯，进一步减少请求 */
@@ -4938,6 +4953,14 @@ async function nativeFetchAll(forceExtra) {
       for (const s of r.sources) {
         if (s.src === "aixhub" && s.error) aixErr = s.error;
         if (s.src === "ledgerme" && s.error) lgmErr = s.error;
+        /* v105 第 0 期：逐源耗时与失败次数（同一只产品里另一条源成功时，失败源也在这份
+           sources 里带着 ms —— navservice 的 srcs 两个分支都 push）。整只全失败的回包
+           不带 sources，所以超时样本这里收不到：这一期只求先有分布，不追求齐。 */
+        if (!s || !s.src) continue;
+        if (typeof s.ms === "number" && isFinite(s.ms) && s.ms >= 0) {
+          (msBySrc[s.src] || (msBySrc[s.src] = [])).push(s.ms);
+        }
+        if (s.error) errBySrc[s.src] = (errBySrc[s.src] || 0) + 1;
       }
     }
     /* 抓取是异步的：期间 syncPull 可能已经把 DATA 整体换成云端对象，
@@ -5074,6 +5097,16 @@ async function nativeFetchAll(forceExtra) {
        告警条、产品详情里的「最新净值取自…」、上次抓取时间都复用云端那套展示，
        不新增界面。没有新增净值时不标脏，避免每 3 分钟白推一次 GitHub。 */
     DATA.settings = DATA.settings || {};
+    /* v105 第 0 期：把本轮逐源耗时并进 settings.fetchStats（滚动 20 轮）。
+       只在这里合并一次，落盘交给下面既有的两条路：added>0 → saveLocal（标脏，下次推送
+       顺手带走）；added===0 → 裸写 localStorage（不标脏，不给 GitHub 添无谓提交）。
+       统计不参与任何抓取决策 —— 阈值等这份分布出来再定（第 2 期）。 */
+    const _stats = navStatsPush(DATA.settings.fetchStats,
+      { t: t0, n: list.length, ms: msBySrc, err: errBySrc });
+    /* 一条样本都没收到就别往账本里塞空壳（首轮全失败时会出现这种轮次） */
+    if (_stats !== DATA.settings.fetchStats && (_stats.rounds || []).length) {
+      DATA.settings.fetchStats = _stats;
+    }
     DATA.settings.lastFetch = {
       time: stampOf(Date.now()), source: "app", total: list.length,
       /* v82 · Q8：`time` 是设备本地串（显示用），`t` 是 epoch 毫秒（判新旧用）。
