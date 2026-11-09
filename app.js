@@ -84,7 +84,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v108";
+const APP_VER = "v109";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -6203,6 +6203,11 @@ async function importFullBackup() {
    两套各自一个 id，回传靠 llmRoute() 分流 —— 共用 LLM.id 会让「研判回来的字」
    串到「追问的缓冲」里，那种错从屏幕上完全看不出来。 */
 const LS_BRIEF = "licai.briefCache";
+/** 缓存版本：**与响应解析口径绑定**，解析方式一改就必须升。
+    v108 首版把整个 HTTP 响应壳（choices/message/usage）当成正文存了下来，
+    那一批条目里根本没有 verdict。不换代的话，v109 打开研判层会先命中这些坏缓存，
+    指纹又没变，于是连请求都不再发 —— 修好的代码永远跑不到。 */
+const BRIEF_CACHE_VER = 2;
 /** 研判缓存最多留几份：按目标（组合/每只产品）各一份，超了丢最旧的。
     只存本机 —— 它含持仓判断，推云端等于把「我对某只产品的看法」多存一份。 */
 const BRIEF_CACHE_MAX = 8;
@@ -6231,7 +6236,7 @@ function briefCacheRead() {
 function briefCachePut(entry) {
   try {
     const all = briefCacheRead();
-    all[briefKey()] = entry;
+    all[briefKey()] = Object.assign({}, entry, { ver: BRIEF_CACHE_VER });
     const keys = Object.keys(all);
     /* 超量按 at 从旧到新丢 —— 缓存只是省一次请求，不是账本，丢了不心疼。 */
     if (keys.length > BRIEF_CACHE_MAX) {
@@ -6244,6 +6249,9 @@ function briefCachePut(entry) {
 function briefCacheGet() {
   const e = briefCacheRead()[briefKey()];
   if (!e || typeof e !== "object") return null;
+  /* 解析口径换代前的条目一律不认：它们可能是拿「整个响应壳」当正文存下的，
+     认了就会让修好的代码永远跑不到（见 BRIEF_CACHE_VER 那段）。 */
+  if (Number(e.ver) !== BRIEF_CACHE_VER) return null;
   if (Number(e.at) <= 0 || (!e.res && !e.raw)) return null;
   return e;
 }
@@ -6470,7 +6478,17 @@ function briefRun(force) {
   if (BRIEF.runs >= BRIEF_MAX_RUNS) {
     return toast("这一屏已经研判 " + BRIEF_MAX_RUNS + " 次，到数就停 —— 每一份都是一次计费。刷新页面可重新计数。", 6400);
   }
-  const pack = briefPack();
+  /* 装配失败必须说出来：v108 首版这里没有兜底，briefPack 一旦抛异常，
+     点按钮就是「什么都不发生」—— 一发请求都没出去，屏上也没有一句话，
+     用户只能猜是不是没点到。这类静默中断比报错难查得多。 */
+  let pack;
+  try { pack = briefPack(); }
+  catch (e) {
+    BRIEF.phase = "error";
+    BRIEF.err = "装配数据失败：" + e + " —— 不是端点的问题，是本地有一条数据读不出来";
+    briefRepaint();
+    return;
+  }
   if (!force && BRIEF.fp && BRIEF.fp === pack.fp && (BRIEF.res || BRIEF.raw)) {
     BRIEF.stale = "";
     briefRepaint();
@@ -6521,24 +6539,77 @@ function briefChunk(seq, total, text) {
   }
 }
 /** 研判回来的那一段：先认元信息，再抠 JSON，再逐条校验。三级降级就在这里落地。 */
+/** 深度推理模型（星火 X2.6 / o1 这一类）把过程放 reasoning_content，content 要等思考完才有。
+    content 空着时把它读出来当「原文」——调用方必须标明这是思考、不是结论。 */
+function briefReasoningText(env) {
+  try {
+    const ch = env && Array.isArray(env.choices) ? env.choices[0] : null;
+    const m = (ch && ch.message) || {};
+    const r = typeof m.reasoning_content === "string" ? m.reasoning_content
+      : (typeof m.reasoning === "string" ? m.reasoning : "");
+    return r.trim();
+  } catch (e) { return ""; }
+}
 function briefDone(metaJson) {
   if (BRIEF.timer) { clearTimeout(BRIEF.timer); BRIEF.timer = 0; }
   if (BRIEF.phase !== "running") return;      /* 已经按超时/取消落定：迟到的答案不翻案 */
   const rd = llmMetaOf(metaJson);
   const meta = rd.meta;
-  const body = BRIEF.buf ? llmChunkJoin(BRIEF.buf) : "";
+  const raw = BRIEF.buf ? llmChunkJoin(BRIEF.buf) : "";
   BRIEF.buf = null; BRIEF.id = "";
   if (!meta || !meta.ok) {
     BRIEF.phase = "error";
-    BRIEF.err = llmMetaErr(meta, rd.why, body.length);
+    BRIEF.err = llmMetaErr(meta, rd.why, raw.length);
     if (meta && meta.status) BRIEF.err += "（HTTP " + meta.status + "）";
     briefRepaint(); return;
   }
-  const obj = extractJson(body);
+  /* ★ 先拆壳，再解析结构 —— v108 首版就是漏了这一步，点「生成研判」后什么都不出。
+     壳回传的是**整个 HTTP 响应体**（LlmBridge 的 succeed() 里 readAll 原样切块），
+     正文在 choices[0].message.content 或 output[] 里，不是 body 本身。
+     直接 extractJson(body) 时，找到的第一个 JSON 对象就是外壳自己，
+     verdict 永远不存在 —— 界面于是停在「生成中…」不动。
+     拆壳这里复用追问那条路的 llmParse，两种请求的读法从此只有一处。 */
+  let env = null;
+  try { env = JSON.parse(raw); } catch (e) { env = null; }
+  const res = env ? llmParse(env) : null;
+  let text = "", note = "";
+  if (!env) {
+    /* body 根本不是 JSON：有些网关（或直连别的厂商）就把正文原样回过来，没有外壳。
+       这一档不许当成错误 —— 它只是没有壳，正文可能就在里面。 */
+    text = String(raw || "").trim();
+  } else if (res && res.ok) {
+    text = res.text;
+  } else if (res && res.error) {
+    /* 业务错误码 / 认不出的形状：把端点自己的原话报出来，「没反应」是最坏的文案 */
+    BRIEF.phase = "error";
+    BRIEF.err = res.error + (meta && meta.status ? "（HTTP " + meta.status + "）" : "");
+    briefRepaint(); return;
+  } else {
+    /* 壳认出来了却没有正文：深度推理模型（这一档模型都会）把内容放在
+       reasoning_content 里、content 还空着。只把思考当原文摆出来并写明，
+       绝不拿思考过程冒充结论 —— 那是把「还没想完」说成「结论如此」。 */
+    text = briefReasoningText(env);
+    if (!text) {
+      BRIEF.phase = "error";
+      BRIEF.err = "响应认出来了，但里面没有正文"
+        + (meta && meta.status ? "（HTTP " + meta.status + "）" : "")
+        + " —— 模型可能只回了思考过程，或输出被截断";
+      briefRepaint(); return;
+    }
+    note = "【模型只回了思考过程，没有落到正文（可能仍在思考或被截断）】\n";
+  }
+  if (!text) {
+    BRIEF.phase = "error";
+    BRIEF.err = "端点回了空响应"
+      + (meta && meta.status ? "（HTTP " + meta.status + "）" : "");
+    briefRepaint(); return;
+  }
+  text = note + text;
+  const obj = extractJson(text);
   if (!obj) {
     /* L2：模型没按格式回。原文照登，但标明「未结构化」—— 不修补、不硬塞进卡片。 */
-    BRIEF.phase = "done"; BRIEF.res = null; BRIEF.raw = body; BRIEF.at = Date.now();
-    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: null, raw: body, chars: BRIEF.chars, dropped: null });
+    BRIEF.phase = "done"; BRIEF.res = null; BRIEF.raw = text; BRIEF.at = Date.now();
+    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, res: null, raw: text, chars: BRIEF.chars, dropped: null });
     briefRepaint(); return;
   }
   const nr = normBrief(obj);

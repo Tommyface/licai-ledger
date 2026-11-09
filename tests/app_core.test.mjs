@@ -1821,3 +1821,48 @@ test("fetchStatus：产品代码与登记编码各归各的判据", () => {
   assert.equal(a.ok, true);
   assert.match(a.txt, /双线/, "官网 + 中国理财网两条线都能跑时必须说双线");
 });
+
+/* ---------- v109：研判的响应必须先从壳里取正文 ---------- */
+
+test("briefDone 必须先拆壳再解析：llmParse 在场，extractJson 吃的是拆过的正文", () => {
+  /* v108 首版把整个 HTTP 响应体直接喂给 extractJson。壳回的是
+     {choices:[{message:{content:"..."}}],usage:{...}}，找到的第一个 JSON 对象
+     就是外壳自己，verdict 永远不存在 —— 真机上的表现是「点了生成研判什么都不出」，
+     而同一时刻追问是正常的，因为追问那条路一直先 JSON.parse 再 llmParse。
+     这条断言钉住顺序，不是钉住实现细节：正文只在 content / output[] 里。 */
+  const i = APP_SRC.indexOf("function briefDone(");
+  assert.ok(i > 0, "找不到 briefDone");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /llmParse\(env\)/, "briefDone 没有先拆壳（正文藏在 choices[0].message.content 或 output[]）");
+  assert.match(body, /extractJson\(text\)/, "extractJson 必须吃拆过壳的正文，不是整个响应体");
+  assert.ok(!/extractJson\(\s*raw\s*\)/.test(body), "又拿原始响应体去 extractJson 了");
+});
+
+test("深度思考模型只回 reasoning_content 时有兜底，且标明那是思考不是结论", () => {
+  const i = APP_SRC.indexOf("function briefDone(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /briefReasoningText\(env\)/, "没有读 reasoning_content 的兜底：星火 X2.6 这类模型正文可能还没落到 content");
+  assert.match(body, /只回了思考过程/, "把思考过程当结论卖出去了：必须明写这一句");
+});
+
+test("研判装配失败不许静默：briefRun 里 briefPack 有 try/catch", () => {
+  /* v108 首版这里裸调 briefPack()：数据里只要有一条读不出来就抛异常，
+     点按钮的结果是「什么都不发生」—— 一发请求都没出去，屏上也没有一句话。
+     这类静默中断比报错难查得多，所以必须在场。 */
+  const i = APP_SRC.indexOf("function briefRun(");
+  assert.ok(i > 0, "找不到 briefRun");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /try\s*\{\s*pack\s*=\s*briefPack\(\)\s*;?\s*\}/, "briefPack 没有兜底，异常时会静默中断");
+  assert.match(body, /装配数据失败/, "兜底了但没把原因说到屏上");
+});
+
+test("研判缓存换代：解析口径变了，旧条目必须判不认", () => {
+  /* v108 首版把整个响应壳当正文存进 licai.briefCache。若不按版本作废，
+     v109 打开研判层会先命中这些坏条目；指纹又没变，于是连请求都不再发——
+     修好的代码永远跑不到。 */
+  assert.match(APP_SRC, /const BRIEF_CACHE_VER = \d+;/, "没有缓存版本常量");
+  assert.match(APP_SRC, /ver:\s*BRIEF_CACHE_VER/, "写入时没盖版本戳");
+  const i = APP_SRC.indexOf("function briefCacheGet(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /Number\(e\.ver\)\s*!==\s*BRIEF_CACHE_VER/, "读取时不校验版本：旧坏条目还会被认");
+});
