@@ -97,7 +97,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v116";
+const APP_VER = "v117";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -6737,25 +6737,93 @@ function briefTargetLabel() {
   }
   return "整个组合";
 }
-/** 这份研报「拿不到什么」。固定三条，与 report.js 的 reportWatch 分工：
-    观察项说「本机看到了什么异常」，缺口说「本机根本看不到什么」。 */
-const BRIEF_GAPS = [
-  "资金面：没有 DR001 / DR007，判断「回笼是自然到期还是收紧」缺依据",
-  "国债期货：无法区分现券领先还是期货领先",
-  "信用二永成交：只看得到 AAA 曲线，看不到活跃券利差",
-];
+/**
+ * 这份研报「拿不到什么」。与 report.js 的 reportWatch 分工：
+ * 观察项说「本机看到了什么异常」，缺口说「本机根本看不到什么」。
+ *
+ * ★ 必须跟盘中数据同源，不能写死。v117 之前这里是三条常量，那是 v116 之前的事实——
+ * 一旦盘中拿到 T/TL 主力，缺口里还写「无法区分现券领先还是期货领先」，
+ * 模型就会照着缺口判「这块没有」，把已经摆在它面前的期货价一起丢掉。
+ * 实际发生过：正文写成「本机没有 DR001 / DR007 和今日国债期货」，
+ * 而同一份数据里 T 主力就在那儿。
+ * @param {{items?:{key:string}[]} | null} live
+ */
+function briefGaps(live) {
+  const keys = Array.isArray(live && live.items) ? live.items.map(it => it.key) : [];
+  const hasFut = keys.includes("T") || keys.includes("TL");
+  const hasRepo = keys.includes("GC007");
+  const out = [
+    hasRepo
+      /* 有 GC007 也只能说「只有交易所口径」。它和 DR007 不是一回事，
+         直接写「没有 DR001/DR007」会被读成「资金面一项数据都没有」。 */
+      ? "资金面：只有交易所回购 GC007，没有银行间 DR001 / DR007（两者口径不同，不能互替）"
+      : "资金面：没有 DR001 / DR007，判断「回笼是自然到期还是收紧」缺依据",
+  ];
+  if (!hasFut) out.push("国债期货：无法区分现券领先还是期货领先");
+  out.push("信用二永成交：只看得到 AAA 曲线，看不到活跃券利差");
+  return out;
+}
 /**
  * 事实层：这一期研报的全部数字，**全在本地算完**（v112）。
  * 与 briefPack 的分工：这个只产出结构化事实（表格 + 观察项），不发请求、不进指纹；
  * briefPack 把它拼成请求。
  */
+/** 研判里带哪几项：只取核心 5 项。10 项全塞进去，模型反而抓不住重点 ——
+    研报正文只有三段，给它的数越多，越容易写成报菜名。其余 5 项债市页随时能看。 */
+const BRIEF_LIVE_KEYS = ["CN10Y", "CN30Y", "T", "TL", "GC007"];
+
+/**
+ * v117：把此刻层压成研判事实层要的形状。
+ * 没有数据就返回 null —— 调用方据此整段不写，模型也就不会知道有实时行情，
+ * 而不是拿一个空壳让它以为「今天没开盘」。
+ * @returns {{atText:string, phaseLabel:string, srcText:string,
+ *   items:{name:string,valText:string,chgText:string}[], missText:string, nums:number[]}|null}
+ */
+function liveFactsForBrief() {
+  if (!LIVE || !LIVE.quotes) return null;
+  /* 新鲜度闸门：缓存里的「此刻」可能来自昨天或上一场，跨日或超过 90 分钟就不许
+     再叫「此刻」—— 宁可整段不给，也不能拿旧价冒充实时。判据在 liveFresh()，那边有测试。 */
+  if (!LV.liveFresh(LIVE)) return null;
+  const q = LIVE.quotes;
+  const items = [], nums = [];
+  for (const k of BRIEF_LIVE_KEYS) {
+    const x = q[k];
+    if (!x || !isFinite(x.val)) continue;
+    items.push({
+      key: k,
+      name: x.name,
+      valText: LV.liveValText(x) + (x.kind === "price" ? "" : "%"),
+      chgText: LV.liveChgText(x),
+    });
+    nums.push(x.val);
+    if (isFinite(x.bp)) nums.push(x.bp);
+    if (isFinite(x.pct)) nums.push(x.pct);
+  }
+  if (!items.length) return null;
+  const at = new Date(LIVE.at || Date.now());
+  const phase = LV.livePhaseOf(at, isTradeDay);
+  const hh = String(at.getHours()).padStart(2, "0");
+  const mi = String(at.getMinutes()).padStart(2, "0");
+  return {
+    atText: `${hh}:${mi}`,
+    phaseLabel: (phase && phase.label) || "盘中",
+    srcText: "东方财富行情",
+    items, nums,
+    missText: LV.liveMissText(LIVE),
+  };
+}
+
 function briefFacts() {
   const t = BRIEF.target || { kind: "portfolio" };
   const all = briefItems();
   const td = today();
   const mk0 = reportMarketFacts(MARKET, td);
+  /* v117：盘中参考价先算 —— 时点的「叙述重心」要看着它写（有实时数据 / 没有，
+     是两句完全不同的话），所以它必须排在 reportSession 之前。 */
+  const lvBrief = liveFactsForBrief();
   /* 时点要看着「今天有没有收盘数据」判断，所以 market 先算。 */
-  const ses = reportSession(0, td, mk0 && mk0.ok ? mk0.asOf : "");
+  const ses = reportSession(0, td, mk0 && mk0.ok ? mk0.asOf : "",
+    lvBrief ? lvBrief.atText : "");
   const mk = mk0;
   const agg = BRIEF.tier === BRIEF_TIER_AGG;
   /* v114：公开日历一次算好，两处用 —— 请求里给模型，卡片上给用户。
@@ -6769,16 +6837,16 @@ function briefFacts() {
       session: ses, kind: "product",
       name: agg ? "这一只（名称已隐去）" : String(it.name || ""),
       inst: agg ? "" : String(it.inst || ""),
-      nav, market: mk, cal,
+      nav, market: mk, cal, live: lvBrief,
       scenarios: reportScenarios(nav, { k: 5 }),
-      watch: reportWatch(nav, mk, ses, { cal }), gaps: BRIEF_GAPS,
+      watch: reportWatch(nav, mk, ses, { cal }), gaps: briefGaps(lvBrief),
     };
   }
   const rows = reportPortfolioRows(all, { today: td })
     .map((r, i) => (agg ? Object.assign({}, r, { name: "产品" + (i + 1) }) : r));
   return {
-    session: ses, kind: "portfolio", rows, market: mk, cal,
-    watch: reportWatch(null, mk, ses, { rows, today: td, cal }), gaps: BRIEF_GAPS,
+    session: ses, kind: "portfolio", rows, market: mk, cal, live: lvBrief,
+    watch: reportWatch(null, mk, ses, { rows, today: td, cal }), gaps: briefGaps(lvBrief),
   };
 }
 /** 装配一次：请求体、指纹、事实层。**不发请求**，所以可以随便调（重绘时也在调）。 */
@@ -6787,7 +6855,7 @@ function briefPack() {
   const facts = briefFacts();
   const input = reportFactsText({
     session: facts.session, kind: facts.kind, name: facts.name, inst: facts.inst,
-    nav: facts.nav, rows: facts.rows, market: facts.market, gaps: facts.gaps,
+    nav: facts.nav, rows: facts.rows, market: facts.market, gaps: facts.gaps, live: facts.live,
     scenarios: facts.scenarios, cal: facts.cal, today: today(),
   });
   const built = {
@@ -6796,10 +6864,16 @@ function briefPack() {
   };
   /* 指纹带上时点：盘前生成的那一份，到盘后叙述重心已经不对了，应当作废重来。
      只带 key（preopen/intraday/afterclose/closed），不带具体时刻 —— 否则每过一分钟就「数据已变」。 */
+  /* v117：指纹带上「盘中数据的 15 分钟格子」。
+     不带 —— 10:00 与 13:31 的盘中价完全不同，却会被判成「数据没变」，
+     用户点第二次只看到一句「直接用上一份」，而卡片胶囊已经跳到新时点，自相矛盾。
+     带精确分钟又会每 60 秒就「数据已变」，那是另一种烦。15 分钟是这两者之间的取舍。 */
+  const lvSlot = facts.live ? Math.floor((Number(LIVE && LIVE.at) || 0) / (15 * 60 * 1000)) : 0;
   const fp = briefFingerprint({
     target: t, items: briefItems(),
     marketAsOf: (MARKET && MARKET.weather && MARKET.weather.asOf) || "",
-    tier: BRIEF.tier, ver: REPORT_PROMPT_VER + "|" + facts.session.key,
+    tier: BRIEF.tier,
+    ver: REPORT_PROMPT_VER + "|" + facts.session.key + (facts.live ? "|L" + lvSlot : ""),
   });
   return { built, fp, facts };
 }
@@ -6819,10 +6893,12 @@ function briefTimeText(at) {
  * 发起一次研判。
  * @param {boolean} [force] true = 忽略「数据没变」这一条，照样重发（按钮上写明了另计一次）
  */
-function briefRun(force) {
+let _briefPrep = false;                 /* 预取盘中行情的重入锁：await 期间 phase 还没变 running */
+async function briefRun(force) {
   const b = llmBridge();
   if (!b) return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4400);
   if (BRIEF.phase === "running") return toast("这一份还在生成，等它落定（不要连点，连点就是连花）", 3600);
+  if (_briefPrep) return toast("正在取盘中行情，稍等一下", 2200);
   llmReadCfg();
   if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) {
     return toast("先在「模型接入」里配好端点与密钥，研判走的是同一条路", 4400);
@@ -6833,6 +6909,20 @@ function briefRun(force) {
   /* 装配失败必须说出来：v108 首版这里没有兜底，briefPack 一旦抛异常，
      点按钮就是「什么都不发生」—— 一发请求都没出去，屏上也没有一句话，
      用户只能猜是不是没点到。这类静默中断比报错难查得多。 */
+  /* v117：研判要盘中数据。发之前先拉一次此刻层，**2.5 秒封顶** —— 拉到了就是最新价，
+     拉不到就按没有处理（事实层整段不写），绝不为了「有数据」把研判拖成 11 秒。
+     只有手里这份超过 TTL 才拉：一分钟内刚点过「更新此刻」的，直接复用。 */
+  if (!LIVE || Date.now() - (LIVE_ST.at || 0) > LIVE_TTL) {
+    _briefPrep = true;
+    toast("先取一次盘中行情（最多 2.5 秒）", 2000);
+    try {
+      await Promise.race([
+        liveRefresh({ silent: true }),
+        new Promise(r => setTimeout(r, 2500)),
+      ]);
+    } catch (e) { /* 取不到就取不到，下面按没有处理 */ }
+    finally { _briefPrep = false; }
+  }
   let pack;
   try { pack = briefPack(); }
   catch (e) {
@@ -7121,6 +7211,9 @@ function briefAuditValues() {
     for (const r of f.market.small) push(r.bp1);
     for (const r of f.market.aaa) { push(r.y); push(r.bp1); }
   }
+  /* v117：盘中参考价的数也要进白名单。不收就会把「10Y 1.5983%」判成编造 ——
+     那是误报，而且是最伤信任的一种：模型明明照着数据块抄的。 */
+  if (f.live && Array.isArray(f.live.nums)) for (const n of f.live.nums) push(n);
   return v;
 }
 /** 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。

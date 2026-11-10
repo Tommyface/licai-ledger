@@ -37,6 +37,19 @@ import { pubCalChips, pubCalText, pubCalNext } from "./pubcal.js";
 /* ---------------- 时点 ---------------- */
 
 /** 四个时点。key 进指纹 —— 换时点就该重新生成，因为叙述重心换了。 */
+/**
+ * 定点格式化，但把「舍入之后就是零」的负零写成正零。
+ * toFixed 不看意图：-0.0001 保留两位是 "-0.00"，一个数字上的零被印成了负数。
+ * 回撤这类指标特别容易踩 —— 真实值常常是 -0.0004，界面就显示「最大回撤 -0.00%」。
+ * @param {number} n
+ * @param {number} dec
+ * @returns {string}
+ */
+function zeroFixed(n, dec) {
+  const s = Number(n).toFixed(dec);
+  return Number(s) === 0 ? (0).toFixed(dec) : s;
+}
+
 export const REPORT_SESSION_LABEL = {
   preopen: "盘前", intraday: "盘中", afterclose: "盘后", closed: "休市",
 };
@@ -58,10 +71,12 @@ function dateOf(d) { return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-"
  * @param {string} [marketAsOf] 债市快照的那一天。盘后路线要靠它判断「今天到底有没有收盘数据」——
  *   中债曲线一般 17:00 之后才发布，21 点打开时很可能今天这一条还没出。
  *   不看这个，就会出现「先讲今天收盘」而手上根本没有今天的数。
+ * @param {string} [liveAt] 盘中参考价的时点（HH:MM）。有它，叙述重心才能说「可以直接引用」；
+ *   没有就得写「数据块里没有」。v117 之前这里是写死的「本机没有实时行情」。
  * @returns {{ key: string, label: string, tradeDay: boolean, atText: string, dateText: string,
  *   wdText: string, focus: string, heading: string, fresh: boolean }}
  */
-export function reportSession(nowTs, today, marketAsOf) {
+export function reportSession(nowTs, today, marketAsOf, liveAt) {
   const t = Number(nowTs) > 0 ? new Date(Number(nowTs)) : new Date();
   const td = /^\d{4}-\d{2}-\d{2}$/.test(String(today || "")) ? String(today) : dateOf(t);
   const mins = t.getHours() * 60 + t.getMinutes();
@@ -74,10 +89,17 @@ export function reportSession(nowTs, today, marketAsOf) {
   const has = /^\d{4}-\d{2}-\d{2}$/.test(String(marketAsOf || ""));
   const fresh = has && String(marketAsOf) === td;
   const asOfText = has ? String(marketAsOf).slice(5) : "";
+  /* v117：盘中这句话从「一律没有」改成两档。原来那句是 v112 的事实（当时确实没有），
+     v116 之后已经不成立 —— 留着它，模型开篇就被告知「没有实时行情」，
+     后面就算把盘中价摆给它，它也会照着任务书写「数据块里没有」。 */
+  const liveAtText = String(liveAt || "").trim();
   const focus = key === "preopen"
     ? "先讲上一交易日发生了什么，再讲今天开盘要盯什么。今天还没有任何成交数据。"
     : key === "intraday"
-      ? "先讲今天到现在能看出什么。本机没有实时行情，凡是需要盘中价格才能说的话，一律写「数据块里没有」。"
+      ? (liveAtText
+        ? "先讲今天到现在能看出什么。有盘中参考价（截至 " + liveAtText
+          + "，仅国债/期货/交易所回购），可直接引用并带时点；其余品种仍为上一交易日收盘，不许编。"
+        : "先讲今天到现在能看出什么。本轮没取到盘中行情，凡是需要盘中价格才能说的话，一律写「数据块里没有」。")
       : key === "afterclose"
         /* 盘后最容易出的一句假话：让模型「讲今天收盘」，而今天这条曲线根本还没发布。 */
         ? (fresh || !has
@@ -551,7 +573,7 @@ export function reportFactsText(q) {
       L.push("【测算】");
       L.push("- 前高 " + nv.peak.value.toFixed(6) + "（" + nv.peak.date.slice(5) + "），距前高 "
         + (nv.gapBp > 0 ? nv.gapBp.toFixed(1) + "bp" : "0（正在前高上）"));
-      L.push("- 区间最大回撤 " + nv.dd.pct.toFixed(3) + "%（" + nv.dd.from.slice(5) + " → " + nv.dd.to.slice(5) + "）");
+      L.push("- 区间最大回撤 " + zeroFixed(nv.dd.pct, 3) + "%（" + nv.dd.from.slice(5) + " → " + nv.dd.to.slice(5) + "）");
       if (nv.shock) {
         L.push("- " + nv.shock.date.slice(5) + " 单日 " + bpText(nv.shock.bp)
           + (nv.sigmaBp > 0 ? "，是常态波动（σ=" + nv.sigmaBp.toFixed(1) + "bp）的 " + nv.shock.sigma.toFixed(1) + " 倍"
@@ -584,7 +606,7 @@ export function reportFactsText(q) {
     for (const r of rows) {
       L.push("- " + r.name + "：净值 " + fx(r.nav, 4) + "（" + (r.navDate ? r.navDate.slice(5) : "日期不明") + "）"
         + (r.d30 != null ? " · 近30点 " + (r.d30 >= 0 ? "+" : "") + r.d30.toFixed(2) + "%" : "")
-        + (r.dd != null ? " · 最大回撤 " + r.dd.toFixed(2) + "%" : "")
+        + (r.dd != null ? " · 最大回撤 " + zeroFixed(r.dd, 2) + "%" : "")
         + (r.gapBp != null && r.gapBp > 0 ? " · 距前高 " + r.gapBp.toFixed(1) + "bp" : ""));
     }
   }
@@ -605,6 +627,18 @@ export function reportFactsText(q) {
     L.push("【债市】本轮没有可用的债市快照。凡涉及市场环境的判断只能写「数据块里没有」。");
   }
 
+  /* v117：盘中参考价。与上面【债市】不是同一口径 —— 一个是中债估值（收盘后才有），
+     一个是东财行情（盘中就有）。分开写、明确声明不混算，是这一段存在的全部理由：
+     不写这句，模型一定会把 1.5983% 与 1.6120% 说成「上行 1.37bp」。 */
+  const lv = o.live;
+  if (lv && Array.isArray(lv.items) && lv.items.length) {
+    L.push("【盘中参考】" + lv.srcText + " " + lv.atText + "（" + lv.phaseLabel + "）");
+    L.push("  " + lv.items.map(it => it.name + " " + it.valText + (it.chgText ? "（" + it.chgText + "）" : "")).join("｜"));
+    L.push("  口径：盘中价，非中债估值；不与上段加减比。"
+      + "引用须带「截至" + lv.atText + "」，勿写「收盘」。");
+    if (lv.missText) L.push("  本轮缺：" + lv.missText);
+  }
+
   const gaps = Array.isArray(o.gaps) ? o.gaps.filter(Boolean) : [];
   /* 日历（v114）：只给日子与「距今几天」，不给「会抽走多少流动性」——
      那需要超储率与准备金率，本机没有。模型不许在这上面加戏。 */
@@ -614,7 +648,12 @@ export function reportFactsText(q) {
   }
   L.push("【拿不到的数据】" + (gaps.length ? gaps.join("、") : "无"));
   if (ses.key === "intraday") {
-    L.push("【盘中说明】本机没有实时行情：上面所有价格都是上一交易日收盘，今天还没有任何成交数据。");
+    /* v117：这句原来写死「本机没有实时行情」。v116 之后已经不成立 —— 有此刻层
+       （国债收益率、国债期货、交易所回购）。但只覆盖这三类，其余品种仍是上一交易日收盘，
+       所以两句话都得说，不能只说一半。 */
+    L.push(o.live && o.live.items && o.live.items.length
+      ? "【盘中说明】盘口仅三类；国开、信用债等仍为上一交易日收盘。"
+      : "【盘中说明】本轮没取到盘中行情：上面所有价格都是上一交易日收盘，今天还没有任何成交数据。");
   }
   L.push("【写什么】" + (o.kind === "product"
     ? "三段：这一段走势是什么性质、市场环境是顺风还是逆风、还差多少与要多久。"
@@ -654,17 +693,21 @@ export function reportTableHtml(f) {
        一列全是「—」既占地方又让人以为算坏了。 */
     const showW = o.rows.some(r => r && r.w != null);
     const rows = o.rows.map(r => {
-      const d30 = r.d30 == null ? "—" : (r.d30 >= 0 ? "+" : "") + r.d30.toFixed(2) + "%";
-      const dd = r.dd == null ? "—" : r.dd.toFixed(2) + "%";
+      /* 先舍入再判号：-0.0004 直接拼出来是「-0.00%」，红色，可它数值上就是零。
+         文字与颜色必须同源，否则同一格里写着 0.00% 却染成亏损色。 */
+      const d30v = r.d30 == null ? null : Number(r.d30.toFixed(2));
+      const ddv = r.dd == null ? null : Number(r.dd.toFixed(2));
+      const d30 = d30v == null ? "—" : (d30v > 0 ? "+" : "") + d30v.toFixed(2) + "%";
+      const dd = ddv == null ? "—" : ddv.toFixed(2) + "%";
       const gap = r.gapBp == null ? "—" : (r.gapBp > 0 ? r.gapBp.toFixed(1) : "前高上");
-      const c = r.d30 == null ? FLAT : r.d30 >= 0 ? UP : DOWN;
+      const c = d30v == null ? FLAT : d30v > 0 ? UP : d30v < 0 ? DOWN : FLAT;
       /* v114：占比与「落后」进表 —— 掉队的那只如果只占 3%，和占 40%，处理方式是两回事；
          落后贴在名字下面，不单开一列（六列在 420px 上已经挤）。 */
       const w = r.w == null ? "—" : (r.w * 100).toFixed(0) + "%";
       const late = r.lag != null && r.lag >= 2
         ? `<i class="rp-mk b">落后 ${r.lag} 日</i>` : "";
       return `<tr><td>${esc(r.name)}${late}</td>${showW ? `<td>${esc(w)}</td>` : ""}<td>${esc(fx(r.nav, 4))}</td>`
-        + `<td class="${c}">${esc(d30)}</td><td class="${r.dd != null && r.dd < 0 ? DOWN : FLAT}">${esc(dd)}</td>`
+        + `<td class="${c}">${esc(d30)}</td><td class="${ddv != null && ddv < 0 ? DOWN : FLAT}">${esc(dd)}</td>`
         + `<td>${esc(gap)}</td></tr>`;
     }).join("");
     out += `<div class="rp-sec"><div class="rp-sh"><h4>持仓一览</h4>`
@@ -739,7 +782,7 @@ export function navSummary(nv) {
 
 /**
  * 时间坐标：三个日期不一样，本身就是一条信息。
- * @param {{ session:any, nav?:any, market?:any, rows?:any[] }} f
+ * @param {{ session:any, nav?:any, market?:any, rows?:any[], live?:any }} f
  */
 export function reportCoordsHtml(f) {
   const o = /** @type {any} */ (f || {});
@@ -763,6 +806,11 @@ export function reportCoordsHtml(f) {
   const mk = o.market;
   if (mk && mk.ok) {
     out.push(`<span class="rp-co${mk.lagTradeDays >= 2 ? " warn" : ""}">债市 ${esc(mk.asOf.slice(5))}</span>`);
+  }
+  /* v117：盘中参考价单独一颗胶囊，且一定带时点。只写「盘中」不给时刻，
+     两小时后看这份就像刚生成的 —— 时点这一行存在的意义就是防止这种误读。 */
+  if (o.live && o.live.atText) {
+    out.push(`<span class="rp-co rp-co-live">盘中 ${esc(o.live.atText)}</span>`);
   }
   out.push(`<span class="rp-co">生成 ${esc(ses.atText || "")}</span>`);
   return `<div class="rp-cos">${out.join("")}</div>`;

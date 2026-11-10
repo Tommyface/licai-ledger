@@ -7,8 +7,7 @@ import assert from "node:assert/strict";
 import {
   LIVE_QUOTES, LIVE_GROUPS, liveQuoteUrl, liveTrendUrl, liveParse, liveDirOf,
   liveTrendParse, liveStat, livePhaseOf, liveValText, liveChgText, liveTimeText,
-  liveMissText, liveSparkHtml, liveBlockHtml, livePack, liveUnpack,
-} from "../js/core/livebond.js";
+  liveMissText, liveSparkHtml, liveBlockHtml, livePack, liveUnpack, liveFresh } from "../js/core/livebond.js";
 
 /** 实测返回（2026-11-10 11:26，fltt=2 口径）。 */
 const RAW = {
@@ -260,4 +259,33 @@ test("整块：失败原因写进块里（不只靠 toast）", () => {
   const h = liveBlockHtml(null, { err: "超时（8 秒）" });
   assert.match(h, /这一次没取到/);
   assert.match(h, /超时/);
+});
+
+/* ---------- v117：新鲜度闸门 ---------- */
+
+test("liveFresh：跨日就不算「此刻」—— 昨天的收盘价不能当今天盘中", () => {
+  const at = new Date("2026-11-09T14:00:00").getTime();
+  const same = new Date("2026-11-09T14:30:00").getTime();
+  const nextDay = new Date("2026-11-10T09:40:00").getTime();
+  assert.equal(liveFresh({ at }, same), true);
+  assert.equal(liveFresh({ at }, nextDay), false);
+});
+
+test("liveFresh：超过 90 分钟不算 —— 午休跨过去口径就换了一场", () => {
+  const at = new Date("2026-11-09T11:20:00").getTime();
+  const ok89 = at + 89 * 60 * 1000;
+  const bad91 = at + 91 * 60 * 1000;
+  assert.equal(liveFresh({ at }, ok89), true);
+  assert.equal(liveFresh({ at }, bad91), false);
+  /* 边界要写成 <=，不是 <：正好 90 分钟还在界内，不然每次都要猜「刚刚那次算不算」 */
+  assert.equal(liveFresh({ at }, at + 90 * 60 * 1000), true, "90 分钟整应算新鲜");
+});
+
+test("liveFresh：没有时点、时点在未来、时点非法，一律当不新鲜", () => {
+  const now = new Date("2026-11-09T14:00:00").getTime();
+  assert.equal(liveFresh(null, now), false);
+  assert.equal(liveFresh({}, now), false);
+  assert.equal(liveFresh({ at: 0 }, now), false);
+  assert.equal(liveFresh({ at: "abc" }, now), false);
+  assert.equal(liveFresh({ at: now + 60 * 1000 }, now), false, "未来时刻说明时钟不对，不能信");
 });

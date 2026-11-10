@@ -2090,3 +2090,35 @@ test("v115：生成中打开研判要能看见进度，不能只弹一句 toast"
   assert.match(seg, /renderBriefSheet\(\)/, "生成中打开没有画界面（用户点了会以为没反应）");
   assert.match(seg, /briefSameTarget\(/, "没有区分「同一个目标」和「换目标」");
 });
+
+/* ---------- v117：缺口清单必须跟盘中数据同源 ---------- */
+
+const gapsOf = (live) => new Function(`${fnBody("briefGaps")}; return briefGaps;`)()(live);
+
+test("v117 缺口：拿到期货就不许再说「无法区分现券还是期货领先」", () => {
+  /* 这条不是措辞洁癖：缺口清单和事实层同在一份 payload 里。一边写「T 主力 110.210」，
+     一边写「没有今日国债期货」，模型只能二选一信，而它通常信缺口清单 ——
+     因为缺口清单的语气更像「这是已知事实」。实际正文就写成过「本机没有今日国债期货」。 */
+  const g = gapsOf({ items: [{ key: "CN10Y" }, { key: "T" }, { key: "TL" }, { key: "GC007" }] });
+  assert.ok(!g.some(x => /国债期货/.test(x)), "盘中有 T/TL，缺口里还写着没有期货");
+  assert.ok(g.some(x => /信用二永/.test(x)), "信用二永确实拿不到，不该被顺手删掉");
+});
+
+test("v117 缺口：有 GC007 时不能写成「资金面一项都没有」", () => {
+  const g = gapsOf({ items: [{ key: "GC007" }] });
+  const money = g.find(x => /资金面/.test(x));
+  assert.ok(money, "资金面那条不见了");
+  assert.match(money, /只有交易所回购 GC007/);
+  assert.match(money, /不能互替/, "没说清 GC007 ≠ DR007，模型会把两个当同一个用");
+  assert.ok(!/^资金面：没有 DR001/.test(money),
+    "有 GC007 还写「没有 DR001 / DR007」，读起来就是资金面全空");
+});
+
+test("v117 缺口：一条盘中数据都没有时，退回原样三条", () => {
+  for (const live of [null, { items: [] }]) {
+    const g = gapsOf(live);
+    assert.equal(g.length, 3, "缺项数变了");
+    assert.ok(g.some(x => /无法区分现券领先还是期货领先/.test(x)), "没数据时必须照实说没有期货");
+    assert.ok(g.some(x => /^资金面：没有 DR001 \/ DR007/.test(x)));
+  }
+});

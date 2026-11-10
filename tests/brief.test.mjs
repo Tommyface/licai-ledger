@@ -77,8 +77,13 @@ test("briefMetrics：非法点（0 / 负数 / 字符串 / 缺值）不参与计�
 test("briefPctText：null 给「—」，不是 0", () => {
   assert.equal(briefPctText(null), "—");
   assert.equal(briefPctText(undefined), "—");
-  assert.equal(briefPctText(0), "+0.00%");
+  /* v117：零不带符号。原来写 "+0.00%"，可零既不涨也不跌，加号是无中生有的方向。
+     同一份正文里出现过「最大回撤 -0.00%」—— 那是 -0.0004 舍入来的，读起来像有亏损。 */
+  assert.equal(briefPctText(0), "0.00%");
+  assert.equal(briefPctText(-0.0004), "0.00%", "负零必须写成 0.00%，不能写成 -0.00%");
+  assert.equal(briefPctText(0.0004), "0.00%", "正零也不该带加号");
   assert.equal(briefPctText(-1.234), "-1.23%");
+  assert.equal(briefPctText(0.48), "+0.48%", "正常的正数还要带加号");
 });
 
 /* ---------- 数据块 ---------- */

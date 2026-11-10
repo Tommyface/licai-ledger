@@ -589,6 +589,9 @@ html:not(.inApp) .app-only{display:none}
 .rp-co{font-size:10.5px;color:#5a5f7d;background:rgba(91,91,214,.07);border:1px solid rgba(91,91,214,.13);
   border-radius:7px;padding:1px 7px;font-variant-numeric:tabular-nums}
 .rp-co.warn{background:#fdf6e6;border-color:#eedfb8;color:#8a6100}
+/* v117：盘中参考。用青色而不是蓝色 —— 它和「债市 xx-xx」「净值 xx-xx」不是一类东西：
+   那两个是日期，这个是时分，而且只覆盖三类品种。颜色区分比再加一句说明省地方。 */
+.rp-co-live{color:#0a6b74;background:rgba(10,150,160,.08);border-color:rgba(10,150,160,.22)}
 /* v114：公开日历。与时间坐标同一层级 —— 都是日期，都不参与结论，
    所以用同一套胶囊形制、再淡一档，避免它抢走「净值/债市」那两个坐标的注意力。 */
 .rp-cal{display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:6px}

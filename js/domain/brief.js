@@ -180,7 +180,11 @@ export function briefPctText(v) {
   if (v === null || v === undefined || v === "") return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  return (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+  /* -0.0001 直接 toFixed(2) 会得到 "-0.00"：数字上是零，看起来却是负的，
+     读者会以为「有亏损，只是小到显示不出来」。舍入之后是零就不带符号，正负都写 0.00%。 */
+  const t = Number(n.toFixed(2));
+  if (t === 0) return "0.00%";
+  return (t > 0 ? "+" : "") + t.toFixed(2) + "%";
 }
 
 /* ---------------- 数据块装配 ---------------- */
@@ -927,7 +931,7 @@ export function reportCardHtml(opts) {
   const f = o.facts || {};
   const nav = f.nav;
   const kind = f.kind === "product" ? "product" : "portfolio";
-  const coords = reportCoordsHtml({ session: f.session, nav, market: f.market, rows: f.rows });
+  const coords = reportCoordsHtml({ session: f.session, nav, market: f.market, rows: f.rows, live: f.live });
   const head = `<div class="rp-hd"><div class="rp-hd-l">`
     + `<div class="rp-name">${esc(f.name || (kind === "product" ? "这一只" : "整个组合"))}</div>`
     + `<div class="rp-sub">${esc([f.inst, o.tier ? (BRIEF_TIER_LABEL[o.tier] || BRIEF_TIER_LABEL.detail) : ""].filter(Boolean).join(" · "))}`

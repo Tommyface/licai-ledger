@@ -98,7 +98,7 @@ test("时点：盘中路线必须自带「没有实时行情」这句任务书",
   /* 本机的中债曲线是日频收盘发布。盘中路线最危险的地方不是数据旧，
      是模型会把「上一交易日收盘」写成「今天上午」。所以这句必须写进 focus。 */
   const s = reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09");
-  assert.match(s.focus, /没有实时行情|还没有任何成交数据/);
+  assert.match(s.focus, /本轮没取到盘中行情|还没有任何成交数据/);
   assert.equal(REPORT_SESSION_LABEL[s.key], "盘中");
 });
 
@@ -259,12 +259,77 @@ test("请求：含时点、测算、缺口，且不超过 1000 字", () => {
   assert.ok(txt.length <= 1100, "研报输入超长了：" + txt.length);
 });
 
-test("请求：盘中路线必须把「没有实时行情」写进数据块", () => {
+test("请求：没有盘中数据时，必须说清「本轮没取到」而不是「本机没有」", () => {
   const txt = reportFactsText({
     session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09"),
     kind: "product", name: "X", nav: NAV, market: MK, gaps: [],
   });
-  assert.match(txt, /本机没有实时行情/);
+  /* v117：原来这句是「本机没有实时行情」—— v116 之后不成立了。
+     本机有此刻层，只是这一轮没取到；两句的差别不是措辞，是「能不能修」。 */
+  assert.match(txt, /本轮没取到盘中行情/);
+  assert.ok(!/本机没有实时行情/.test(txt), "过期的断言又回来了：本机是有实时行情的");
+});
+
+/* ---------- v117：盘中参考层 ---------- */
+
+const LIVE_FIX = {
+  atText: "13:31", phaseLabel: "盘中", srcText: "东方财富行情", missText: "",
+  items: [
+    { name: "10年国债", valText: "1.5983%", chgText: "+0.4bp" },
+    { name: "T 主力", valText: "110.210", chgText: "-0.02%" },
+  ],
+};
+
+test("v117 盘中：独立成段，且写明「不与中债估值混算」", () => {
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31"),
+    kind: "product", name: "X", nav: NAV, market: MK, gaps: [], live: LIVE_FIX,
+  });
+  assert.match(txt, /【盘中参考】东方财富行情 13:31（盘中）/);
+  assert.match(txt, /10年国债 1\.5983%（\+0\.4bp）/);
+  assert.match(txt, /不与上段加减比/);
+  assert.match(txt, /引用须带「截至13:31」/);
+});
+
+test("v117 盘中：叙述重心跟着改口 —— 有数据就不许再说「数据块里没有」", () => {
+  const withLive = reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31");
+  const noLive = reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "");
+  assert.match(withLive.focus, /有盘中参考价（截至 13:31/);
+  assert.ok(!/数据块里没有/.test(withLive.focus), "有数据还叫模型写「没有」，它就会照做");
+  assert.match(noLive.focus, /本轮没取到盘中行情/);
+  assert.match(noLive.focus, /数据块里没有/);
+});
+
+test("v117 盘中：盘中说明只覆盖三类，不冒充全市场", () => {
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31"),
+    kind: "product", name: "X", nav: NAV, market: MK, gaps: [], live: LIVE_FIX,
+  });
+  assert.match(txt, /盘口仅三类/);
+  assert.match(txt, /国开、信用债等仍为上一交易日收盘/);
+});
+
+test("v117 盘中：加了这一段也不许超长（超了模型会丢后半截）", () => {
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31"),
+    kind: "product", name: "诚享7天29号", inst: "北银理财", nav: NAV, market: MK,
+    gaps: ["资金面：没有 DR001 / DR007", "国债期货"], live: LIVE_FIX,
+  });
+  assert.ok(txt.length <= 1100, "加了盘中段就超长了：" + txt.length);
+});
+
+test("v117 盘中：卡片坐标多一颗胶囊，且带时分", () => {
+  const h = reportCoordsHtml({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31"),
+    market: MK, rows: [], live: LIVE_FIX,
+  });
+  assert.match(h, /rp-co-live/);
+  assert.match(h, /盘中 13:31/);
+  /* 没有盘中数据就不许画这颗胶囊 —— 空胶囊比不画更糟：读者会以为「有但没显示」 */
+  const h2 = reportCoordsHtml({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09"), market: MK, rows: [],
+  });
+  assert.ok(!/rp-co-live/.test(h2));
 });
 
 test("请求：债市缺失时不许留空，要写明只能写「数据块里没有」", () => {
@@ -698,4 +763,43 @@ test("信心：有数值时进度条长度跟着数值走", () => {
   const html = reportCardHtml({ facts: { kind: "portfolio", rows: [] }, rep: mkReport("0.72").report });
   assert.match(html, /信心 72%（较高）/);
   assert.match(html, /width:72%/);
+});
+
+/* ---------- v117：负零 ---------- */
+
+test("v117 回撤不做负零：-0.0004 写成 0.00%，不是 -0.00%", () => {
+  /* 真实出现过的正文：「最大回撤 -0.00%」。数值上是零，写法上却是个负数，
+     读者只能理解成「有亏损，只是小到显示不出来」—— 而它其实是完全没回撤。 */
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-10T13:53:00").getTime(), "2026-11-10"),
+    kind: "portfolio", market: MK, gaps: [],
+    rows: [{ name: "安盈稳健日开7号A", nav: 1.0248, navDate: "2026-11-09", d30: 0.48, dd: -0.0004 }],
+  });
+  assert.match(txt, /最大回撤 0\.00%/);
+  assert.ok(!/最大回撤 -0\.00%/.test(txt), "负零又被印成负数了");
+  /* 真有回撤时照旧带负号，别把归零写成「一律不加负号」 */
+  const t2 = reportFactsText({
+    session: reportSession(new Date("2026-11-10T13:53:00").getTime(), "2026-11-10"),
+    kind: "portfolio", market: MK, gaps: [],
+    rows: [{ name: "匠心灵动14天9G", nav: 1.0120, navDate: "2026-11-09", d30: 0.21, dd: -0.19 }],
+  });
+  assert.match(t2, /最大回撤 -0\.19%/);
+});
+
+test("v117 表格：回撤 -0.0004 既不能写 -0.00%，也不能染成亏损色", () => {
+  /* 文字与颜色必须同源。截图里出现过「回撤 -0.00%」且染红：数值是零，
+     颜色却是"亏"，同一格里自相矛盾，读者只会以为显示坏了。 */
+  const h = reportTableHtml({
+    kind: "portfolio",
+    rows: [{ name: "安盈稳健日开7号A", nav: 1.0248, d30: 0.48, dd: -0.0004, gapBp: 0 }],
+  });
+  assert.ok(!/-0\.00%/.test(h), "表格里还有负零");
+  const cell = (h.match(/<td class="(rp-[a-z]+)">0\.00%<\/td>/) || [])[1];
+  assert.equal(cell, "rp-flat", "回撤是零，却染成了涨跌色");
+  /* 真回撤照旧 */
+  const h2 = reportTableHtml({
+    kind: "portfolio",
+    rows: [{ name: "匠心灵动14天9G", nav: 1.0120, d30: 0.21, dd: -0.19, gapBp: 9.4 }],
+  });
+  assert.match(h2, /<td class="rp-down">-0\.19%<\/td>/);
 });

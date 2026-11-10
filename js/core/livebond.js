@@ -200,6 +200,26 @@ export function liveTimeText(live, now) {
   return `${hh}:${ss}`;
 }
 
+/**
+ * 这份「此刻」还能不能叫「此刻」。
+ * 跨日、或超过 maxAgeMs（默认 90 分钟）就不算 —— 缓存里的旧价冒充实时，
+ * 比没有数据更糟：模型会把它当成「今天现在」写进结论，而屏幕上没有任何东西能看出来。
+ * 90 分钟这个界不是随手取的：午休 11:30→13:00 正好 90 分钟，跨过它口径就换了一场。
+ * @param {{at?:number}} live
+ * @param {number} [nowMs]
+ * @param {number} [maxAgeMs]
+ * @returns {boolean}
+ */
+export function liveFresh(live, nowMs, maxAgeMs) {
+  const at = Number(live && live.at) || 0;
+  if (!at) return false;
+  const now = Number(nowMs) || Date.now();
+  if (!isFinite(now) || now < at) return false;
+  const d = new Date(at), n = new Date(now);
+  if (d.getFullYear() !== n.getFullYear() || d.getMonth() !== n.getMonth() || d.getDate() !== n.getDate()) return false;
+  return now - at <= (Number(maxAgeMs) || 90 * 60 * 1000);
+}
+
 /** 缺项文案：「缺 GC007、GC001」。空数组 → 空串（调用方据此不画那一行）。 */
 export function liveMissText(live) {
   const miss = (live && Array.isArray(live.miss)) ? live.miss : [];
