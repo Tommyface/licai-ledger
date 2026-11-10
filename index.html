@@ -552,6 +552,41 @@ html:not(.inApp) .app-only{display:none}
 .mc-miss td{color:var(--ink3);font-size:10.5px}
 .mc-empty{font-size:11.5px;color:var(--ink3);line-height:1.6;padding:5px 0 2px}
 
+/* ---------- v120：信息面 · 待核线索 ----------
+   与上面的数据层刻意做成不同质感：数据层是表格 / 数字，线索区是列表 + 边框卡片，
+   一眼能看出「这不是能引用进研判的数」。接口开关与时点放在最上面，先说清它有多旧。 */
+.nw-wrap{margin:12px 0 0;border:1px solid var(--line);border-radius:10px;background:var(--card);padding:10px 11px}
+.nw-t{font-size:11.5px;font-weight:650;color:var(--ink2);display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.nw-x{font-size:10px;color:var(--ink3);font-weight:400}
+.nw-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:7px 0 3px}
+.nw-ch{font-size:10.5px;color:var(--ink2);display:flex;align-items:center;gap:4px}
+.nw-ch select{font-size:11px;padding:3px 5px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink)}
+.nw-mode{font-size:10.5px;color:var(--ink3);flex:1;min-width:120px}
+.nw-mode b{color:#b8860b;font-weight:650}
+.nw-upd{font-size:10.5px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink2)}
+.nw-upd:disabled{opacity:.45}
+.nw-asof{font-size:10.5px;color:var(--ink2);padding:3px 0 5px;border-bottom:1px dashed var(--line)}
+.nw-fund{padding:6px 0 2px}
+.nw-fh{font-size:10.5px;color:var(--ink2);display:flex;gap:6px;flex-wrap:wrap;align-items:baseline}
+.nw-fd{font-size:10px;color:var(--ink3)}
+.nw-fr{display:flex;gap:5px;flex-wrap:wrap;margin:5px 0 2px}
+.nw-fc{font-size:10.5px;border:1px solid var(--line);border-radius:4px;padding:2px 6px;background:var(--bg);
+  color:var(--ink2);font-variant-numeric:tabular-nums}
+.nw-fc b{color:var(--ink);font-weight:650;margin-right:3px}
+.nw-fund-empty{font-size:10.5px;color:var(--ink3);line-height:1.6;padding:6px 0}
+.nw-list{list-style:none;margin:5px 0 0;padding:0;max-height:320px;overflow:auto}
+.nw-c{padding:6px 0;border-top:1px solid var(--line)}
+.nw-ct{font-size:11.5px;color:var(--ink);text-decoration:none;line-height:1.5;display:block}
+.nw-ct:hover{text-decoration:underline}
+.nw-cm{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
+.nw-src{font-size:9.5px;color:var(--ink2);border:1px solid var(--line);border-radius:3px;padding:0 4px}
+.nw-pt{font-size:9.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.nw-tag{font-size:9.5px;color:#b8860b;border:1px solid #b8860b;border-radius:3px;padding:0 4px}
+.nw-cs{font-size:10.5px;color:var(--ink3);line-height:1.55;margin-top:2px}
+.nw-empty{font-size:11.5px;color:var(--ink3);line-height:1.6;padding:6px 0}
+.nw-gaps{margin-top:6px;font-size:10px;color:var(--ink3);line-height:1.6}
+.nw-gaps ul{margin:2px 0 0;padding-left:16px}
+
 /* ---------- v108：AI 研判卡片 ----------
    一套样式只服务一份结论：结论句 > 信心 > 分段要点 > 动作 > 盲区 > 来源 > 免责。
    依据徽标（台账/体检/债市/检索/未标注）是这个功能的核心可读性来源，颜色必须区分得开，

@@ -60,6 +60,10 @@ import * as LV from "./js/core/livebond.js";
    它既不进此刻层（月度 vs 秒级），也不进日终层（统计口径 vs 估值曲线），自成一个时点。
    解析与口径在 js/core/macro.js。 */
 import * as MC from "./js/core/macro.js";
+/* v120：信息面 · 待核线索 —— 私有仓 news.json 的云端快照（S1 网页端闭环）。
+   与上面三层最大的区别：它**不进事实层**，verified 恒 false，不喂给研判。
+   校验 / 接口开关 / 渲染全收口在 js/core/news.js，app.js 只负责取数与缓存。 */
+import * as NW from "./js/core/news.js";
 /* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
    只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。
    v98：补 shelfFreshness（快照过期判据）与 agentViaTag（代销口径短标签），
@@ -101,7 +105,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v119";
+const APP_VER = "v120";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -202,6 +206,26 @@ const LS_MARKET = "licai.marketCache";
 const MARKET_TTL = 10 * 60 * 1000;      /* 打开债市页的自动刷新阈值 */
 const MARKET_ST = { phase: "idle", at: 0, err: "", cached: false };
 let _mktBusy = null;                    /* 在途去重：连点「更新」只发一次请求 */
+
+/* ---------- v120：信息面 · 待核线索（S1 网页端闭环）----------
+   与 market.json 同一条取数通道（ghReq 读私有仓 contents），但**不进事实层**：
+   新闻无法逐条回源核实，verified 恒 false，研判的数字白名单里一个都不许出现。
+   接口选择开关是架构必需品 —— 云端有 L1 触发断裂 + cron 排队 + CDN 缓存，
+   网页端只能拿到「上一轮的快照」，所以默认 cloud 且显式写数据时点 / 非实时；
+   apk（内置直抓）与 anysearch 是 S2，网页端置灰，见 js/core/news.js。 */
+const NEWS_PATH = "news.json";
+const LS_NEWS = "licai.newsCache";
+const LS_NEWS_CH = "licai.newsChannel";
+const NEWS_TTL = 10 * 60 * 1000;      /* 打开债市页的自动刷新阈值，与日终层同档 */
+let NEWS = null;
+const NEWS_ST = { phase: "idle", at: 0, err: "", ch: newsChannelLoad() };
+let _newsBusy = null;
+function newsChannelLoad() {
+  try {
+    const v = localStorage.getItem(LS_NEWS_CH);
+    return NW.newsChannelAllowed(v) ? v : "cloud";   /* 默认云端快照；off 由用户显式选 */
+  } catch (e) { return "cloud"; }
+}
 
 /* ---------- v116：债市「此刻」层 ----------
    为什么另起一层而不是改 market.json：那份是 33 格日终矩阵（中债官方曲线推导），
@@ -2496,6 +2520,8 @@ function openMarket() {
   if (!MACRO || Date.now() - (MACRO_ST.lastTry || 0) > MACRO_TTL) macroRefresh({ silent: true });
   /* v119：指数日 K TTL 15 分钟。histRefresh 自己判 TTL，这里不用再套一层判断。 */
   histRefresh({ silent: true });
+  /* v120：信息面线索。只有 cloud 通道、且超过 TTL 才静默拉一次；off 不请求。 */
+  if (NEWS_ST.ch === "cloud" && Date.now() - (NEWS_ST.at || 0) > NEWS_TTL) newsRefresh({ silent: true });
 }
 /** 弹层现在开着吗？（遮罩这一层就是「有没有弹层」的唯一真相） */
 function sheetOpen() { return !!($("mask") && $("mask").classList.contains("show")); }
@@ -2598,7 +2624,10 @@ function marketHeroHtml() {
       err: MACRO_ST.phase === "err" ? MACRO_ST.err : "",
     })
     : "";
-  return bar + liveHtml + daily + macroHtml;
+  /* v120：线索区放在宏观之后 —— 时间尺度从「T-1 估值」到「月度统计」再到
+     「上一轮抓到的快讯」，越往下越慢、也越不能当数据用。它独立成块，
+     不进 llmPanelHtml 的快照、不进研判事实层（见 js/core/news.js 文件头）。 */
+  return bar + liveHtml + daily + macroHtml + newsHeroHtml();
 }
 /** 共用的「接着问」对话区。withMarket=true 时把行情块嵌在快照行之后
     （设置页「模型接入」保持原样）；债市页传 false —— 行情已在上部单独渲染，
@@ -4315,6 +4344,109 @@ async function fetchMarket() {
     return null;
   }
 }
+/* ---------- v120：信息面线索的取数 / 缓存 / 刷新 / 接口开关 ----------
+   取数与 fetchMarket 同一条通道（ghReq + b64ToUtf8 + 整包校验），不复制第二套鉴权；
+   区别只有三处：路径 news.json、校验换 validateNews、以及**接口开关**。
+   off 通道零请求；apk / anysearch 在网页端被 newsChannelAllowed 挡住，绝不偷偷发。 */
+async function fetchNews() {
+  try {
+    const info = await ghReq("GET", `${GH}/repos/${SYNC.owner}/${SYNC.repo}/contents/${NEWS_PATH}`);
+    if (!info || typeof info.content !== "string") return null;
+    const n = JSON.parse(b64ToUtf8(info.content));
+    const chk = NW.validateNews(n);
+    if (!chk.ok) {
+      console.warn(`信息面快照校验未过（按无数据处理）：${chk.why}`);
+      return null;
+    }
+    return n;
+  } catch (e) {
+    console.warn(`信息面快照 ${NEWS_PATH} 读取失败（不影响账本同步）：`, String(e).slice(0, 120));
+    return null;
+  }
+}
+
+/** 本机缓存：owner/repo 必须与当前配置一致，读回仍过 newsUnpack → validateNews。 */
+function newsCacheLoad() {
+  try {
+    const raw = localStorage.getItem(LS_NEWS);
+    if (!raw) return false;
+    const o = JSON.parse(raw);
+    if (!o || o.owner !== SYNC.owner || o.repo !== SYNC.repo) return false;
+    const n = NW.newsUnpack(o.p);
+    if (!n) { console.warn("本机信息面缓存校验未过，丢弃"); return false; }
+    NEWS = n;
+    NEWS_ST.at = Number(o.p && o.p.at) || 0;
+    NEWS_ST.phase = "idle";
+    return true;
+  } catch (e) { return false; }
+}
+function newsCacheSave() {
+  if (!NEWS) return;
+  const p = NW.newsPack(NEWS, NEWS_ST.at);
+  if (!p) return;
+  try {
+    localStorage.setItem(LS_NEWS, JSON.stringify({ owner: SYNC.owner, repo: SYNC.repo, p }));
+  } catch (e) { }
+}
+
+/** 线索区 HTML。判据与渲染都在 js/core/news.js，这里只把状态喂进去。 */
+function newsHeroHtml() {
+  return NW.newsBlockHtml(NEWS, {
+    channel: NEWS_ST.ch,
+    phase: NEWS_ST.phase,
+    err: NEWS_ST.phase === "err" ? NEWS_ST.err : "",
+    ageText: NEWS_ST.at ? marketAgeText(NEWS_ST.at) : "",
+  });
+}
+
+/** 切换接口。apk / anysearch 是 S2，网页端拒绝并把下拉弹回当前合法值。 */
+function newsChannelSet(key) {
+  if (!NW.newsChannelAllowed(key)) {
+    toast("该接口是 S2（APK 内置直抓 / AnySearch），网页端暂不可用", 3600);
+    marketPaint();
+    return;
+  }
+  NEWS_ST.ch = key;
+  try { localStorage.setItem(LS_NEWS_CH, key); } catch (e) { }
+  if (key === "cloud") newsRefresh({ silent: true });
+  else marketPaint();
+}
+
+/** 拉一次云端快照。off 通道零请求；读不到不清空旧包，只在状态行说实话。 */
+function newsRefresh(opts = {}) {
+  if (NEWS_ST.ch !== "cloud") { marketPaint(); return Promise.resolve(false); }
+  if (_newsBusy) return _newsBusy;
+  if (!syncCfgOk()) {
+    NEWS_ST.phase = "err";
+    NEWS_ST.err = SYNC.owner || SYNC.repo
+      ? "同步未就绪（缺令牌，或本机 App 还是旧壳）"
+      : "未配置数据同步（设置 → 数据同步）";
+    marketPaint();
+    return Promise.resolve(false);
+  }
+  /* 自动刷新走 TTL 节流；用户点「刷新线索 / 更新此刻」带 force 才真发一次。 */
+  if (!opts.force && NEWS && Date.now() - (NEWS_ST.at || 0) < NEWS_TTL) return Promise.resolve(false);
+  NEWS_ST.phase = "loading"; NEWS_ST.err = "";
+  marketPaint();
+  _newsBusy = (async () => {
+    try {
+      const n = await fetchNews();
+      if (!n) throw new Error("没读到快照（文件不存在，或整包校验未过）");
+      NEWS = n;
+      NEWS_ST.phase = "ok"; NEWS_ST.err = ""; NEWS_ST.at = Date.now();
+      newsCacheSave();
+      marketPaint();
+      return true;
+    } catch (e) {
+      NEWS_ST.phase = "err";
+      NEWS_ST.err = String((e && e.message) || e).slice(0, 140);
+      marketPaint();          /* 旧线索仍在，状态行说实话 */
+      return false;
+    } finally { _newsBusy = null; }
+  })();
+  return _newsBusy;
+}
+
 /* ---------- v107：债市快照刷新（缓存 / 自动 / 手动） ----------
    三者共用 marketRefresh 一个出口 —— 复制第二份取数逻辑就等于第二处鉴权与降级口径，
    这个项目已经在 fetchRulesFeed 上踩过一次（v83 Q5），不再犯第二遍。 */
@@ -4693,7 +4825,10 @@ async function marketRefreshAll(opts = {}) {
   /* v119：日 K 一起刷。这里的 force 跟着「更新此刻」走 —— 用户手动点的，就该真去拉一次；
      自动刷新那条路（marketBoot 打开页面）不带 force，由 15 分钟 TTL 自己节流。 */
   const histP = histRefresh({ silent: true, force: !!opts.force });
-  const [liveOk] = await Promise.all([liveP, dayP, macroP, histP]);
+  /* v120：线索一起刷。云端的「更新」点一下就该把这一页的数都换成最新的；
+     off 通道内部直接返回，不占请求。 */
+  const newsP = newsRefresh({ silent: true, force: !!opts.force });
+  const [liveOk] = await Promise.all([liveP, dayP, macroP, histP, newsP]);
   if (liveOk && LIVE) {
     const n = Object.keys(LIVE.quotes).length;
     const total = LV.LIVE_QUOTES.length;
@@ -4758,8 +4893,11 @@ function marketBoot() {
   macroCacheLoad();
   /* v119：指数日 K。缓存里先拿旧的顶上，再按 15 分钟 TTL 决定要不要拉新的。 */
   histCacheLoad();
+  /* v120：信息面线索。缓存先顶上；off 通道 newsRefresh 内部直接返回，不请求。 */
+  newsCacheLoad();
   if (!syncCfgOk()) return;      /* 日终层没配同步就别白发一次必然失败的请求 */
   marketRefresh({ silent: true });
+  newsRefresh({ silent: true });
 }
 
 /* 手动触发云端抓取（#延时对策，2026-09-16）：
@@ -7562,7 +7700,7 @@ Object.assign(window, {
   briefSearchOff, briefSearchOffRetry,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,

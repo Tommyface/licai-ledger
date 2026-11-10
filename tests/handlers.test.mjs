@@ -14,6 +14,10 @@ const read = f => fs.readFileSync(path.join(root, f), "utf8");
 
 const app = read("app.js");
 const html = read("index.html");
+/* v120：js/core/news.js 会产出带 onchange/onclick 的线索区 HTML（接口开关、刷新按钮）。
+   内联事件靠全局查找，所以这个模块产出的入口也必须进双向对账的 need 集合，
+   否则桥接清单新增的两个名字会被误判成「多余」。 */
+const newsSrc = read("js/core/news.js");
 
 /* inline handler 里出现的「函数名(」——忽略 event/document 这类内建 */
 function inlineNames(src) {
@@ -37,14 +41,14 @@ function bridgedNames(src) {
 }
 
 test("每个内联 onclick/oninput 入口都挂到了 window", () => {
-  const need = new Set([...inlineNames(app), ...inlineNames(html)]);
+  const need = new Set([...inlineNames(app), ...inlineNames(html), ...inlineNames(newsSrc)]);
   const have = bridgedNames(app);
   const missing = [...need].filter(n => !have.has(n));
   assert.deepEqual(missing, [], `这些内联入口没有 window 桥接，点击会 ReferenceError:\n  ${missing.join("\n  ")}`);
 });
 
 test("桥接清单里没有多余/拼错的名字", () => {
-  const need = new Set([...inlineNames(app), ...inlineNames(html)]);
+  const need = new Set([...inlineNames(app), ...inlineNames(html), ...inlineNames(newsSrc)]);
   const have = bridgedNames(app);
   const extra = [...have].filter(n => !need.has(n));
   assert.deepEqual(extra, [], `桥接清单里有多余项（内联已不再引用，注意别是拼错了名字）:\n  ${extra.join("\n  ")}`);

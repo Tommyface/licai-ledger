@@ -84,13 +84,16 @@ const runBar = (m, st, lst = LIVE_ST_IDLE, hist = null, hst = HIST_ST_IDLE) => n
 const MC_OK = { macroBlockHtml: () => "<MACRO>" };
 const MACRO_ST_IDLE = { phase: "idle", at: 0, err: "", lastTry: 0 };
 const liveToday = () => "2026-11-09";
-const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_ST_IDLE, mc = MC_OK) => new Function(
+/* v120：线索区在宏观之后，marketHeroHtml 末尾多了 newsHeroHtml() 这一个自由变量。
+   这里只验「接线顺序」，线索区自己的校验/渲染在 tests/news.test.mjs 里真跑。 */
+const NEWS_OK = () => "<NEWS>";
+const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_ST_IDLE, mc = MC_OK, nh = NEWS_OK) => new Function(
   "MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
   "LV", "LIVE", "LIVE_ST", "isTradeDay", "marketAgeText",
-  "MACRO", "MACRO_ST", "MC", "today", "histView", "HIST_ST",
+  "MACRO", "MACRO_ST", "MC", "today", "histView", "HIST_ST", "newsHeroHtml",
   `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(
   m, st, panelOk, aiOk, s => String(s), barOk, LV_OK, null, lst, () => true, ageOk,
-  macro, mst, mc, liveToday, () => null, HIST_ST_IDLE);
+  macro, mst, mc, liveToday, () => null, HIST_ST_IDLE, nh);
 const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */
@@ -388,6 +391,20 @@ test("APP_VER / SW CACHE 同步，market.js 仍在离线清单", () => {
   assert.ok(ver && cache, "读不到版本号");
   assert.equal(ver, cache, "APP_VER 与 SW CACHE 版本不一致");
   assert.ok(sw.includes("./js/core/market.js"), "market.js 掉出 SW 预缓存清单");
+});
+
+/* ---------- 8a. v120：信息面线索区接线 ---------- */
+test("v120 线索区：排在宏观之后，且不混进模型对话的快照区（不进事实层）", () => {
+  const cached = { CPI: { ok: true, latest: { period: "2026-10", val: 0.7 }, series: [] } };
+  const h = runHero(ref, ST_IDLE, LIVE_ST_IDLE, cached);
+  const iMacro = h.indexOf("<MACRO"), iNews = h.indexOf("<NEWS>");
+  assert.ok(iMacro >= 0 && iNews > iMacro, `线索区必须排在宏观之后：macro=${iMacro} news=${iNews}`);
+  const i = app.indexOf("function llmPanelHtml(");
+  const panelSrc = app.slice(i, app.indexOf("\nfunction ", i + 5));
+  assert.ok(!/NEWS|newsHeroHtml/.test(panelSrc), "线索区不许混进模型对话的快照区");
+  const hero = app.slice(app.indexOf("function marketHeroHtml()"), app.indexOf("\nfunction ", app.indexOf("function marketHeroHtml()") + 5));
+  assert.ok(hero.includes("newsHeroHtml()"), "线索区没接进 marketHeroHtml");
+  assert.ok(app.includes('import * as NW from "./js/core/news.js"'), "news.js 没被 import");
 });
 
 /* ---------- 8. v118：宏观块接线 ---------- */
