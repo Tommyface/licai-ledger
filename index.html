@@ -587,6 +587,26 @@ html:not(.inApp) .app-only{display:none}
 .nw-gaps{margin-top:6px;font-size:10px;color:var(--ink3);line-height:1.6}
 .nw-gaps ul{margin:2px 0 0;padding-left:16px}
 
+/* ---------- v122 / P1：AnySearch 检索线索（复用 .nw-* 列表样式）----------
+   只多出检索输入框 / key 粘贴 / 「无发布时间」标签这三组，其余沿用待核线索的视觉；
+   刻意不给「有直抓源互证」用醒目的绿色 —— 互证只表示链接命中，不等于事实已核实。 */
+.ay-q{display:flex;gap:6px;flex-wrap:wrap;margin:7px 0 5px}
+.ay-q input{flex:1;min-width:160px;font-size:11px;padding:5px 7px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink)}
+.ay-go{font-size:10.5px;padding:5px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink2);white-space:nowrap}
+.ay-go:disabled{opacity:.45}
+.ay-key{display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:2px 0 6px}
+.ay-ks{font-size:10px;color:#b8860b}
+.ay-ks-ok{color:var(--ink3)}
+.ay-key input{flex:1;min-width:130px;font-size:10.5px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink)}
+.ay-kb{font-size:10px;padding:4px 7px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink2);white-space:nowrap}
+.ay-nt{font-size:9.5px;color:var(--ink3)}
+.ay-tag{font-size:9.5px;color:var(--ink3);border:1px solid var(--line);border-radius:3px;padding:0 4px}
+.ay-tag-x{color:#b8860b;border-color:#b8860b}
+.ay-note{font-size:10px;color:var(--ink3);line-height:1.65;margin-top:6px;padding-top:5px;border-top:1px dashed var(--line)}
+.ay-note b{color:var(--ink2)}
+.ay-cross{font-size:10px;color:var(--ink3);padding:3px 0}
+.ay-cross b{color:var(--ink2)}
+
 /* ---------- v108：AI 研判卡片 ----------
    一套样式只服务一份结论：结论句 > 信心 > 分段要点 > 动作 > 盲区 > 来源 > 免责。
    依据徽标（台账/体检/债市/检索/未标注）是这个功能的核心可读性来源，颜色必须区分得开，

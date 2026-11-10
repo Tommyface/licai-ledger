@@ -10,8 +10,11 @@
         「隐藏金额」开着时份额与成本一起藏；
      7. 协议形制由原生侧拼 —— 页面只交 input/instructions，网关那种「HTTP 200 + code 非 0」
         的失败要报成业务错误，code 与官方原话原样交回。
-   ★ 真端点没测过（没有凭据），所以这里的用例是「形状契约」而不是「线上实况」：
-     拿到真响应后必须回来补一条按实况形状的用例，别把这份 fixture 当成事实。 */
+   ★ v121 已用讯飞 MaaS /v1/responses（spark-x2.6-4b）实测七组：
+     Responses 形状属实，但 web_search_call 里没有 sources / URL / 发布时间，
+     所有响应也没有 annotations / citations。旧 fixture 里那种
+     「web_search_call.sources[]」是假想形状，保留它只为测来源分级本身，
+     不代表线上实况；实况形状由文件末尾三条 v121 用例钉住。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { llmReq, llmSource, llmGradeSources, llmParse, llmChunkFeed, llmChunkJoin,
@@ -560,4 +563,40 @@ test("快照：出处档位没抓到就不标，不冒充官方", () => {
     { today: "2026-11-07" });
   assert.match(s, /基准 只有文本/);
   assert.ok(!s.includes("出处："), "没有 benchVia 就不许写出处行：" + s);
+});
+
+/* ---- 口径 2 补充（v121 实测）：联网判据由 llmParse 带出 ----
+   真实端点 2026-11-10 打靶：只有 tools:[{"type":"web_search"}] 会触发
+   output[] 里的 web_search_call/completed；私有嵌套那一类返回 200、顶层带 tools，
+   却没有任何检索动作 —— llmParse 必须把它标成未联网，不许看 200 就当成功。 */
+test("llmParse：真联网响应带 grounded=true 与检索词，且来源恒空", () => {
+  const r = llmParse({
+    output: [
+      { type: "web_search_call", status: "completed", action: { query: "中国10年期国债收益率" } },
+      { type: "message", content: [{ text: "约为 1.60%。" }] },
+    ],
+    output_text: "约为 1.60%。",
+  });
+  assert.equal(r.shape, "responses");
+  assert.equal(r.ok, true);
+  assert.equal(r.grounded, true);
+  assert.ok(r.queries.includes("中国10年期国债收益率"));
+  assert.equal(r.citationsMissing, true);
+  assert.deepEqual(r.sources, [], "网关不给结构化引用，不许补字段");
+});
+
+test("★ llmParse：200 + tools 但没有检索动作 → grounded=false（假成功防幻觉）", () => {
+  const r = llmParse({
+    tools: [{ type: "web_search", web_search: { enable: true, search_mode: "deep" } }],
+    output: [{ type: "message", content: [{ text: "约为 1.35%。" }] }],
+    output_text: "约为 1.35%。",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.grounded, false);
+  assert.equal(r.searchCalls.length, 0);
+});
+
+test("llmParse：普通回答 / 400 错误体，grounded 一律 false", () => {
+  assert.equal(llmParse({ output_text: "我无法提供实时数据" }).grounded, false);
+  assert.equal(llmParse({ error: { code: "invalid_prompt" } }).grounded, false);
 });

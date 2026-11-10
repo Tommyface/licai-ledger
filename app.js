@@ -62,8 +62,11 @@ import * as LV from "./js/core/livebond.js";
 import * as MC from "./js/core/macro.js";
 /* v120：信息面 · 待核线索 —— 私有仓 news.json 的云端快照（S1 网页端闭环）。
    与上面三层最大的区别：它**不进事实层**，verified 恒 false，不喂给研判。
-   校验 / 接口开关 / 渲染全收口在 js/core/news.js，app.js 只负责取数与缓存。 */
+   校验 / 接口开关 / 渲染全收口在 js/core/news.js，app.js 只负责取数与缓存。
+   v122 / P1：AnySearch 检索线索是**独立包**（无发布时间），校验 / 渲染收口在
+   js/core/anysearch.js；接口下拉仍是 news.js 的单一出口，不重复第二套。 */
 import * as NW from "./js/core/news.js";
+import * as AY from "./js/core/anysearch.js";
 /* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
    只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。
    v98：补 shelfFreshness（快照过期判据）与 agentViaTag（代销口径短标签），
@@ -105,7 +108,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v120";
+const APP_VER = "v122";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -207,12 +210,17 @@ const MARKET_TTL = 10 * 60 * 1000;      /* 打开债市页的自动刷新阈值 
 const MARKET_ST = { phase: "idle", at: 0, err: "", cached: false };
 let _mktBusy = null;                    /* 在途去重：连点「更新」只发一次请求 */
 
-/* ---------- v120：信息面 · 待核线索（S1 网页端闭环）----------
+/* ---------- v121：信息面 · 待核线索（S1 网页端闭环 + S2 本机直抓）----------
    与 market.json 同一条取数通道（ghReq 读私有仓 contents），但**不进事实层**：
    新闻无法逐条回源核实，verified 恒 false，研判的数字白名单里一个都不许出现。
    接口选择开关是架构必需品 —— 云端有 L1 触发断裂 + cron 排队 + CDN 缓存，
    网页端只能拿到「上一轮的快照」，所以默认 cloud 且显式写数据时点 / 非实时；
-   apk（内置直抓）与 anysearch 是 S2，网页端置灰，见 js/core/news.js。 */
+   S2：apk 通道接 APK 内置 Python（mode:"news"，复用 NativeNav.fetch 与 navservice
+   的同一份 news.py），按 nativeFetchAvailable() 放行。
+   P1：anysearch 通道接 APK 内置 Python（mode:"anysearch"，key 由 NavBridge 注入），
+   只在 App 内放行；网页端无 CORS 且 key 不能进前端，仍置灰。
+   模型联网检索（spark-x2.6-4b / /v1/responses）走 AI 研判，不随线索区自动刷新；
+   AnySearch 同铁律 #5 —— 一次检索一次配额，只能用户点按钮发起，绝不自动触发。 */
 const NEWS_PATH = "news.json";
 const LS_NEWS = "licai.newsCache";
 const LS_NEWS_CH = "licai.newsChannel";
@@ -220,10 +228,22 @@ const NEWS_TTL = 10 * 60 * 1000;      /* 打开债市页的自动刷新阈值，
 let NEWS = null;
 const NEWS_ST = { phase: "idle", at: 0, err: "", ch: newsChannelLoad() };
 let _newsBusy = null;
+
+/* ---------- v122 / P1：AnySearch 检索线索状态 ----------
+   AY 是独立的 hits 包（无发布时间），不与 NEWS 混存、不进 newsCache 那份缓存。
+   key 只存在本机 Keystore：这里只问「有没有」（NativeNav.anysearchHas），
+   粘贴 / 清除走 anysearchSet / anysearchClear，明文绝不进 localStorage / 页面变量。
+   一次检索一次配额：只有 anysearchRun()（用户点按钮）才发，刷新 / 研判预取都不碰它。 */
+let AY_PACK = null;
+const AY_ST = { phase: "idle", err: "", query: AY.AY_DEFAULT_QUERY, busy: false, hasKey: false };
+function ayHasKey() {
+  try { return !!(nativeFetchAvailable() && window.NativeNav && window.NativeNav.anysearchHas && window.NativeNav.anysearchHas()); }
+  catch (e) { return false; }
+}
 function newsChannelLoad() {
   try {
     const v = localStorage.getItem(LS_NEWS_CH);
-    return NW.newsChannelAllowed(v) ? v : "cloud";   /* 默认云端快照；off 由用户显式选 */
+    return NW.newsChannelAllowed(v, { inApp: nativeFetchAvailable() }) ? v : "cloud";
   } catch (e) { return "cloud"; }
 }
 
@@ -4389,34 +4409,163 @@ function newsCacheSave() {
   } catch (e) { }
 }
 
-/** 线索区 HTML。判据与渲染都在 js/core/news.js，这里只把状态喂进去。 */
+/** 线索区 HTML。判据与渲染都在 js/core/news.js（anysearch 在 js/core/anysearch.js），
+    这里只把状态喂进去。clues 传给检索块做「与直抓源互证」的展示标记，不进事实层。 */
 function newsHeroHtml() {
+  AY_ST.hasKey = ayHasKey();
   return NW.newsBlockHtml(NEWS, {
     channel: NEWS_ST.ch,
     phase: NEWS_ST.phase,
     err: NEWS_ST.phase === "err" ? NEWS_ST.err : "",
     ageText: NEWS_ST.at ? marketAgeText(NEWS_ST.at) : "",
+    inApp: nativeFetchAvailable(),
+    ay: AY_PACK,
+    ayPhase: AY_ST.phase,
+    ayErr: AY_ST.phase === "err" ? AY_ST.err : "",
+    ayQuery: AY_ST.query,
+    ayHasKey: AY_ST.hasKey,
+    ayBusy: AY_ST.busy,
+    clues: (NEWS && Array.isArray(NEWS.clues)) ? NEWS.clues : [],
   });
 }
 
-/** 切换接口。apk / anysearch 是 S2，网页端拒绝并把下拉弹回当前合法值。 */
+/** 切换接口。按环境判定：网页端只放行 off/cloud；APK 内另放行 apk / anysearch。
+    ★ anysearch 是「一次检索一次配额」，切过去只读 key 状态 + 重画，绝不自动发检索；
+      要用户点「🔍 检索」才发（anysearchRun）。apk / cloud 仍按原口径点一下刷一次。 */
 function newsChannelSet(key) {
-  if (!NW.newsChannelAllowed(key)) {
-    toast("该接口是 S2（APK 内置直抓 / AnySearch），网页端暂不可用", 3600);
+  const inApp = nativeFetchAvailable();
+  if (!NW.newsChannelAllowed(key, { inApp })) {
+    toast(inApp ? "该接口在当前环境不可用" : "该接口只在 App 内可用（本机直抓 / AnySearch 检索），网页端不可用", 3600);
     marketPaint();
     return;
   }
   NEWS_ST.ch = key;
   try { localStorage.setItem(LS_NEWS_CH, key); } catch (e) { }
-  if (key === "cloud") newsRefresh({ silent: true });
-  else marketPaint();
+  if (key === "cloud" || key === "apk") newsRefresh({ force: true });
+  else { AY_ST.hasKey = ayHasKey(); marketPaint(); }
 }
 
-/** 拉一次云端快照。off 通道零请求；读不到不清空旧包，只在状态行说实话。 */
+/* ---------- v121 · S2：APK 内置信息面直抓 ----------
+   复用净值那条桥（同一个 NativeNav.fetch），只多带 mode:"news"；
+   Python 侧在 navservice._fetch_news 分派，判据与云端 fetch_news.py 是同一份 news.py。
+   不另开桥方法 —— 开了就要动 Java，两处口径迟早漂。
+   四源是公网 HTTP、403 常见，给 120 秒；到点如实说「这一次没抓到」，不清空旧包。 */
+function nativeNewsFetch() {
+  return new Promise(resolve => {
+    if (!nativeFetchAvailable()) {
+      resolve({ ok: false, error: "网页版没有本机抓取，本机直抓用不了" });
+      return;
+    }
+    const id = "n" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: "本机信息面抓取超时（120 秒）" }), 120000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      window.NativeNav.fetch(id, JSON.stringify({ mode: "news", newsTimeout: 8 }));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
+
+/* ---------- v122 / P1：AnySearch 检索（一次请求一次配额，只在 App 内、只手动）----------
+   复用 NativeNav.fetch 那条桥（mode:"anysearch"）。key 不由页面交：NavBridge.fetch
+   会在这一轮从 SecretStore.Slot.ANYSEARCH 注入，页面传的 anysearchKey 一律先丢弃。
+   载荷只带检索词 / 超时 / 条数，绝不带 key；回包是独立 hits 包，过 AY.validateHits。 */
+function nativeAnysearchFetch(query) {
+  return new Promise(resolve => {
+    if (!nativeFetchAvailable()) {
+      resolve({ ok: false, error: "AnySearch 检索只在 App 内可用（网页端无 CORS，key 也不能进前端）" });
+      return;
+    }
+    const id = "ay" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: "AnySearch 检索超时（60 秒）" }), 60000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      /* ★ 不写 anysearchKey：这是页面，key 只由原生桥注入 */
+      window.NativeNav.fetch(id, JSON.stringify({
+        mode: "anysearch", anysearchQuery: String(query || "").slice(0, 120),
+        anysearchTimeout: 20, anysearchMax: 5,
+      }));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
+
+/** 用户点「🔍 检索」才走这里。绝不自动发起（铁律 #5）；读不到不清空上一轮结果。 */
+async function anysearchRun() {
+  if (AY_ST.busy) return;
+  if (!nativeFetchAvailable()) { toast("AnySearch 检索只在 App 内可用", 3600); return; }
+  const el = $("ayQuery");
+  const q = String((el && el.value) || AY_ST.query || AY.AY_DEFAULT_QUERY).trim().slice(0, 120);
+  if (!q) { toast("先填一个检索词", 3000); return; }
+  AY_ST.query = q;
+  AY_ST.hasKey = ayHasKey();
+  if (!AY_ST.hasKey) { toast("先在下面粘贴 AnySearch key（存在本机加密区）", 4200); }
+  AY_ST.busy = true; AY_ST.phase = "loading"; AY_ST.err = "";
+  marketPaint();
+  try {
+    const r = await nativeAnysearchFetch(q);
+    if (!r || !r.ok) throw new Error((r && r.error) || "本机检索没拿到结果");
+    const chk = AY.validateHits(r.hits);
+    if (!chk.ok) throw new Error("本机检索包整包校验未过：" + chk.why);
+    AY_PACK = r.hits;
+    AY_ST.phase = "ok"; AY_ST.err = "";
+  } catch (e) {
+    AY_ST.phase = "err"; AY_ST.err = String((e && e.message) || e).slice(0, 140);
+  } finally {
+    AY_ST.busy = false; AY_ST.hasKey = ayHasKey();
+    marketPaint();
+  }
+}
+
+/** App 内粘贴 key：走 anysearchSet(reqId, key) → 桥的 __aixDone 回话。
+    ★ 明文只在这一次调用里出现，用完立刻清空输入框；不进 localStorage、不进页面变量、
+      不进日志、不进任何回包。页面永远只问「有没有」。 */
+async function anysearchSetKey() {
+  if (!nativeFetchAvailable() || !window.NativeNav || !window.NativeNav.anysearchSet) {
+    toast("只在本机 App 内可配置 AnySearch key", 3600); return;
+  }
+  const el = $("ayKey");
+  let key = String((el && el.value) || "").trim();
+  if (el) el.value = "";                    /* 立刻抹掉输入框里的明文 */
+  if (!key) { toast("先粘贴 key 再点保存", 3000); return; }
+  try {
+    const r = await aixhubBridge("anysearchSet", [key], "AnySearch 密钥");
+    key = null;                            /* 局部引用也不留（尽力而为） */
+    AY_ST.hasKey = ayHasKey();
+    marketPaint();
+    toast(r && r.ok ? "key 已存进本机加密区" : ((r && r.message) || "没存进去，这次没成功"), 3200);
+  } catch (e) {
+    AY_ST.hasKey = ayHasKey(); marketPaint();
+    toast("保存失败：" + String(e), 3600);
+  }
+}
+
+/** 清掉 key：只清 ANYSEARCH 这一个槽，另外四个槽（LLM/AIXHUB/LEDGERME/SYNC）一根手指不碰。 */
+function anysearchClearKey() {
+  if (!nativeFetchAvailable() || !window.NativeNav || !window.NativeNav.anysearchClear) {
+    toast("只在本机 App 内可清除", 3200); return;
+  }
+  try { window.NativeNav.anysearchClear(); } catch (e) { toast("清除失败：" + String(e), 3600); return; }
+  AY_ST.hasKey = false; AY_PACK = null; AY_ST.phase = "idle"; AY_ST.err = "";
+  marketPaint();
+  toast("已清除本机 AnySearch key", 2800);
+}
+
+/** 拉一次信息面。off 零请求；cloud 读私有仓、apk 走本机桥；读不到不清空旧包。
+    ★ anysearch 通道在这里**完全短路**（连 force 也不发）：它是「一次检索一次配额」的
+      手动动作，唯一入口是用户点 bar 上「🔍 检索」→ anysearchRun()。
+      否则「更新此刻 / 打开页面 / TTL」这些自动刷新都会悄悄消耗一次配额（违背铁律 #5）。 */
 function newsRefresh(opts = {}) {
-  if (NEWS_ST.ch !== "cloud") { marketPaint(); return Promise.resolve(false); }
+  const inApp = nativeFetchAvailable();
+  const ch = NEWS_ST.ch;
+  if (ch === "off" || !NW.newsChannelAllowed(ch, { inApp })) {
+    marketPaint(); return Promise.resolve(false);
+  }
+  if (ch === "anysearch") return Promise.resolve(false);   /* 检索只由 anysearchRun() 发 */
   if (_newsBusy) return _newsBusy;
-  if (!syncCfgOk()) {
+  if (ch === "cloud" && !syncCfgOk()) {
     NEWS_ST.phase = "err";
     NEWS_ST.err = SYNC.owner || SYNC.repo
       ? "同步未就绪（缺令牌，或本机 App 还是旧壳）"
@@ -4430,8 +4579,17 @@ function newsRefresh(opts = {}) {
   marketPaint();
   _newsBusy = (async () => {
     try {
-      const n = await fetchNews();
-      if (!n) throw new Error("没读到快照（文件不存在，或整包校验未过）");
+      let n;
+      if (ch === "apk") {
+        const r = await nativeNewsFetch();
+        if (!r || !r.ok) throw new Error((r && r.error) || "本机直抓没拿到快照");
+        const chk = NW.validateNews(r.news);
+        if (!chk.ok) throw new Error("本机快照整包校验未过：" + chk.why);
+        n = r.news;
+      } else {
+        n = await fetchNews();
+        if (!n) throw new Error("没读到快照（文件不存在，或整包校验未过）");
+      }
       NEWS = n;
       NEWS_ST.phase = "ok"; NEWS_ST.err = ""; NEWS_ST.at = Date.now();
       newsCacheSave();
@@ -7700,7 +7858,7 @@ Object.assign(window, {
   briefSearchOff, briefSearchOffRetry,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,

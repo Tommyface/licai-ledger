@@ -2,7 +2,8 @@
    ★ 与私有仓 tests/test_news.py 是同一张判据的两半；这里额外盯网页端特有的三条：
      1. 不冒充实时 —— cloud 通道必须写「数据时点」与「非实时」；
      2. 不进事实层 —— 模块不导出任何 newsText / newsFacts / aiText 出口；
-     3. 接口开关 —— 网页端只放行 off/cloud，apk/anysearch 置灰并标 S2，且不许绕过。
+     3. 接口开关 —— 网页端只放行 off/cloud，apk/anysearch 置灰（仅 App 内），且不许绕过；
+        P1 起 App 内另放行 anysearch（端点跑通、key 由桥注入）。
    另外把资金面陈旧闸门（实测 2023/2025 历史样本）在 JS 侧再钉一遍。 */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -52,7 +53,7 @@ test("常量：schema / promptVer / 禁用词 / 上限 与私有仓同源", () =
     "预计明日", "收益率预测", "DR001 报", "DR007 报"]);
 });
 
-test("接口开关：网页端只放行 off / cloud，apk / anysearch 一律 S2", () => {
+test("接口开关：网页端只放行 off / cloud，apk / anysearch 一律仅 App 内", () => {
   assert.equal(NW.NEWS_CHANNELS.length, 4);
   assert.equal(NW.newsChannelAllowed("off"), true);
   assert.equal(NW.newsChannelAllowed("cloud"), true);
@@ -156,11 +157,11 @@ test("渲染：off 通道不渲染任何线索", () => {
   assert.match(h, /<button class="nw-upd" disabled/);
 });
 
-test("渲染：apk / anysearch 选项 disabled 且标 S2；绕过置灰一律回落 off", () => {
+test("渲染：apk / anysearch 选项 disabled 且标「仅 App 内」；绕过置灰一律回落 off", () => {
   const h = NW.newsBlockHtml(goodNews(), { channel: "cloud" });
   assert.match(h, /<option value="apk"[^>]*disabled/);
   assert.match(h, /<option value="anysearch"[^>]*disabled/);
-  assert.match(h, /S2/);
+  assert.match(h, /仅 App 内/);
   for (const ch of ["apk", "anysearch", "nonsense"]) {
     const forced = NW.newsBlockHtml(goodNews(), { channel: ch });
     assert.match(forced, /接口已关闭/, `${ch} 不许在网页端渲染线索`);
@@ -207,4 +208,37 @@ test("红线：模块不导出任何给研判的文本出口（不进事实层�
   }
   assert.ok(keys.includes("validateNews"));
   assert.ok(keys.includes("newsBlockHtml"));
+});
+
+/* ---- v121 · S2 + v122 · P1：接口开关按环境判定 ---- */
+test("通道判定：网页端只放行 web，APK 内另放行 apk / anysearch", () => {
+  assert.equal(NW.newsChannelAllowed("apk"), false);
+  assert.equal(NW.newsChannelAllowed("apk", { inApp: true }), true);
+  assert.equal(NW.newsChannelAllowed("anysearch"), false);
+  assert.equal(NW.newsChannelAllowed("anysearch", { inApp: true }), true);  /* P1：端点跑通了 */
+  assert.equal(NW.newsChannelAllowed("cloud", { inApp: true }), true);
+  assert.equal(NW.newsChannelAllowed("nonsense", { inApp: true }), false);
+  assert.equal(NW.NEWS_CHANNELS.filter(c => c.app).length, 4);
+});
+
+test("newsBlockHtml：APK 内 apk 通道可选且写明非实时；网页端绕过直传也回退 off", () => {
+  const app = NW.newsBlockHtml(goodNews(), { channel: "apk", inApp: true });
+  assert.ok(app.includes("本机直抓"));
+  assert.ok(app.includes("非实时"));
+  assert.ok(!/value="apk"[^>]*disabled/.test(app), "APK 内 apk 档不该置灰");
+  const web = NW.newsBlockHtml(goodNews(), { channel: "apk" });
+  assert.ok(web.includes("接口已关闭"), "网页端绕过直传 apk 也必须回退 off");
+  assert.ok(/value="apk"[^>]*disabled/.test(web));
+});
+
+test("newsBlockHtml：P1 anysearch 在 App 内可选并渲染检索块；网页端绕过直传回退 off", () => {
+  const app = NW.newsBlockHtml(goodNews(), { channel: "anysearch", inApp: true });
+  assert.ok(app.includes("AnySearch 检索线索"));
+  assert.ok(app.includes("🔍 检索"));
+  assert.ok(app.includes("anysearchRun()"), "检索按钮只调手动检索，绝不挂自动刷新");
+  assert.ok(!/value="anysearch"[^>]*disabled/.test(app), "APK 内 anysearch 档不该置灰");
+  assert.ok(!app.includes("cls.cn/detail"), "检索块不渲染四源 clues");
+  const web = NW.newsBlockHtml(goodNews(), { channel: "anysearch" });
+  assert.ok(web.includes("接口已关闭"), "网页端绕过直传 anysearch 也必须回退 off");
+  assert.ok(/value="anysearch"[^>]*disabled/.test(web));
 });

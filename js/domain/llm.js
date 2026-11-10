@@ -8,9 +8,13 @@
         所以这里连「key」这个字都不许出现成字段名 —— 出现了就等于承诺 JS 能填。
      2. **不猜端点返回的形状。** Responses 形制（output[] 里有 message / web_search_call）
         与 Chat 形制（choices[]）都收，认不出来就明说 unknown。
-        ★ 真实端点到底返回什么、web_search_call 里带不带 URL 与发布时间，
-          截至本版**没有实测过**（没有可用凭据）。解析器因此只做「有则收、无则明说」，
-          绝不为了好看去补字段 —— 补出来的出处比没有出处更坏。
+        ★ v121 已实测（讯飞 MaaS /v1/responses，spark-x2.6-4b）：
+          web_search_call 里只有 action.queries / query / type / status，**没有 sources、
+          没有 URL、没有发布时间**；所有响应也都没有 annotations / citations。
+          所以「来源分级」在这一网关上恒为空 —— 这是网关的事实，不补字段、不编出处。
+          「是否真联网」改由 js/core/websearch.js 的 xfGrounding() 一处判定：
+          output[] 里必须有 web_search_call 且 status=completed；200、tools 字段、
+          正文写了「据财政部」都不算。判为未联网时正文只作待核线索、不进事实层。
      3. **来源分级要 URL + 发布时间两样齐。** 缺任何一条就不入账，进 dropped 并写明缺哪样。
         与铁律 #3 同义：一条没有出处的「模型说的」不能进台账。
      4. **失败不自动重试。** 一次请求一次计费，超时 / 断网 / 5xx 一律把状态交回用户，
@@ -48,6 +52,8 @@
      两侧回调名字对得上，比名字的门禁（verify-web 第 2f 项）一直绿，所以这次把类型也钉进
      check_bridge_guard.py 第 6 项。页面这一侧改的是文案：类型不一致与「真没回」不再共用一句话。
 */
+
+import { xfGrounding } from "../core/websearch.js";
 
 /** 桥名。Java 侧 addJavascriptInterface(..., "NativeLlm") 必须同名，verify-web.sh 比对两侧方法。 */
 export const LLM_BRIDGE = "NativeLlm";
@@ -312,10 +318,18 @@ function bizError(obj) {
  *   chat      —— Chat 形制：choices[0].message.content
  *   unknown   —— 其它（含错误体；星火这类网关的 code 非 0 会报成业务错误而不是「形状不认识」）
  * @param {any} obj 已经 JSON.parse 过的响应
- * @returns {{ shape: string, ok: boolean, text: string, sources: any[], dropped: any[], usage: { input: number, output: number }, error: string }}
+ * @returns {{ shape: string, ok: boolean, text: string, sources: any[], dropped: any[], usage: { input: number, output: number }, error: string, grounded: boolean, queries: string[], searchCalls: any[], citationsMissing: boolean }}
  */
 export function llmParse(obj) {
-  const out = { shape: "unknown", ok: false, text: "", sources: /** @type {any[]} */ ([]), dropped: /** @type {any[]} */ ([]), usage: { input: 0, output: 0 }, error: "" };
+  const out = {
+    shape: "unknown", ok: false, text: "",
+    sources: /** @type {any[]} */ ([]), dropped: /** @type {any[]} */ ([]),
+    usage: { input: 0, output: 0 }, error: "",
+    /* v121：联网判据收口在 websearch.xfGrounding()，这里只把结论带出来。
+       grounded=false 的正文只作待核线索，不进事实层 / 数字白名单。 */
+    grounded: false, queries: /** @type {string[]} */ ([]),
+    searchCalls: /** @type {any[]} */ ([]), citationsMissing: true,
+  };
   if (!obj || typeof obj !== "object") { out.error = "响应不是对象"; return out; }
   if (obj.error) {
     out.error = String(obj.error.message || obj.error.code || "端点返回 error 字段");
@@ -373,6 +387,13 @@ export function llmParse(obj) {
       ? "认不出的响应形状（既没有 output[] 也没有 choices[]）"
       : "响应里没有正文");
   }
+  /* v121：判据只看 output[] 里有没有 web_search_call/completed，不看 200、不看 tools。
+     私有嵌套那一类「200 但没检索」的响应在这里被如实标为未联网。 */
+  const grounding = xfGrounding(obj);
+  out.grounded = grounding.grounded;
+  out.queries = grounding.queries;
+  out.searchCalls = grounding.calls;
+  out.citationsMissing = grounding.noCitations;
   return out;
 }
 

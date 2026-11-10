@@ -14,7 +14,10 @@
    ★ 云端不是实时：3 档 cron + GitHub 排队 + Pages CDN 缓存，点「刷新」读到的
      仍是上一轮抓的快照。非 apk 通道一律显式写「数据时点」与「非实时」，
      绝不让「3 点点的更新」看起来像 3 点的行情。接口选择开关因此是架构必需品：
-       off / cloud 是 S1 网页端可用通道；apk / anysearch 是 S2，网页端置灰。
+       S1 网页端只有 off / cloud；S2 把 apk 接到 APK 内置 Python（mode:"news"）；
+       P1 把 anysearch 接到 APK 内置 Python（mode:"anysearch"，key 由桥注入），
+       两者都按环境判定：网页端置灰，APK 内有 NativeNav 桥才放行。
+       anysearch 只在 App 内可用（网页端无 CORS、key 不能进前端）。
 
    ★ 资金面陈旧闸门：货币网 CSV 实测会返回 2023/2025 的历史样本。带数值就必须
      有新鲜 asOf（≤ NEWS_STALE_DAYS），否则整包拒收 —— 宁可显示「资金面暂缺」，
@@ -24,6 +27,7 @@
    是同一张判据的两半；tests/news.test.mjs 是对照表。 */
 
 import { esc } from "./util.js";
+import * as AY from "./anysearch.js";
 
 export const NEWS_SCHEMA = "licai-ledger.news/0.1";
 export const NEWS_PROMPT_VER = "news-1";
@@ -42,12 +46,15 @@ export const NEWS_STALE_DAYS = 10;
 /** 界面上每条线索最多显示多少字摘要（正文可能很长，不撑爆弹层）。 */
 const SUMMARY_SHOW = 90;
 
-/** 接口选择开关的四个档位。web=true 才是 S1 网页端可用的通道。 */
+/** 接口选择开关的四个档位。
+ *  web=true：网页端（GitHub Pages）可用；app=true：APK 内（有 NativeNav 桥）可用。
+ *  anysearch（P1）：端点跑通、key 由 NavBridge 从 Keystore 注入，仅在 App 内放行 ——
+ *  网页端无 CORS（POST 无 ACAO）且 key 不能进前端，所以那边仍置灰，不摆点了没反应的档位。 */
 export const NEWS_CHANNELS = [
-  { key: "off", label: "关闭", web: true, hint: "不读取信息面数据" },
-  { key: "cloud", label: "云端快照", web: true, hint: "读私有仓 news.json · 3 档 cron · 非实时" },
-  { key: "apk", label: "本机直抓", web: false, hint: "S2 · APK 内置 Python 直抓四源" },
-  { key: "anysearch", label: "AnySearch", web: false, hint: "S2 · App 内粘贴 key" },
+  { key: "off", label: "关闭", web: true, app: true, hint: "不读取信息面数据" },
+  { key: "cloud", label: "云端快照", web: true, app: true, hint: "读私有仓 news.json · 3 档 cron · 非实时" },
+  { key: "apk", label: "本机直抓", web: false, app: true, hint: "S2 · APK 内置 Python 直抓四源（mode:news）" },
+  { key: "anysearch", label: "AnySearch", web: false, app: true, hint: "P1 · APK 内置 Python 检索（mode:anysearch）· 需 App 内粘贴 key · 一次检索一次配额" },
 ];
 
 const isObj = v => v && typeof v === "object" && !Array.isArray(v);
@@ -56,10 +63,12 @@ const isDt = v => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(v || ""));
 const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
 const isUrl = v => /^https?:\/\/[^\s]+$/i.test(String(v || ""));
 
-/** 网页端这个通道能不能用。apk / anysearch 在 S1 一律拒绝（防绕过置灰直接调）。 */
-export function newsChannelAllowed(key) {
+/** 这个通道在当前环境能不能用。
+ *  inApp=false（缺省）＝网页端，只认 web:true；inApp=true＝APK 内，有桥才认 app:true。
+ *  取值层兜底是硬要求：绕过下拉置灰直接调 newsChannelSet 也拦得住。 */
+export function newsChannelAllowed(key, opts = {}) {
   const c = NEWS_CHANNELS.find(x => x.key === key);
-  return !!(c && c.web);
+  return !!(c && (opts.inApp ? c.app : c.web));
 }
 
 /** YYYY-MM-DD 与包内 asOf 相差天数；解析失败返回 NaN。按 UTC 纯日期算，不涉时区。 */
@@ -159,11 +168,15 @@ export function newsAsOfText(news, now = Date.now()) {
   return `数据时点 ${s}（北京）· ${ago}`;
 }
 
-/** 接口开关：<select>。apk / anysearch 在 S1 网页端 disabled 且标 S2。 */
-function channelSelectHtml(cur) {
+/** 接口开关：<select>。按环境置灰：网页端只放行 web:true，APK 内放行 app:true。 */
+function channelSelectHtml(cur, env = {}) {
+  const inApp = !!env.inApp;
   const opts = NEWS_CHANNELS.map(c => {
-    const dis = c.web ? "" : " disabled";
-    const label = c.web ? c.label : `${c.label}（S2）`;
+    const allowed = inApp ? c.app : c.web;
+    const dis = allowed ? "" : " disabled";
+    /* 网页端不可用的都是「仅 App 内」（apk 本机直抓 / anysearch 检索），
+       不再写「S2 / 待补」—— 那些档位已经实现了，只是跑在 APK 内 Python 里。 */
+    const label = allowed ? c.label : `${c.label}（仅 App 内）`;
     const sel = c.key === cur ? " selected" : "";
     return `<option value="${esc(c.key)}"${sel}${dis} title="${esc(c.hint)}">${esc(label)}</option>`;
   }).join("");
@@ -189,15 +202,30 @@ function fundingHtml(f) {
 
 /**
  * 线索区主渲染。新闻永不进事实层，本函数也只产出 HTML，不产出任何给模型读的文本。
+ * 接口下拉是**单一出口**（四个档位都在这里）；anysearch 通道时把主体区换成
+ * 独立检索线索块（js/core/anysearch.js），不重复第二套接口开关、不进 clues 主表。
  * @param {any} news 通过 validateNews 的整包；null 表示还没读到
- * @param {{channel?:string, phase?:string, err?:string, ageText?:string}} [opts]
+ * @param {{channel?:string, phase?:string, err?:string, ageText?:string, inApp?:boolean,
+ *          ay?:any, ayPhase?:string, ayErr?:string, ayQuery?:string, ayHasKey?:boolean,
+ *          ayBusy?:boolean, clues?:any[]}} [opts]
  */
 export function newsBlockHtml(news, opts = {}) {
-  const ch = newsChannelAllowed(opts.channel) ? opts.channel : "off";
+  const inApp = !!opts.inApp;
+  const ch = newsChannelAllowed(opts.channel, { inApp }) ? opts.channel : "off";
+  const modeText = ch === "cloud" ? "云端快照 · 3 档 cron · <b>非实时</b>"
+    : ch === "apk" ? "本机直抓 · 四源 HTTP · <b>非实时</b>"
+    : ch === "anysearch" ? "AnySearch 检索线索 · 需 key · <b>无发布时间 · 非实时</b>"
+    : "已关闭";
+  /* anysearch 是「一次检索一次配额」，按钮改为「检索」，绝不挂自动刷新口径。
+     ★ 两个 onclick 都写成完整字面量（函数名不抽成变量）：tests/handlers.test.mjs
+       静态对账内联入口，函数名若是变量拼出来的它抓不到，会被误判成「多余项」。 */
+  const updBtn = ch === "anysearch"
+    ? `<button class="nw-upd" onclick="anysearchRun()">🔍 检索</button>`
+    : `<button class="nw-upd" ${ch === "off" ? "disabled" : ""} onclick="newsRefresh({force:true})">↻ 刷新线索</button>`;
   const bar = `<div class="nw-bar">
-      <label class="nw-ch">接口 ${channelSelectHtml(ch)}</label>
-      <span class="nw-mode">${ch === "cloud" ? "云端快照 · 3 档 cron · <b>非实时</b>" : "已关闭"}</span>
-      <button class="nw-upd" ${ch === "off" ? "disabled" : ""} onclick="newsRefresh({force:true})">↻ 刷新线索</button>
+      <label class="nw-ch">接口 ${channelSelectHtml(ch, { inApp })}</label>
+      <span class="nw-mode">${modeText}</span>
+      ${updBtn}
     </div>`;
   const head = `<div class="nw-t">信息面<span class="nw-x">待核线索 · 不进事实层</span></div>`;
   const foot = `<div class="cap" style="padding-top:4px">新闻只作待核线索：
@@ -206,16 +234,26 @@ export function newsBlockHtml(news, opts = {}) {
     四源：财联社电报 / 东财 7×24 / 华尔街见闻 / 中国货币网。</div>`;
   if (ch === "off") {
     return `<div class="nw-wrap">${head}${bar}
-      <div class="nw-empty">接口已关闭。选「云端快照」读取私有仓 news.json（非实时）。</div>${foot}</div>`;
+      <div class="nw-empty">接口已关闭。网页端选「云端快照」读私有仓 news.json；App 内可选「本机直抓」「AnySearch 检索」（均为非实时）。</div>${foot}</div>`;
   }
+  /* P1：AnySearch 是独立包（无发布时间），主体换成检索线索块，不碰 clues / funding。 */
+  if (ch === "anysearch") {
+    const body = AY.anysearchBodyHtml(opts.ay || null, {
+      phase: opts.ayPhase, err: opts.ayErr, query: opts.ayQuery,
+      hasKey: opts.ayHasKey, busy: opts.ayBusy,
+      clues: opts.clues || [], inApp,
+    });
+    return `<div class="nw-wrap">${head}${bar}${body}</div>`;
+  }
+  const srcName = ch === "apk" ? "本机直抓结果" : "云端快照";
   if (opts.phase === "loading" && !news) {
-    return `<div class="nw-wrap">${head}${bar}<div class="nw-empty">正在读取云端快照…</div>${foot}</div>`;
+    return `<div class="nw-wrap">${head}${bar}<div class="nw-empty">正在读取${srcName}…</div>${foot}</div>`;
   }
   if (!news) {
-    const why = opts.err ? `这一次没读到：${esc(opts.err)}` : "还没读到云端快照";
+    const why = opts.err ? `这一次没读到：${esc(opts.err)}` : `还没读到${srcName}`;
     return `<div class="nw-wrap">${head}${bar}<div class="nw-empty">${why}</div>${foot}</div>`;
   }
-  /* 非 apk 通道必须显式写数据时点：这是「不冒充实时」的硬要求。 */
+  /* 所有通道（含本机直抓）都显式写数据时点：这是「不冒充实时」的硬要求。 */
   const asof = `<div class="nw-asof">${esc(newsAsOfText(news))}${opts.ageText ? ` · 本机 ${esc(opts.ageText)} 取到` : ""}</div>`;
   const clues = (Array.isArray(news.clues) ? news.clues : []).map(c => {
     const sm = String(c.summary || "").slice(0, SUMMARY_SHOW);
