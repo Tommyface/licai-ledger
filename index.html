@@ -599,6 +599,26 @@ html:not(.inApp) .app-only{display:none}
 .ay-ks-ok{color:var(--ink3)}
 .ay-key input{flex:1;min-width:130px;font-size:10.5px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink)}
 .ay-kb{font-size:10px;padding:4px 7px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink2);white-space:nowrap}
+
+/* ---------- v124：联网检索状态横幅（AI 研判 / 追问共用） ----------
+   判据在 js/core/websearch.js：grounded 只认 output[].web_search_call 且全部 completed。
+   绿 = 真检索过；黄 = 没检索到动作（200 也不算数 —— v121 打靶证实那是假成功幻觉）。 */
+.ws-banner{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;
+  margin:8px 0 2px;padding:7px 9px;border-radius:8px;font-size:10px;line-height:1.55}
+.ws-banner.ws-ok{background:rgba(46,125,50,.09);border:1px solid rgba(46,125,50,.35)}
+.ws-banner.ws-warn{background:rgba(176,32,18,.07);border:1px solid rgba(176,32,18,.30)}
+.ws-tag{font-weight:700;white-space:nowrap}
+.ws-ok .ws-tag{color:#2e7d32}
+.ws-warn .ws-tag{color:#b02012}
+.ws-asof{color:var(--ink3);white-space:nowrap}
+.ws-q{color:var(--ink2);word-break:break-all}
+.ws-note{flex-basis:100%;color:var(--ink3)}
+.ws-mini-ok{color:#2e7d32}
+.ws-mini-warn{color:#b02012}
+/* v123：网页端只读说明（key 只在本机 App 内可配，网页端零输入） */
+.ay-key-web{display:block;padding:6px 8px;border:1px dashed var(--line);border-radius:6px;background:var(--bg)}
+.ay-key-web .ay-ks{display:block;font-size:10.5px;color:var(--ink2)}
+.ay-webhint{display:block;margin-top:3px;font-size:10px;color:var(--ink3);line-height:1.6}
 .ay-nt{font-size:9.5px;color:var(--ink3)}
 .ay-tag{font-size:9.5px;color:var(--ink3);border:1px solid var(--line);border-radius:3px;padding:0 4px}
 .ay-tag-x{color:#b8860b;border-color:#b8860b}

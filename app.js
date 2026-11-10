@@ -47,6 +47,10 @@ import { switchAdvice } from "./js/domain/switchadv.js";
 import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
   llmDegrade, LLM_BRIDGE, LLM_TIMEOUT_MS, llmTranscript, llmRoundInput, llmBudget, LLM_MAX_ROUNDS,
   llmSnapshot, LLM_SNAPSHOT_MAX_ITEMS, llmMetaOf, llmMetaErr, LLM_CANCEL_TEXT } from "./js/domain/llm.js";
+/* v124：联网状态横幅（P0）。判据 xfGrounding 在 v121 就进了 llmParse，但界面上一直看不见 ——
+   数据层通了、展示层没接，用户无从知道这一发是真检索还是「200 假成功」。
+   MaaS 预设两个常量也从这里拿，端点/模型名不再散落两处。 */
+import { xfBannerHtml, XF_NO_CITATIONS, XF_UNGROUNDED, XF_DEFAULT_BASE, XF_MODEL } from "./js/core/websearch.js";
 /* v100：债市晴雨表（私有仓每日官方曲线推导，公开仓只读）。校验/分组/面板/快照块
    判据全收口在 js/core/market.js（tests/market.test.mjs 与私有仓同一条契约）。 */
 import { MARKET_SCHEMA, validateMarket, marketAiBlock, marketAiTextSafe,
@@ -108,7 +112,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v122";
+const APP_VER = "v124";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2372,6 +2376,48 @@ function llmCanStyle() {
   const c = LLM.cfg;
   return !!(c && Object.prototype.hasOwnProperty.call(c, "apiStyle"));
 }
+/**
+ * 这台壳认不认「请求时长」设置（v124 · P0）。与 llmCanStyle 同一判法：**判键在不在**。
+ * v121 起 LlmBridge 支持 readMs/budgetMs，但旧壳的 getConfig 里没有这两个键 ——
+ * 按值判的话旧壳会被读成默认 90 秒，输入框画出来了、改了不生效，比没有更坏。
+ * @returns {boolean}
+ */
+function llmCanTimeout() {
+  const c = LLM.cfg;
+  return !!(c && Object.prototype.hasOwnProperty.call(c, "readMs"));
+}
+/**
+ * 页面侧实际生效的超时（v124 · P0）。Java 侧读超时到点会自己断开并回报错误，
+ * 页面的计时器必须**晚于**它 —— 否则页面先落「超时」，几秒后答案又回来，
+ * 用户看到的是「超时了但答案自己冒出来」的灵异现场。
+ * 缓冲取 15 秒（真机实测 MaaS 联网检索 28~69 秒、Error 回包更快，15 秒够桥传话）。
+ * 网页端没有桥配置，维持 LLM_TIMEOUT_MS 原值。
+ * @returns {number}
+ */
+function llmEffTimeoutMs() {
+  if (llmBridge() && llmCanTimeout()) {
+    const r = Number((LLM.cfg || {}).readMs) || 0;
+    if (r > 0) return Math.max(LLM_TIMEOUT_MS, r + 15000);
+  }
+  return LLM_TIMEOUT_MS;
+}
+/**
+ * 联网横幅的入参（v124 · P0）。判据来自 llmParse 的 grounding 字段（v121）：
+ * grounded=true 只在 output[] 里有 web_search_call 且全部 completed ——
+ * 200、顶层 tools、正文写「据财政部」都不算，那三种都是 v121 打靶抓到的假成功。
+ * ★ 只在检索开关开着时才显示：研判按契约不联网，横幅一直挂着「未联网」是噪音；
+ *   开着检索才存在「真检索 / 假成功」的分辨问题。
+ * @param {{grounded?:boolean, queries?:string[], citationsMissing?:boolean}|null|undefined} g
+ * @returns {string} HTML；不该显示时返回空串
+ */
+function groundBannerHtml(g) {
+  if (!g || (LLM.cfg && LLM.cfg.search === false)) return "";
+  return xfBannerHtml({
+    grounded: !!g.grounded,
+    queries: Array.isArray(g.queries) ? g.queries : [],
+    note: g.grounded ? XF_NO_CITATIONS : XF_UNGROUNDED,
+  }, { asOf: "" });
+}
 function llmStatusLine() {
   if (!llmBridge()) return `<div class="note b">${esc(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }))}</div>`;
   const c = LLM.cfg || {};
@@ -2415,6 +2461,7 @@ function llmSaveCfg() {
   const model = (($("llmModel") || {}).value || "").trim();
   const search = !!($("llmSearch") || {}).checked;
   const canStyle = llmCanStyle();
+  const canTimeout = llmCanTimeout();
   const cfgOut = { baseUrl, model, search };
   /* 密钥不在这个 JSON 里 —— 它能写的只有端点、模型名、检索开关，外加下面这一个协议选择；
      原生侧（LlmBridge.setConfig）同样只认这四个键，多出来的字段它会丢掉。
@@ -2424,12 +2471,30 @@ function llmSaveCfg() {
     const s = String(($("llmStyle") || {}).value || "");
     cfgOut.apiStyle = s === "chat" ? "chat" : "responses";
   }
+  /* v124（P0）：请求时长跟着这一份一起存。与 Java 侧同一套钳制
+     （READ 30~300 秒；BUDGET ≥ 读超时+5、至多 600 秒），超出范围的输入悄悄收进边界
+     —— 但 toast 要说「已收进」，不能让人以为存的就是他填的那个数。 */
+  let clamped = false;
+  if (canTimeout) {
+    const rS = Number(($("llmReadMs") || {}).value || 0);
+    const bS = Number(($("llmBudgetMs") || {}).value || 0);
+    let r = Math.round(rS * 1000);
+    if (r < 30000 || r > 300000) clamped = true;
+    r = Math.max(30000, Math.min(300000, r));
+    let bud = Math.round(bS * 1000);
+    if (bud < r + 5000 || bud > 600000) clamped = true;
+    bud = Math.max(r + 5000, Math.min(600000, bud));
+    cfgOut.readMs = r;
+    cfgOut.budgetMs = bud;
+  }
   try { b.setConfig(JSON.stringify(cfgOut)); }
   catch (e) { return toast("保存失败：" + e, 3600); }
   llmReadCfg();
   /* 设置页那一行的状态文案是上一次渲染的，端点变了不重画就会停在「端点未配置」 */
   renderLlm();
-  toast(canStyle ? "已保存端点、模型与协议" : "已保存端点与模型", 2400);
+  toast((clamped ? "已保存（有超出一边界的数值已收进允许范围）"
+    : canTimeout ? "已保存端点、模型与请求时长"
+    : canStyle ? "已保存端点、模型与协议" : "已保存端点与模型"), 3000);
   llmRepaint();
 }
 /**
@@ -2450,10 +2515,35 @@ function llmSetSearch(on) {
   /** @type {any} */
   const out = { baseUrl: c.baseUrl || "", model: c.model || "", search: !!on };
   if (llmCanStyle()) out.apiStyle = c.apiStyle === "chat" ? "chat" : "responses";
+  /* v124：请求时长也必须整份带上 —— v121 给原生加了 readMs/budgetMs 之后，
+     这里少带一个键就等于把它清回默认值：用户调过 180 秒、点一下研判卡的「关掉检索」，
+     超时又变回 90 秒，看起来像「设置自己会变」。 */
+  if (llmCanTimeout()) {
+    out.readMs = Number(c.readMs) || 90000;
+    out.budgetMs = Number(c.budgetMs) || 110000;
+  }
   try { b.setConfig(JSON.stringify(out)); }
   catch (e) { toast("改「联网检索」失败：" + e, 3600); return false; }
   llmReadCfg();
   return true;
+}
+/**
+ * 一键填入讯飞 MaaS 预设（v124 · P0）。只填表、不落盘 —— 保存永远由用户亲手点：
+ * 「填预设」是改输入框，「保存」是改行为，两件事分开，人才看得见自己改了什么。
+ * 密钥不在此列：它走原生输入框（llmSetKey / promptKey），页面全程不经手。
+ * 端点/模型名与 js/core/websearch.js 的判据常量同源（XF_DEFAULT_BASE / XF_MODEL），
+ * 同一个形状两处各写一遍迟早对不上。
+ */
+function llmPresetXf() {
+  const b = llmBridge();
+  if (!b) return toast("端点配置只在本机 App 内可用", 3200);
+  const base = $("llmBase"), model = $("llmModel"), search = $("llmSearch"), style = $("llmStyle");
+  if (!base || !model) return toast("先打开「模型接入」这一页再点预设", 3000);
+  base.value = XF_DEFAULT_BASE;
+  model.value = XF_MODEL;
+  if (search) search.checked = true;
+  if (style) style.value = "responses";       /* 旧壳没有这个下拉，跳过即可 */
+  toast("已填入讯飞 MaaS 预设（华北区 /v1 · spark-x2.6-4b）。核对后点「保存端点」生效；密钥请点「配置密钥」粘贴。", 5200);
 }
 /** 研判卡上的「先关掉检索」：只改开关、只重画，**不重发** —— 关和发是两件事，别合并。 */
 function briefSearchOff() {
@@ -2480,7 +2570,7 @@ function llmResultHtml() {
   if (LLM.phase === "cancelled")
     return head + `<div class="note r">${esc(LLM_CANCEL_TEXT)}</div>`;
   if (LLM.phase === "timeout")
-    return head + `<div class="note r">等满 ${Math.round(LLM_TIMEOUT_MS / 1000)} 秒没回。<b>这一次可能已经计费</b>，
+    return head + `<div class="note r">等满 ${Math.round(llmEffTimeoutMs() / 1000)} 秒没回。<b>这一次可能已经计费</b>，
       确认端点状态再重试。</div>`;
   if (LLM.phase === "error")
     return head + `<div class="note r">${esc(LLM.err || "端点没返回可用内容")}</div>`;
@@ -2499,7 +2589,11 @@ function llmResultHtml() {
     : "";
   const usage = (r.usage.input || r.usage.output)
     ? `<div class="cap" style="padding-top:8px">形状 ${esc(r.shape)} · 输入 ${r.usage.input} / 输出 ${r.usage.output} token</div>` : "";
-  return head + `<div class="note" style="margin-top:12px;white-space:pre-wrap">${esc(r.text)}</div>${src}${drop}${usage}`;
+  /* v124：联网横幅。答案正文之前先说清「这一发真检索了没有」——
+     v121 打靶证实过：200、顶层带 tools、正文写「据财政部」都可以是假成功，
+     判据只有 output[].web_search_call.status === "completed" 一种。 */
+  const gb = groundBannerHtml({ grounded: r.grounded, queries: r.queries, citationsMissing: r.citationsMissing });
+  return head + gb + `<div class="note" style="margin-top:12px;white-space:pre-wrap">${esc(r.text)}</div>${src}${drop}${usage}`;
 }
 /** 上文那一叠。已经落定的轮次才进来，当前这一轮走 #llmOut（它在上面）。
     答案在这里是给人看的全文；发给模型的是压平后的文本，两者同一份内容。 */
@@ -2515,8 +2609,13 @@ function llmHistoryHtml() {
     const src = (t.sources && t.sources.length)
       ? `<div class="cap" style="padding-top:4px">出处 ${t.sources.length} 条 · 形状 ${esc(t.shape || "—")}</div>`
       : `<div class="cap" style="padding-top:4px">这一轮没有可核实的出处</div>`;
+    /* v124：历史轮的联网标记。小字就够 —— 横幅只给当前轮，历史轮一眼扫过去要的是可扫读。 */
+    const net = (LLM.cfg && LLM.cfg.search === false) ? ""
+      : t.grounded === undefined ? ""
+      : t.grounded ? `<div class="cap ws-mini-ok">✓ 已确认联网检索</div>`
+      : `<div class="cap ws-mini-warn">⚠ 未联网 · 正文只作待核线索</div>`;
     return `<div class="note" style="margin-top:8px">第 ${i + 1} 轮 · 问：${esc(t.q)}
-      <div style="white-space:pre-wrap;margin-top:5px">${esc(t.a || t.err || "（没拿到内容）")}</div>${src}</div>`;
+      <div style="white-space:pre-wrap;margin-top:5px">${esc(t.a || t.err || "（没拿到内容）")}</div>${src}${net}</div>`;
   }).join("");
   return `<div class="card-t" style="margin:16px 0 6px"><h2 style="font-size:14px">上文（${LLM.turns.length} 轮）</h2>
     <span class="hint">只在本机内存里 · 发下一轮时压成文本带上</span></div>${rows}`;
@@ -2703,6 +2802,7 @@ function renderLlmSheet() {
      两种请求体都由原生侧拼（LlmBridge.ask），页面只交这一个选择：
      同一个形状两处各写一遍迟早对不上，而对不上的那一份是花钱的请求。 */
   const canStyle = llmCanStyle();
+  const canTimeout = llmCanTimeout();
   const style = c.apiStyle === "chat" ? "chat" : "responses";
   openSheet(`<div class="sheet-t"><h3>模型接入</h3><button class="x" onclick="closeSheet()">✕</button></div>
     ${llmStatusLine()}
@@ -2718,11 +2818,20 @@ function renderLlmSheet() {
         <option value="chat" ${style === "chat" ? "selected" : ""}>Chat Completions · /chat/completions（OpenAI 兼容网关）</option>
       </select></div>`
       : `<div class="cap" style="padding-top:2px">这台机器的 App 还不支持换协议（更新 App 之后这一项才会出现），现在只能按 Responses 形制发。</div>`}
+    ${canTimeout ? `<div class="field"><label>读超时（秒 · 30–300，默认 90）</label>
+      <input id="llmReadMs" type="number" min="30" max="300" step="5" value="${Math.round((Number(c.readMs) || 90000) / 1000)}"></div>
+    <div class="field"><label>总预算（秒 · 至少读超时+5，至多 600）</label>
+      <input id="llmBudgetMs" type="number" min="35" max="600" step="5" value="${Math.round((Number(c.budgetMs) || 110000) / 1000)}"></div>
+    <div class="cap" style="padding-top:2px">联网检索实测要 28~69 秒：默认 90 秒可能不够，调大读超时页面也跟着等更久
+      （页面计时器永远比原生晚 15 秒断开）。改完要点下面的「保存端点」才生效。</div>`
+      : `<div class="cap" style="padding-top:2px">这台机器的 App 还不支持调请求时长（更新 App 后这两栏才会出现），现在按默认 90 秒发。</div>`}
     <div class="chk-row"><label><input type="checkbox" id="llmSearch" ${c.search === false ? "" : "checked"}>
       要求端点做联网检索</label></div>
     <div class="cap" style="padding-top:2px">追问要出处，靠的就是它。但<b>「AI 研判」用不上</b>：研判只读本机算好的数，
       开着它模型会为了凑出处去搜 —— 真机实测同一份数据，开着 <b>91 秒</b>（撞原生 90 秒读超时，没回来），关掉 <b>15 秒</b>。
-      研判卡上有一键关闭，不必回这一页。</div>
+      研判卡上有一键关闭，不必回这一页。v121 实测：这一档网关<b>不返回结构化引用</b>，
+      正文里的来源声明要逐条回源核对；横幅上的「已确认联网」只表示真的发生了检索动作。</div>
+    <button class="btn gh" style="width:100%;margin-top:2px;white-space:nowrap" onclick="llmPresetXf()">讯飞 MaaS 预设（华北区 /v1 · spark-x2.6-4b · Responses）</button>
     <div class="row-btn" style="margin-top:2px">
       <button class="btn gh" style="flex:1" onclick="llmSaveCfg()">保存端点</button>
       <button class="btn gh" style="flex:1" onclick="llmClearKey()">清除密钥</button>
@@ -2757,9 +2866,10 @@ function llmSend(text) {
   LLM.turn = { q, a: "", err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 } };
   LLM.q = "";                 /* 输入框清空：发出去的那句已经在「第 N 轮 · 问」那一行上 */
   LLM.id = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-  /* 计时器和提示说的是同一个数：到 LLM_TIMEOUT_MS 就落「超时」，不加缓冲。
-     原生侧的整体预算（110 秒）比它小，所以真超时是那边先断、这边兜住没收到回调的情况。 */
-  const dead = setTimeout(() => llmTimeout(LLM.id), LLM_TIMEOUT_MS);
+  /* 计时器和提示说的是同一个数：到 llmEffTimeoutMs() 就落「超时」，不加缓冲。
+     v124：这个数跟着配置走 —— App 内把读超时调大时，页面也等得更久；
+     页面计时器永远比原生读超时晚 15 秒，断开与报错只发生一次、来自原生那侧。 */
+  const dead = setTimeout(() => llmTimeout(LLM.id), llmEffTimeoutMs());
   LLM.timer = dead;
   try {
     /* 快照在勾了的时候才拼 —— 没勾，发出去的就是光的一句问题。 */
@@ -2819,7 +2929,7 @@ function llmTimeout(id) {
   LLM.phase = "timeout"; LLM.err = ""; LLM.buf = null;
   inflightClear("llm");
   /* 超时这一轮写进上文时带的是「没回」，不是空字符串 —— 下一轮的模型看得见上一轮没答上。 */
-  if (LLM.turn) LLM.turn.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一次可能已经计费）";
+  if (LLM.turn) LLM.turn.err = "等满 " + Math.round(llmEffTimeoutMs() / 1000) + " 秒没回（这一次可能已经计费）";
   llmRepaint();
 }
 /* 原生回传的两个全局函数：名字与 LlmBridge.java 里拼的 JS 必须逐字一致，
@@ -2876,13 +2986,16 @@ window.__llmDone = function (id, metaJson) {
   LLM.buf = null;
   inflightClear("llm");      /* 落定了，这一发不再「在路上」 */
   if (LLM.turn) {
-    /* 落进上文的是「问 + 答的正文」，来源与 token 数只给人看，不进模型的那段文本。 */
+    /* 落进上文的是「问 + 答的正文」，来源与 token 数只给人看，不进模型的那段文本。
+       v124：联网判据也落进这一轮 —— 界面从此看得见「这一发到底真检索了没有」。 */
     LLM.turn.a = res.text;
     LLM.turn.err = res.ok ? "" : LLM.err;
     LLM.turn.sources = res.sources;
     LLM.turn.dropped = res.dropped;
     LLM.turn.shape = res.shape;
     LLM.turn.usage = res.usage;
+    LLM.turn.grounded = !!res.grounded;
+    LLM.turn.queries = Array.isArray(res.queries) ? res.queries : [];
   }
   llmRepaint();
 };
@@ -4523,8 +4636,14 @@ async function anysearchRun() {
     ★ 明文只在这一次调用里出现，用完立刻清空输入框；不进 localStorage、不进页面变量、
       不进日志、不进任何回包。页面永远只问「有没有」。 */
 async function anysearchSetKey() {
-  if (!nativeFetchAvailable() || !window.NativeNav || !window.NativeNav.anysearchSet) {
-    toast("只在本机 App 内可配置 AnySearch key", 3600); return;
+  /* 网页端：key 栏已不渲染输入框/按钮（见 anysearch.js 的 inApp 分支），
+     这里仍是兜底守卫。旧壳 App（有 NativeNav 但缺 anysearchSet 桥）必须单独识别，
+     否则会弹出「只在本机 App 内可配置」这种「人明明在 App 里」的自相矛盾提示。 */
+  if (!nativeFetchAvailable()) {
+    toast("AnySearch key 只在本机 App 内配置；网页端不接收密钥", 3600); return;
+  }
+  if (typeof window.NativeNav.anysearchSet !== "function") {
+    toast("当前 App 版本较旧，没有 AnySearch 密钥槽；更新到新版 App 后即可粘贴", 5200); return;
   }
   const el = $("ayKey");
   let key = String((el && el.value) || "").trim();
@@ -4544,8 +4663,11 @@ async function anysearchSetKey() {
 
 /** 清掉 key：只清 ANYSEARCH 这一个槽，另外四个槽（LLM/AIXHUB/LEDGERME/SYNC）一根手指不碰。 */
 function anysearchClearKey() {
-  if (!nativeFetchAvailable() || !window.NativeNav || !window.NativeNav.anysearchClear) {
-    toast("只在本机 App 内可清除", 3200); return;
+  if (!nativeFetchAvailable()) {
+    toast("AnySearch key 只在本机 App 内配置；网页端不接收密钥", 3200); return;
+  }
+  if (typeof window.NativeNav.anysearchClear !== "function") {
+    toast("当前 App 版本较旧，没有 AnySearch 密钥槽；更新到新版 App 后即可清除", 4600); return;
   }
   try { window.NativeNav.anysearchClear(); } catch (e) { toast("清除失败：" + String(e), 3600); return; }
   AY_ST.hasKey = false; AY_PACK = null; AY_ST.phase = "idle"; AY_ST.err = "";
@@ -7017,6 +7139,8 @@ const BRIEF = {
   /* v112：res 有两种形状 —— "report"（研报体，三段）与 "brief"（旧的 JSON 卡片）。
      用 shape 分派，不靠「有没有 paras」猜：猜错就会把旧结论画成空卡。 */
   shape: "", audit: null,
+  /* v124：这一份的联网判据（llmParse 的 grounding 落地）。null = 没判过 / 未结构化。 */
+  grounding: null,
   t0: 0,                 /* 这一发是什么时候出去的：落定后算「用时」，写进卡片 */
   ms: 0,                 /* 上一次落定的实测耗时（毫秒）—— 90 秒读超时是这一版的硬约束 */
   runs: 0,               /* 本次页面生命周期内已发几次（刷新归零，与 LLM 轮次同一口径） */
@@ -7164,15 +7288,18 @@ function briefCardArea(stale) {
   if (BRIEF.res && BRIEF.shape === "brief") {
     /* 旧口径的结论（v108~v111 存下的条目，或模型按旧格式回的）：事实区照画，
        结论用它自己那张条目卡 —— 强行塞进研报模板会丢掉 basis 标签。 */
-    return reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
+    return groundBannerHtml(BRIEF.grounding)
+      + reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
       + briefCardHtml(BRIEF.res, {
         tier: BRIEF.tier, chars: BRIEF.chars, dropped: BRIEF.dropped, stale,
         atText: briefTimeText(BRIEF.at), ms: BRIEF.ms,
       });
   }
-  if (BRIEF.res) return reportCardHtml(Object.assign({ rep: BRIEF.res }, opt));
+  if (BRIEF.res) return groundBannerHtml(BRIEF.grounding)
+    + reportCardHtml(Object.assign({ rep: BRIEF.res }, opt));
   if (BRIEF.raw) {
-    return reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
+    return groundBannerHtml(BRIEF.grounding)
+      + reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
       + briefRawHtml(BRIEF.raw, { stale, atText: briefTimeText(BRIEF.at) });
   }
   let ph = "";
@@ -7230,7 +7357,7 @@ function openBrief(t) {
   LLM.host = "brief";
   /* 切目标必须清干净：不清就会把上一只的结论画在新目标头上 —— 那种错看起来"很像真的"。 */
   BRIEF.res = null; BRIEF.raw = ""; BRIEF.err = ""; BRIEF.dropped = null;
-  BRIEF.shape = ""; BRIEF.audit = null;
+  BRIEF.shape = ""; BRIEF.audit = null; BRIEF.grounding = null;
   BRIEF.fp = ""; BRIEF.at = 0; BRIEF.ms = 0; BRIEF.phase = "idle";
   const e = briefCacheGet();
   if (e) {
@@ -7242,6 +7369,7 @@ function openBrief(t) {
     BRIEF.dropped = e.dropped || null;
     BRIEF.shape = String(e.shape || "");
     BRIEF.audit = e.audit || null;
+    BRIEF.grounding = e.grounding || null;
     BRIEF.phase = (BRIEF.res || BRIEF.raw) ? "done" : "idle";
   }
   renderBriefSheet();
@@ -7540,6 +7668,7 @@ async function briefRun(force) {
   BRIEF.phase = "running";
   BRIEF.id = "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   BRIEF.buf = null; BRIEF.err = ""; BRIEF.raw = ""; BRIEF.res = null; BRIEF.dropped = null;
+  BRIEF.grounding = null;
   BRIEF.shape = ""; BRIEF.audit = null;
   BRIEF.chars = pack.built.chars; BRIEF.fp = pack.fp; BRIEF.at = 0; BRIEF.stale = "";
   BRIEF.ms = 0; BRIEF.t0 = Date.now();
@@ -7548,11 +7677,11 @@ async function briefRun(force) {
     if (BRIEF.phase !== "running") return;
     BRIEF.ms = BRIEF.t0 ? Date.now() - BRIEF.t0 : 0;
     BRIEF.phase = "error";
-    BRIEF.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一发可能已经计费）";
+    BRIEF.err = "等满 " + Math.round(llmEffTimeoutMs() / 1000) + " 秒没回（这一发可能已经计费）";
     BRIEF.buf = null; BRIEF.id = "";
     inflightClear("brief");
     briefRepaint();
-  }, LLM_TIMEOUT_MS);
+  }, llmEffTimeoutMs());
   try {
     /* 先记账再发：反过来的话，真机上文档恰好在 ask 返回之前被回收，这一发就永远认不回来了。 */
     inflightWrite("brief", { id: BRIEF.id, t0: BRIEF.t0, target: BRIEF.target,
@@ -7595,7 +7724,7 @@ function briefInflightAdopt() {
   const t0 = Number(rec.t0);
   const age = Date.now() - t0;
   /* 已经超过上限的那一发不必接：接回来也只能立刻判超时，反而把「上一份结论」顶掉。 */
-  if (!(age >= 0) || age >= LLM_TIMEOUT_MS) { inflightClear("brief"); return false; }
+  if (!(age >= 0) || age >= llmEffTimeoutMs()) { inflightClear("brief"); return false; }
   BRIEF.target = rec.target && rec.target.kind ? rec.target : { kind: "portfolio" };
   BRIEF.tier = rec.tier === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
   BRIEF.chars = Number(rec.chars) || 0;
@@ -7608,12 +7737,12 @@ function briefInflightAdopt() {
     if (BRIEF.phase !== "running") return;
     BRIEF.ms = BRIEF.t0 ? Date.now() - BRIEF.t0 : 0;
     BRIEF.phase = "error";
-    BRIEF.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一发可能已经计费）"
+    BRIEF.err = "等满 " + Math.round(llmEffTimeoutMs() / 1000) + " 秒没回（这一发可能已经计费）"
       + " —— 这一发是在页面刷新前发出的，超时从那时算起";
     BRIEF.buf = null; BRIEF.id = "";
     inflightClear("brief");
     briefRepaint();
-  }, Math.max(1000, LLM_TIMEOUT_MS - age));
+  }, Math.max(1000, llmEffTimeoutMs() - age));
   return true;
 }
 /** 追问那一侧的同一件事。差别只有一个：重载后上文已经没了，所以把问题本身存下来，
@@ -7623,13 +7752,13 @@ function llmInflightAdopt() {
   if (!rec || !rec.id || !rec.t0) return false;
   const t0 = Number(rec.t0);
   const age = Date.now() - t0;
-  if (!(age >= 0) || age >= LLM_TIMEOUT_MS) { inflightClear("llm"); return false; }
+  if (!(age >= 0) || age >= llmEffTimeoutMs()) { inflightClear("llm"); return false; }
   LLM.id = String(rec.id);
   LLM.q = String(rec.q || "");
   LLM.phase = "running";
   LLM.res = null; LLM.err = ""; LLM.buf = null; LLM.meta = null;
   LLM.turn = { q: LLM.q, a: "", err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 } };
-  LLM.timer = setTimeout(() => llmTimeout(LLM.id), Math.max(1000, LLM_TIMEOUT_MS - age));
+  LLM.timer = setTimeout(() => llmTimeout(LLM.id), Math.max(1000, llmEffTimeoutMs() - age));
   return true;
 }
 /** 只重绘研判这一层。刻意不复用 llmRepaint：那一支在 host 被换成 market 时会把
@@ -7739,6 +7868,11 @@ function briefDone(metaJson) {
     briefRepaint(); return;
   }
   text = note + text;
+  /* v124：联网判据跟着这一份落定 —— 两条成功路径（研报体 / brief-2 JSON）共用。
+     放在 res 读取之后、两条分支之前，缓存与界面拿到的口径一致。 */
+  BRIEF.grounding = (res && res.ok)
+    ? { grounded: !!res.grounded, queries: Array.isArray(res.queries) ? res.queries : [] }
+    : null;
   /* ① 先按 report-1 解析（纯文本 + ## 分段）。这是 v112 的正式格式：
      坏一段只丢一段，不会像 JSON 那样坏一个逗号整份作废。 */
   const pr = parseReport(text);
@@ -7748,7 +7882,8 @@ function briefDone(metaJson) {
     BRIEF.dropped = pr.dropped || null;
     BRIEF.audit = reportNumberAudit(reportPlainText(pr.report), briefAuditValues());
     briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: "report", res: pr.report,
-      raw: "", chars: BRIEF.chars, dropped: BRIEF.dropped, ms: BRIEF.ms, audit: BRIEF.audit });
+      raw: "", chars: BRIEF.chars, dropped: BRIEF.dropped, ms: BRIEF.ms, audit: BRIEF.audit,
+      grounding: BRIEF.grounding });
     briefPushTurn(pr.report);
     briefRepaint(); return;
   }
@@ -7766,7 +7901,8 @@ function briefDone(metaJson) {
     BRIEF.res = nr.brief; BRIEF.raw = ""; BRIEF.at = Date.now();
     BRIEF.dropped = nr.dropped || null; BRIEF.audit = null;
     briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: "brief", res: nr.brief,
-      raw: "", chars: BRIEF.chars, dropped: nr.dropped || null, ms: BRIEF.ms, audit: null });
+      raw: "", chars: BRIEF.chars, dropped: nr.dropped || null, ms: BRIEF.ms, audit: null,
+      grounding: BRIEF.grounding });
     briefPushTurn(nr.brief);
     briefRepaint(); return;
   }
@@ -7774,9 +7910,9 @@ function briefDone(metaJson) {
      ★ 这里把 parseReport 的失败原因带上 —— 它比「没找到 JSON」更能指路
        （「回复里没有可用的正文段」说明模型只写了表头，那是能改的事）。 */
   BRIEF.phase = "done"; BRIEF.shape = ""; BRIEF.res = null; BRIEF.raw = text; BRIEF.at = Date.now();
-  BRIEF.audit = null;
+  BRIEF.audit = null; BRIEF.grounding = null;
   briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: "", res: null, raw: text,
-    chars: BRIEF.chars, dropped: null, ms: BRIEF.ms, audit: null });
+    chars: BRIEF.chars, dropped: null, ms: BRIEF.ms, audit: null, grounding: null });
   briefRepaint();
 }
 
@@ -7858,7 +7994,7 @@ Object.assign(window, {
   briefSearchOff, briefSearchOffRetry,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmPresetXf, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,

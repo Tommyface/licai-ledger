@@ -134,13 +134,23 @@ export function anysearchBodyHtml(p, opts = {}) {
         placeholder="检索词（如 银行理财 债市 资金面）" aria-label="检索词">
       <button class="ay-go" ${busy ? "disabled" : ""} onclick="anysearchRun()">${busy ? "检索中…" : "🔍 检索"}</button>
     </div>`;
-  const keybar = `<div class="ay-key">
-      <span class="ay-ks ${hasKey ? "ay-ks-ok" : ""}">${hasKey ? "✓ key 已存本机加密区（页面读不到明文）" : "⚠ 未配置 key"}</span>
-      <input id="ayKey" type="password" value="" maxlength="256" autocomplete="off"
-        placeholder="粘贴 AnySearch key（App 内）" aria-label="AnySearch key">
-      <button class="ay-kb" onclick="anysearchSetKey()">保存 key</button>
-      <button class="ay-kb" onclick="anysearchClearKey()">清除</button>
-    </div>`;
+  /* ★ key 只在本机 App 内可配置（铁律）：网页端绝不再摆「能填但填了必报错」的输入框。
+     旧实现无条件渲染 #ayKey + 保存/清除，网页版用户填完点保存只会撞
+     anysearchSetKey() 的 nativeFetchAvailable() 守卫 → 弹「只在本机 App 内可配置」，
+     等于先请人填、再告诉他不该填。这里按 inApp 分支：网页端只给一句静态说明，
+     不提供任何输入/按钮；App 内才给完整的粘贴 + 保存 + 清除。 */
+  const keybar = opts.inApp
+    ? `<div class="ay-key">
+        <span class="ay-ks ${hasKey ? "ay-ks-ok" : ""}">${hasKey ? "✓ key 已存本机加密区（页面读不到明文）" : "⚠ 未配置 key"}</span>
+        <input id="ayKey" type="password" value="" maxlength="512" autocomplete="off"
+          placeholder="粘贴 AnySearch key（仅本机 App 内）" aria-label="AnySearch key">
+        <button class="ay-kb" onclick="anysearchSetKey()">保存 key</button>
+        <button class="ay-kb" onclick="anysearchClearKey()">清除</button>
+      </div>`
+    : `<div class="ay-key ay-key-web">
+        <span class="ay-ks">🔒 AnySearch key 只在本机 App 内配置</span>
+        <span class="ay-webhint">网页端读不到本机加密区，也不接收密钥；请在 App 内切换到「AnySearch」通道粘贴。</span>
+      </div>`;
   const note = `<div class="ay-note">检索线索只作待核参考：<b>verified 恒 false</b>，
     <b>无发布时间</b>（官方 /v1/search 不返回 date），不进研判事实层、不进数字白名单。
     带 key 只提升配额稳定性，<b>不提升事实准确度</b>；准确度靠链接回源 + 与直抓源交叉。

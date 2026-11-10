@@ -1345,9 +1345,15 @@ test("T3 配置交出去的是那份清单；超时用的是常量；原生回�
   for (const w of writes) {
     assert.ok(!/key|token|secret|authorization/i.test(w), "有把凭据写进原生配置的路径：" + w);
   }
-  assert.ok(/setTimeout\(\(\) *=> *llmTimeout\(LLM\.id\), *LLM_TIMEOUT_MS\)/.test(block),
-    "计时器不是直接用 LLM_TIMEOUT_MS：文案里的「等满 N 秒」和实际等的数会不一样");
-  assert.ok(!/LLM_TIMEOUT_MS *[+-] *[0-9]/.test(block), "超时被加了缓冲，两处说的不再是同一个数");
+  /* v124：超时跟着配置走（llmEffTimeoutMs）—— App 内把读超时调大时页面等得更久。
+     不变量的新形态：文案与 setTimeout 用的是**同一个函数**，说出的秒数和实际等的数
+     永远一致；页面比原生读超时晚 15 秒的设计缓冲收在 llmEffTimeoutMs 内部，不在调用点。 */
+  assert.ok(/setTimeout\(\(\) *=> *llmTimeout\(LLM\.id\), *llmEffTimeoutMs\(\)\)/.test(block),
+    "计时器没有走 llmEffTimeoutMs()：文案里的「等满 N 秒」和实际等的数会不一样");
+  assert.ok(/LLM\.turn\.err = "等满 " \+ Math\.round\(llmEffTimeoutMs\(\) \/ 1000\)/.test(block)
+    || /等满 " \+ Math\.round\(llmEffTimeoutMs\(\) \/ 1000\)/.test(block),
+    "超时文案不是用 llmEffTimeoutMs() 算的秒数：说的和等的是两个数");
+  assert.ok(!/LLM_TIMEOUT_MS *[+-] *[0-9]/.test(block), "调用点上不许现拼缓冲：同一形状两处各写一遍迟早对不上");
   assert.ok(/window\.__llmCfg = function \(msg\)/.test(block),
     "原生回的那句「这次没保存」没有入口显示，用户只会觉得点了没反应");
   assert.ok(/if \(m\) *toast\(m/.test(block), "__llmCfg 收到 msg 却没显示出来");
@@ -1661,8 +1667,37 @@ test("v67 发给桥的还是 input 与 instructions 两样，形状没往页面�
 test("v67 保存成功的提示说的是真的存了什么", () => {
   const { block } = t3Slice();
   const fn = t3Fn(block, "llmSaveCfg");
-  assert.match(fn, /toast\(canStyle \? "已保存端点、模型与协议" : "已保存端点与模型"/,
+  /* v124：新增了「收进边界」与「请求时长」两档，但不变量不变 ——
+     旧壳（canStyle/canTimeout 都 false）只能报「已保存端点与模型」，
+     多报「协议」「时长」就是假话；收进边界必须明说，不能装作存的就是用户填的数。 */
+  assert.match(fn, /canStyle \? "已保存端点、模型与协议" : "已保存端点与模型"/,
     "旧壳上报「已保存协议」：那一句是假话");
+  assert.match(fn, /canTimeout \? "已保存端点、模型与请求时长"/,
+    "存了请求时长却不报告：用户不知道这次保存多带了两个键");
+  assert.match(fn, /clamped \? "已保存（有超出一边界的数值已收进允许范围）"/,
+    "数值被悄悄收进边界却不说：用户会以为存的就是他填的那个数");
+});
+
+/* ---- v124 · P0：grounding 判据的消费与横幅 ---- */
+test("v124 横幅只认 llmParse 的 grounding；检索关着不显示，判据函数不许自己造", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("function groundBannerHtml"), src.indexOf("function llmStatusLine()"));
+  assert.ok(fn.includes("function groundBannerHtml"), "groundBannerHtml 不在了：横幅判据散落或被删");
+  assert.match(fn, /search === false.{0,6}return ""/, "检索关着还挂横幅是噪音：研判按契约不联网");
+  assert.match(fn, /xfBannerHtml\(/, "横幅没有走 websearch.js 的统一渲染：同一形状两处各写一遍");
+  assert.match(fn, /XF_UNGROUNDED/, "未联网那句定语不在了：假成功必须写明不可作事实依据");
+  /* llmSetSearch 整份覆盖时必须带上请求时长，否则改检索开关会把 readMs/budgetMs 清回默认 */
+  const setSearch = src.slice(src.indexOf("function llmSetSearch"), src.indexOf("function briefSearchOff"));
+  assert.match(setSearch, /out\.readMs = Number\(c\.readMs\)/,
+    "llmSetSearch 不带 readMs：调过 180 秒之后点一下「关掉检索」，超时又变回默认 —— 像设置自己会变");
+  assert.match(setSearch, /out\.budgetMs = Number\(c\.budgetMs\)/, "budgetMs 同理");
+  /* 研判落地：briefDone 的两条成功路径都要把 grounding 写进缓存，openBrief 恢复要读回 */
+  const bd = src.slice(src.indexOf("function briefDone"), src.indexOf("function reportPlainText"));
+  const putCount = (bd.match(/grounding: BRIEF\.grounding/g) || []).length;
+  assert.ok(putCount >= 2, "briefDone 两条成功路径（研报体 / brief-2 JSON）都要带 grounding 进缓存，现在只有 " + putCount + " 处");
+  assert.match(bd, /BRIEF\.grounding = \(res && res\.ok\)/, "grounding 没在两条分支之前统一落地：缓存与界面会拿到不同口径");
+  const ob = src.slice(src.indexOf("function openBrief"), src.indexOf("function openBriefPortfolio"));
+  assert.match(ob, /BRIEF\.grounding = e\.grounding \|\| null/, "缓存恢复没读回 grounding：重开弹层横幅就丢了");
 });
 
 test("v67 屏上仍然写着真实端点没实测（铁律 #10 —— 拿到真凭据前这句不许撤）", () => {

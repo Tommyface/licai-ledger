@@ -113,10 +113,31 @@ test("渲染：互证标签写明「不等于事实已核实」，不误导", ()
   assert.match(h, /不等于事实已核实/);
 });
 
-test("渲染：key 区只问「有没有」，密码框 value 恒空，明文不进 DOM", () => {
-  const h = AY.anysearchBodyHtml(goodPack(), { hasKey: true });
+test("渲染：key 区只问「有没有」，密码框 value 恒空，明文不进 DOM（仅 App 内）", () => {
+  const h = AY.anysearchBodyHtml(goodPack(), { hasKey: true, inApp: true });
   assert.match(h, /key 已存本机加密区/);
   assert.match(h, /type="password"[^>]*value=""/);
+});
+
+/* ---- v123：key 只在本机 App 内可配；网页端零输入（修「填入 key 提示错误」）---- */
+test("★ v123：网页端不渲染任何 key 输入/保存/清除入口，只给只读说明", () => {
+  for (const opts of [{ hasKey: false }, { hasKey: true, inApp: false }]) {
+    const h = AY.anysearchBodyHtml(goodPack(), opts);
+    assert.match(h, /只在本机 App 内配置/, "要明说约束");
+    assert.match(h, /网页端读不到本机加密区|不接收密钥/, "要给出原因");
+    assert.doesNotMatch(h, /id="ayKey"/, "网页端不许有 key 输入框");
+    assert.doesNotMatch(h, /type="password"/, "网页端不许有密码框");
+    assert.doesNotMatch(h, /anysearchSetKey\(\)/, "网页端不许挂保存入口");
+    assert.doesNotMatch(h, /anysearchClearKey\(\)/, "网页端不许挂清除入口");
+  }
+});
+
+test("★ v123：App 内才渲染 key 输入框（maxlength=512 与桥端一致）+ 保存/清除", () => {
+  const h = AY.anysearchBodyHtml(goodPack(), { hasKey: false, inApp: true });
+  assert.match(h, /id="ayKey"[^>]*maxlength="512"/, "输入框上限要与桥端 512 对齐");
+  assert.match(h, /anysearchSetKey\(\)/);
+  assert.match(h, /anysearchClearKey\(\)/);
+  assert.doesNotMatch(h, /ay-key-web/, "App 内不该显示网页端只读说明");
 });
 
 test("HTML 转义：标题 / 检索词里的尖括号不会注入", () => {
