@@ -471,6 +471,39 @@ html:not(.inApp) .app-only{display:none}
 .mkt-upd:active{opacity:.72}
 .mkt-upd[disabled]{opacity:.55}
 
+/* ---------- v116：债市「此刻」层 ----------
+   10 项盘中行情的轻量展示：数字用文字色而不是实心块 —— 日终矩阵是实心格，
+   这一层若也用实心块，同屏两层会抢主次，看的人分不清哪块才是「正式的」。
+   红涨绿跌沿用 --up / --down，与矩阵同源，不许在这一层另立一套颜色。 */
+.lv-head{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap;margin:11px 0 4px;min-width:0}
+.lv-head b{font-size:13px;font-weight:700;color:var(--ink)}
+.lv-t{font-size:11.5px;color:var(--ink2);font-variant-numeric:tabular-nums}
+.lv-src{font-size:10px;color:var(--ink3);margin-left:auto;flex:0 1 auto;min-width:0;text-align:right;line-height:1.4}
+.lv-err{font-size:11px;color:var(--up);line-height:1.5;margin:2px 0 5px}
+.lv-empty{font-size:11.5px;color:var(--ink3);line-height:1.6;padding:5px 0 2px}
+.lv-sum{font-size:11px;color:var(--ink3);margin:0 0 6px;display:flex;flex-wrap:wrap;align-items:center;min-width:0}
+.lv-dot{margin:0 5px;opacity:.5}
+.lv-miss{color:#b8860b;margin-left:6px}
+.lv-age{margin-left:6px;opacity:.85}
+.lv-g{margin:0 0 7px}
+.lv-gt{font-size:10px;color:var(--ink3);font-weight:600;margin:0 0 3px}
+.lv-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
+.lv-i{border:1px solid var(--line);border-radius:7px;padding:6px 8px;background:var(--bg);min-width:0}
+.lv-n{font-size:10px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lv-v{font-size:15px;font-weight:700;line-height:1.25;font-variant-numeric:tabular-nums;letter-spacing:-.2px}
+.lv-v i{font-size:10px;font-weight:600;font-style:normal;margin-left:1px;opacity:.7}
+.lv-d{font-size:10.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.lv-up .lv-v,.lv-up .lv-d{color:var(--up)}
+.lv-down .lv-v,.lv-down .lv-d{color:var(--down)}
+.lv-flat .lv-v,.lv-flat .lv-d{color:var(--ink3)}
+.lv-none .lv-v,.lv-none .lv-d{color:#3a6ea8}
+.lv-sp{margin:8px 0 0;color:var(--ink2)}
+.lv-sp svg{width:100%;height:34px;display:block}
+.lv-sp-up{color:var(--up)}
+.lv-sp-down{color:var(--down)}
+.lv-sp-flat{color:var(--ink3)}
+.lv-sp-x{display:flex;justify-content:space-between;font-size:9.5px;color:var(--ink3);margin-top:1px}
+
 /* ---------- v108：AI 研判卡片 ----------
    一套样式只服务一份结论：结论句 > 信心 > 分段要点 > 动作 > 盲区 > 来源 > 免责。
    依据徽标（台账/体检/债市/检索/未标注）是这个功能的核心可读性来源，颜色必须区分得开，

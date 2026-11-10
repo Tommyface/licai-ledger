@@ -51,6 +51,11 @@ import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
    判据全收口在 js/core/market.js（tests/market.test.mjs 与私有仓同一条契约）。 */
 import { MARKET_SCHEMA, validateMarket, marketAiBlock, marketAiTextSafe,
   marketPanelHtml, marketStat, marketCutoffText, marketAgeText } from "./js/core/market.js";
+/* v116：债市「此刻」层 —— 东方财富行情，JSONP 直连（<script> 不受 CORS 限制），
+   一次点击两个请求拿全 10 项 + T 主力分时。与上面的日终层并列、不混算：
+   日终层是 33 格中债估值（T-1），此刻层是 10 项盘中参考价，两层各标各的时点。
+   解析/单位/方向/时点四条规则全在 js/core/livebond.js，app.js 只负责发请求与拼装。 */
+import * as LV from "./js/core/livebond.js";
 /* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
    只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。
    v98：补 shelfFreshness（快照过期判据）与 agentViaTag（代销口径短标签），
@@ -92,7 +97,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v115";
+const APP_VER = "v116";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -193,6 +198,19 @@ const LS_MARKET = "licai.marketCache";
 const MARKET_TTL = 10 * 60 * 1000;      /* 打开债市页的自动刷新阈值 */
 const MARKET_ST = { phase: "idle", at: 0, err: "", cached: false };
 let _mktBusy = null;                    /* 在途去重：连点「更新」只发一次请求 */
+
+/* ---------- v116：债市「此刻」层 ----------
+   为什么另起一层而不是改 market.json：那份是 33 格日终矩阵（中债官方曲线推导），
+   云端每天 3 次生成，白天点它永远是早上那份 —— 这正是「3 点点了没反应」的根因。
+   此刻层走浏览器直连东财行情（JSONP），点一下 1~2 秒出数，不需要令牌、不耗 Actions。
+   两条数据不许混：口径不同（盘中参考价 vs 日终估值），界面上不做差、不互补。 */
+const LS_LIVE = "licai.liveBond";
+const LIVE_TTL = 60 * 1000;             /* 打开债市页时的自动刷新阈值（此刻层要快一点） */
+const LIVE_COOL = 5 * 1000;             /* 手动连点冷却：5 秒内重复点只算一次 */
+const LIVE_TIMEOUT = 8000;              /* 单请求超时：一个 ulist + 一个 trends2 */
+let LIVE = null;
+const LIVE_ST = { phase: "idle", at: 0, err: "", miss: [], lastTry: 0 };
+let _liveBusy = null;
 let RULES_QUOTES = {};
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳；
    v95：seen = 已提醒过的「产品id@披露日」去重集（B1）；quiet/thresh 默认档出自
@@ -2443,6 +2461,9 @@ function openMarket() {
   /* v107 打开即刷：手里这份超过 TTL 就静默拉一次（先显示旧数据，回来只重画行情区）。
      不 await —— 网络慢不该让「点开债市」这件事卡在转圈上。 */
   if (Date.now() - (MARKET_ST.at || 0) > MARKET_TTL) marketRefresh({ silent: true });
+  /* v116：此刻层 TTL 只有 60 秒 —— 打开就该看到当下，不必先点一次按钮。
+     静默失败不打扰：块里会写「这一次没取到」和原因，旧值仍在。 */
+  if (Date.now() - (LIVE_ST.lastTry || 0) > LIVE_TTL) liveRefresh({ silent: true });
 }
 /** 弹层现在开着吗？（遮罩这一层就是「有没有弹层」的唯一真相） */
 function sheetOpen() { return !!($("mask") && $("mask").classList.contains("show")); }
@@ -2483,38 +2504,50 @@ function marketHintText() {
     下面那行是「我们这台机器什么时候取到的」（本机行为）—— 混成一句就成了含糊的「更新时间」。 */
 function marketStateBar() {
   const s = MARKET_ST;
-  const run = s.phase === "loading";
+  /* v116：这一条讲的是「日终层」；此刻层在自己的块头里写自己的时点，两者不合并 ——
+     合并成一句「更新时间」就等于说这两层是同一个东西。 */
+  const run = s.phase === "loading" || LIVE_ST.phase === "loading";
   const cut = MARKET ? marketCutoffText(MARKET) : "";
   const stale = MARKET ? marketStaleText(MARKET) : "";
   const age = marketAgeText(s.at);
-  let live;
-  if (run) live = `<span class="mkt-live">正在向私有仓取最新快照…</span>`;
+  let liveLine;
+  if (run) liveLine = `<span class="mkt-live">正在摸排：此刻层（东财）+ 日终层（私有仓）…</span>`;
   else if (s.phase === "err") {
     /* 拆两行：s.err 自己常带括号，再套一层「（下面仍是…）」就成了括号套括号，
        读起来要倒回去数。失败原因一行、旧数据仍在另一行，各说一件事。 */
-    live = `<span class="mkt-live mkt-live-bad">更新失败：${esc(s.err)}</span>`
+    liveLine = `<span class="mkt-live mkt-live-bad">日终层更新失败：${esc(s.err)}</span>`
       + (MARKET ? `<span class="mkt-live">下面仍是上次取到的数据，可以继续看</span>` : "");
   }
-  else if (age) live = `<span class="mkt-live">${s.cached ? "本机缓存" : "本机更新"} ${esc(age)}</span>`;
-  else live = `<span class="mkt-live">还没取过数据</span>`;
+  else if (age) liveLine = `<span class="mkt-live">${s.cached ? "本机缓存" : "本机更新"} ${esc(age)}</span>`;
+  else liveLine = `<span class="mkt-live">日终层还没取过数据</span>`;
   return `<div class="mkt-bar">
     <div class="mkt-bar-l">
-      <b>${cut ? `${esc(cut)}<span class="mkt-cut-x" style="margin-left:7px;font-weight:400">现券收盘</span>` : "暂无快照"}</b>
+      <b>${cut ? `日终 ${esc(cut)}<span class="mkt-cut-x" style="margin-left:7px;font-weight:400">现券收盘</span>` : "日终 · 暂无快照"}</b>
       ${stale ? `<span class="mkt-stale">${esc(stale)}</span>` : ""}
-      ${live}
+      ${liveLine}
     </div>
-    <button class="mkt-upd" ${run ? "disabled" : ""} onclick="marketRefresh()">${run ? "更新中…" : "↻ 更新"}</button>
+    <button class="mkt-upd" ${run ? "disabled" : ""} onclick="marketRefreshAll()">${run ? "摸排中…" : "↻ 更新此刻"}</button>
   </div>`;
 }
-/** 债市页上部：状态条 + 行情矩阵 + 复制快照。MARKET=null 给降级说明（不编造数字）。 */
+/** 债市页上部：状态条 + 此刻层 + 日终矩阵 + 复制快照。
+    v116：此刻层在最上（点按钮就是为它），日终层在下；两层各自带时点与口径说明。
+    日终层没数据时给降级说明，此刻层照常显示 —— 一层缺了不许把另一层也挡住。 */
 function marketHeroHtml() {
   const bar = marketStateBar();
-  if (!MARKET) return `${bar}<div class="note b" style="margin-top:10px">暂无行情数据：债市快照来自私有仓 market.json，
-    点上面的「↻ 更新」立刻拉一次；拉不到就按没有处理，页面不编造任何数字。</div>`;
-  return bar + marketPanelHtml(MARKET, { cut: false })
-    + (marketAiTextSafe(MARKET)
-      ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>`
-      : "");
+  const phase = LV.livePhaseOf(new Date(), isTradeDay);
+  const liveHtml = LV.liveBlockHtml(LIVE, {
+    phase,
+    ageText: LIVE_ST.at ? marketAgeText(LIVE_ST.at) : "",
+    err: LIVE_ST.phase === "err" ? LIVE_ST.err : "",
+  });
+  const daily = MARKET
+    ? marketPanelHtml(MARKET, { cut: false })
+      + (marketAiTextSafe(MARKET)
+        ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>`
+        : "")
+    : `<div class="note b" style="margin-top:10px">日终层暂无数据：它来自私有仓 market.json（中债估值，T-1）。
+        点上面的「↻ 更新此刻」会一并拉一次；拉不到就按没有处理，页面不编造任何数字。</div>`;
+  return bar + liveHtml + daily;
 }
 /** 共用的「接着问」对话区。withMarket=true 时把行情块嵌在快照行之后
     （设置页「模型接入」保持原样）；债市页传 false —— 行情已在上部单独渲染，
@@ -4292,6 +4325,125 @@ function marketPaint() {
   if ($("marketHint")) $("marketHint").textContent = marketHintText();
 }
 
+/* ---------- v116：此刻层的取数 ----------
+   为什么用 JSONP 而不是 fetch：东财这两个接口不返回 CORS 头，fetch 在网页版会被浏览器
+   拦下来；<script> 标签不受同源策略约束，所以网页版与 App 内同一套代码都能跑。
+   代价是只能 GET、回调名要自己管 —— 下面这段就是管这件事的全部。 */
+let _jsonpSeq = 0;
+function jsonpGet(urlOf, ms) {
+  return new Promise(resolve => {
+    const name = "__lvcb" + (++_jsonpSeq).toString(36);
+    const s = document.createElement("script");
+    let done = false;
+    const finish = r => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      /* 迟到的脚本仍可能执行（移除标签不保证取消已开始的加载），留个空函数接住 ——
+         否则 window 上那句「xxx is not a function」会变成一条页面错误。30 秒后再摘。 */
+      window[name] = () => { };
+      setTimeout(() => { try { delete window[name]; } catch (e) { } }, 30000);
+      if (s.parentNode) s.parentNode.removeChild(s);
+      resolve(r);
+    };
+    const timer = setTimeout(() => finish({ ok: false, why: `超时（${Math.round(ms / 1000)} 秒）` }), ms);
+    window[name] = data => finish({ ok: true, data });
+    s.onerror = () => finish({ ok: false, why: "连接失败（网络不通或被代理拦截）" });
+    s.async = true;
+    s.src = urlOf(name);
+    document.head.appendChild(s);
+  });
+}
+
+/**
+ * 拉一次此刻层：两路并行（报价 10 项 + T 主力分时）。
+ * 只有网络层失败才重试一次；「返回结构不对」不重试 —— 那是接口变了，再发一次也一样。
+ * @param {{silent?: boolean}} [opts] silent=true 不弹 toast（自动刷新与合并刷新用）
+ */
+function liveRefresh(opts = {}) {
+  if (_liveBusy) return _liveBusy;
+  const now = Date.now();
+  if (!opts.silent && LIVE_ST.lastTry && now - LIVE_ST.lastTry < LIVE_COOL) {
+    toast(`刚刚取过，${Math.ceil((LIVE_COOL - (now - LIVE_ST.lastTry)) / 1000)} 秒后再点`, 2400);
+    return Promise.resolve(false);
+  }
+  LIVE_ST.phase = "loading";
+  LIVE_ST.err = "";
+  LIVE_ST.lastTry = now;
+  marketPaint();
+  _liveBusy = (async () => {
+    try {
+      const once = () => Promise.all([
+        jsonpGet(n => LV.liveQuoteUrl(n), LIVE_TIMEOUT),
+        jsonpGet(n => LV.liveTrendUrl(n), LIVE_TIMEOUT),
+      ]);
+      let pair = await once();
+      if (!pair[0].ok) pair = await once();      /* 只对报价重试：分时缺了不影响主体 */
+      const [q, t] = pair;
+      if (!q.ok) throw new Error(q.why || "报价没取到");
+      const p = LV.liveParse(q.data);
+      if (!p.ok) throw new Error(p.why || "报价解析失败");
+      const tr = LV.liveTrendParse(t.ok ? t.data : null);
+      LIVE = { quotes: p.quotes, miss: p.miss, trend: tr.pts, at: Date.now() };
+      LIVE_ST.phase = "ok";
+      LIVE_ST.err = "";
+      LIVE_ST.at = LIVE.at;
+      LIVE_ST.miss = p.miss;
+      liveCacheSave();
+      marketPaint();
+      return true;
+    } catch (e) {
+      LIVE_ST.phase = "err";
+      LIVE_ST.err = String((e && e.message) || e).slice(0, 140);
+      marketPaint();
+      if (!opts.silent) toast(`此刻没取到：${LIVE_ST.err}`, 4200);
+      return false;
+    } finally { _liveBusy = null; }
+  })();
+  return _liveBusy;
+}
+
+/** 读本机缓存。校验不过就当没有 —— 磁盘上的东西同样不可信。 */
+function liveCacheLoad() {
+  try {
+    const raw = localStorage.getItem(LS_LIVE);
+    if (!raw) return false;
+    const o = LV.liveUnpack(JSON.parse(raw));
+    if (!o) { console.warn("此刻层缓存版本/结构不符，丢弃"); return false; }
+    LIVE = o;
+    LIVE_ST.at = o.at;
+    LIVE_ST.miss = o.miss || [];
+    LIVE_ST.phase = "idle";
+    return true;
+  } catch (e) { return false; }
+}
+function liveCacheSave() {
+  if (!LIVE) return;
+  try { localStorage.setItem(LS_LIVE, JSON.stringify(LV.livePack(LIVE, LIVE_ST.at || Date.now()))); } catch (e) { }
+}
+
+/**
+ * v116：一颗按钮同时更新两层 —— 此刻层（东财直连）与日终层（私有仓快照）。
+ * 两路并行，互不阻塞：日终层没配同步也不该挡住此刻层。
+ * 播报只播此刻层的结果（主诉求）；日终层的成败由状态条自己写在脸上。
+ */
+async function marketRefreshAll() {
+  const liveP = liveRefresh({ silent: true });
+  const dayP = syncCfgOk() ? marketRefresh({ silent: true }) : Promise.resolve(false);
+  const [liveOk] = await Promise.all([liveP, dayP]);
+  if (liveOk && LIVE) {
+    const n = Object.keys(LIVE.quotes).length;
+    const total = LV.LIVE_QUOTES.length;
+    toast(n === total
+      ? `此刻已更新 · ${n}/${total} 项 · ${LV.liveTimeText(LIVE)}`
+      : `此刻已更新 · ${n}/${total} 项（${LV.liveMissText(LIVE)}）`, 3400);
+  } else if (LIVE) {
+    toast(`此刻这次没取到：${LIVE_ST.err}；下面仍是 ${marketAgeText(LIVE_ST.at)}那次的数据`, 4600);
+  } else {
+    toast(`此刻这次没取到：${LIVE_ST.err}`, 4600);
+  }
+}
+
 /**
  * 拉一次最新快照。
  * @param {{silent?: boolean}} [opts] silent=true 时不弹 toast（自动刷新用）
@@ -4337,7 +4489,9 @@ function marketRefresh(opts = {}) {
 /** 启动时：先装缓存（有就立刻能看），再静默拉一次最新的。 */
 function marketBoot() {
   marketCacheLoad();
-  if (!syncCfgOk()) return;      /* 没配同步就别白发一次必然失败的请求 */
+  /* v116：此刻层的缓存与数据同步无关 —— 没配 GitHub 同步也该能看上次那批行情。 */
+  liveCacheLoad();
+  if (!syncCfgOk()) return;      /* 日终层没配同步就别白发一次必然失败的请求 */
   marketRefresh({ silent: true });
 }
 
@@ -7003,7 +7157,7 @@ Object.assign(window, {
   briefSearchOff, briefSearchOffRetry,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefresh, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,

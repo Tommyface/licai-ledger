@@ -48,8 +48,6 @@ const ST_IDLE = { phase: "idle", at: 0, err: "", cached: false };
 /* 把被切出的函数与它的自由变量放进同一 new Function 作用域，再执行一次。 */
 const runHint = (m, st = ST_IDLE) => new Function("MARKET", "MARKET_ST", "marketStat", "marketCutoffText",
   `${F.marketHintText.toString()}; return marketHintText();`)(m, st, stat, cutOk);
-const runHero = (m, st = ST_IDLE) => new Function("MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
-  `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(m, st, panelOk, aiOk, s => String(s), barOk);
 /* 把 marketRefresh 整段切出来放进一个独立作用域跑：MARKET / _mktBusy 在作用域里声明，
    其余依赖全部注入 —— 这样成功 / 失败 / 在途去重三条路径都是真跑，不是读源码猜。 */
 function mkRefresh({ cfg = () => true, fetchIt = async () => ref, sync = { owner: "o", repo: "r" } } = {}) {
@@ -66,8 +64,22 @@ function mkRefresh({ cfg = () => true, fetchIt = async () => ref, sync = { owner
 }
 
 const ageOk = at => (at ? "5 分钟前" : "");
-const runBar = (m, st) => new Function("MARKET", "MARKET_ST", "esc", "marketCutoffText", "marketAgeText", "marketStaleText",
-  `${F.marketStateBar.toString()}; return marketStateBar();`)(m, st, s => String(s), cutOk, ageOk, () => "");
+/* v116：此刻层的两个入口用替身注入 —— 本文件验的是「接线」，此刻层自己的
+   解析/单位/方向/时点在 tests/livebond.test.mjs 里真跑。 */
+const LV_OK = {
+  livePhaseOf: () => ({ id: "intraday", label: "盘中" }),
+  liveBlockHtml: (_live, opts) => `<LIVE${opts && opts.err ? " ERR=" + opts.err : ""}>`,
+};
+const LIVE_ST_IDLE = { phase: "idle", at: 0, err: "", miss: [], lastTry: 0 };
+const runBar = (m, st, lst = LIVE_ST_IDLE) => new Function(
+  "MARKET", "MARKET_ST", "esc", "marketCutoffText", "marketAgeText", "marketStaleText", "LIVE_ST",
+  `${F.marketStateBar.toString()}; return marketStateBar();`)(
+  m, st, s => String(s), cutOk, ageOk, () => "", lst);
+const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE) => new Function(
+  "MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
+  "LV", "LIVE", "LIVE_ST", "isTradeDay", "marketAgeText",
+  `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(
+  m, st, panelOk, aiOk, s => String(s), barOk, LV_OK, null, lst, () => true, ageOk);
 const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */
@@ -194,9 +206,21 @@ test("marketHeroHtml：有数据渲染面板 + 复制按钮；无数据给降级
   assert.ok(good.includes(`<PANEL ${ref.weather.asOf}>`), "没渲染行情面板");
   assert.ok(good.includes("marketCopyAi()"), "缺复制快照按钮");
   const none = runHero(null);
-  assert.ok(none.includes("暂无行情数据") && none.includes("market.json"), "没给降级原因与数据源");
+  assert.ok(none.includes("日终层暂无数据") && none.includes("market.json"), "没给降级原因与数据源");
   assert.ok(none.includes("不编造任何数字"), "没写明不编数字");
   assert.ok(!/bp|红 \d|绿 \d/.test(none), "降级文案里却出现了行情数字");
+});
+
+/* ---------- 4b. v116：此刻层接线 ---------- */
+test("v116 接线：此刻层排在状态条之后、日终面板之前；失败原因要传进块里", () => {
+  const good = runHero(ref);
+  const b = good.indexOf("<BAR>"), l = good.indexOf("<LIVE>"), p = good.indexOf("<PANEL");
+  assert.ok(b >= 0, "状态条没渲染");
+  assert.ok(l > b, "此刻层必须排在状态条之后");
+  assert.ok(p > l, "日终面板必须排在此时刻层之后");
+  /* 失败态：原因不能只丢给 toast，要落进块里 */
+  const bad = runHero(ref, ST_IDLE, { phase: "err", at: 0, err: "超时（8 秒）", miss: [], lastTry: 0 });
+  assert.ok(bad.includes("ERR=超时（8 秒）"), `此刻层的失败原因没传进去：${bad.slice(0, 200)}`);
 });
 
 /* ---------- 5. v107：截止时间 / 更新按钮 / 自动刷新 ---------- */
@@ -206,8 +230,8 @@ test("状态条：截止时点 + 本机取数时刻 + 「↻ 更新」，更新�
   const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
   assert.ok(src.includes("marketCutoffText(MARKET)"), "状态条没取截止时间");
   assert.ok(src.includes("marketAgeText(s.at)"), "状态条没显示本机取数时刻");
-  assert.ok(src.includes('onclick="marketRefresh()"'), "更新按钮没接 marketRefresh");
-  assert.ok(src.includes("↻ 更新"), "按钮文案不是「↻ 更新」");
+  assert.ok(src.includes('onclick="marketRefreshAll()"'), "更新按钮没接 marketRefreshAll");
+  assert.ok(src.includes("↻ 更新此刻"), "按钮文案不是「↻ 更新此刻」");
   assert.ok(src.includes('run ? "disabled" : ""'), "更新中没禁用按钮（连点会重复发请求）");
   /* 两块时间必须分开：数据截止 ≠ 本机取数时刻 */
   assert.ok(src.includes("mkt-bar-l") && src.includes("mkt-live"), "两块时间没分开展示");
@@ -221,8 +245,8 @@ test("状态条三态真跑：空闲给截止+本机时刻、更新中禁用按�
   assert.ok(idle.includes("↻ 更新") && !idle.includes("disabled"), "空闲态按钮不可用");
   /* ② 更新中：按钮变「更新中…」并禁用（连点会重复发请求） */
   const run = runBar(ref, ST({ phase: "loading", at: 1 }));
-  assert.ok(run.includes("正在向私有仓取最新快照"), "更新中没给进度文案");
-  assert.ok(run.includes("更新中…") && run.includes("disabled"), "更新中按钮没禁用");
+  assert.ok(run.includes("正在摸排"), "更新中没给进度文案");
+  assert.ok(run.includes("摸排中…") && run.includes("disabled"), "更新中按钮没禁用");
   /* ③ 失败：给原因，且明说下面仍是旧数据 */
   const err = runBar(ref, ST({ phase: "err", at: 1, err: "HTTP 401 bad credentials" }));
   assert.ok(err.includes("更新失败") && err.includes("HTTP 401"), "失败态没给原因");
