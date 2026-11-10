@@ -666,8 +666,15 @@ export function reportFactsText(q) {
   const lv = o.live;
   if (lv && Array.isArray(lv.items) && lv.items.length) {
     L.push("【盘中参考】" + lv.srcText + " " + lv.atText + "（" + lv.phaseLabel + "）");
-    L.push("  " + lv.items.map(it => it.name + " " + it.valText + (it.chgText ? "（" + it.chgText + "）" : "")).join("｜"));
+    L.push("  " + lv.items.map(it => {
+      const bk = [it.chgText, it.histText].filter(Boolean).join("；");
+      return it.name + " " + it.valText + (bk ? "（" + bk + "）" : "");
+    }).join("｜"));
+    /* v119：有 5日/20日 时补一句基准说明。不补的话模型很容易把
+       「当日 -0.03%」和「5日 -0.12%」当成同一条序列上的两个数去相加。 */
+    const hasHist = lv.items.some(it => it.histText);
     L.push("  口径：盘中价，非中债估值；不与上段加减比。"
+      + (hasHist ? "5日/20日 为对上 N 个交易日收盘，与当日涨跌基准不同，不许相加。" : "")
       + "引用须带「截至" + lv.atText + "」，勿写「收盘」。");
     if (lv.missText) L.push("  本轮缺：" + lv.missText);
   }
@@ -883,10 +890,15 @@ export function reportNumberAudit(text, values) {
   /* 日期先整体抠掉：11-02 会被切成 11 与 -02、10-29 会被切成 10 与 -29，
      两个碎片都不在事实集里，一次就误报两条。日期不是「数据」，不该进这个账。
      v118：时刻同理 —— 「截至 15:10」会被切成 15 与 10，两个碎片照样不在集合里。
-     时点是时点，不是数；不放行的话，只要正文带「截至 HH:MM」就必留一条假告警。 */
+     时点是时点，不是数；不放行的话，只要正文带「截至 HH:MM」就必留一条假告警。
+     v119：期限/日期单位同理。「5日 +0.12%」会切出 5 与 20（「20日」）两个碎片，
+     「10年国债 1.5983%」会切出 10 —— 它们都是标签，不是被引用的数。
+     注意只抠「数字+年/月/日」这一种形态：数据后面跟的是 %、bp、点、倍，
+     不会被这条规则碰到，所以不会把编造的数放过去。 */
   const s = String(text == null ? "" : text)
     .replace(/\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}/g, " ")
-    .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ");
+    .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ")
+    .replace(/\d+(?:\.\d+)?\s*(?:年|月|日)/g, " ");
   /* 负号要吃掉：模型写 −11.5bp 与 -11.5bp 是同一个数。 */
   const re = /[−\-+]?\d+(?:\.\d+)?/g;
   const total = [];

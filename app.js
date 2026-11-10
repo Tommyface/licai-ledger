@@ -101,7 +101,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v118";
+const APP_VER = "v119";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -215,6 +215,19 @@ const LIVE_TIMEOUT = 8000;              /* 单请求超时：一个 ulist + 一�
 let LIVE = null;
 const LIVE_ST = { phase: "idle", at: 0, err: "", miss: [], lastTry: 0 };
 let _liveBusy = null;
+
+/* ---------- v119：指数近期变化（5 日 / 20 日） ----------
+   与此刻层分两条通道、两套 TTL，理由不同：
+     · 此刻层几十秒就变，TTL 60 秒；
+     · 日 K 一天才多一根，TTL 15 分钟已经足够 —— 跟着 60 秒刷新等于每分钟白发两个请求。
+   但两者要「合起来」才有意义：日 K 在盘中常常还没有当天那根，算 5 日变化就会少算今天。
+   所以 HIST 只存原始 K 线，补今天这一步放到 histView() 里做（那时手上一定有 LIVE）。 */
+const LS_HIST = "licai.idxHist";
+const HIST_TTL = 15 * 60 * 1000;
+const HIST_COOL = 5 * 1000;
+let HIST = null;
+const HIST_ST = { phase: "idle", at: 0, err: "", lastTry: 0 };
+let _histBusy = null;
 
 /* ---------- v118：宏观层 ----------
    月度数据，一天最多变一次，所以 TTL 给 6 小时而不是此刻层的 60 秒 —— 每次打开
@@ -2481,6 +2494,8 @@ function openMarket() {
   if (Date.now() - (LIVE_ST.lastTry || 0) > LIVE_TTL) liveRefresh({ silent: true });
   /* v118：宏观 TTL 6 小时。月度数据，没必要每次点开都拉三个请求。 */
   if (!MACRO || Date.now() - (MACRO_ST.lastTry || 0) > MACRO_TTL) macroRefresh({ silent: true });
+  /* v119：指数日 K TTL 15 分钟。histRefresh 自己判 TTL，这里不用再套一层判断。 */
+  histRefresh({ silent: true });
 }
 /** 弹层现在开着吗？（遮罩这一层就是「有没有弹层」的唯一真相） */
 function sheetOpen() { return !!($("mask") && $("mask").classList.contains("show")); }
@@ -2523,7 +2538,10 @@ function marketStateBar() {
   const s = MARKET_ST;
   /* v116：这一条讲的是「日终层」；此刻层在自己的块头里写自己的时点，两者不合并 ——
      合并成一句「更新时间」就等于说这两层是同一个东西。 */
-  const run = s.phase === "loading" || LIVE_ST.phase === "loading";
+  /* v119：hist 也算进「正在摸排」—— 但只在没有旧数据时才算，
+     否则 15 分钟才拉一次的东西会让按钮一直转。 */
+  const run = s.phase === "loading" || LIVE_ST.phase === "loading"
+    || (HIST_ST.phase === "loading" && !HIST);
   const cut = MARKET ? marketCutoffText(MARKET) : "";
   const stale = MARKET ? marketStaleText(MARKET) : "";
   const age = marketAgeText(s.at);
@@ -2543,7 +2561,7 @@ function marketStateBar() {
       ${stale ? `<span class="mkt-stale">${esc(stale)}</span>` : ""}
       ${liveLine}
     </div>
-    <button class="mkt-upd" ${run ? "disabled" : ""} onclick="marketRefreshAll()">${run ? "摸排中…" : "↻ 更新此刻"}</button>
+    <button class="mkt-upd" ${run ? "disabled" : ""} onclick="marketRefreshAll({force:true})">${run ? "摸排中…" : "↻ 更新此刻"}</button>
   </div>`;
 }
 /** 债市页上部：状态条 + 此刻层 + 日终矩阵 + 复制快照。
@@ -2556,6 +2574,13 @@ function marketHeroHtml() {
     phase,
     ageText: LIVE_ST.at ? marketAgeText(LIVE_ST.at) : "",
     err: LIVE_ST.phase === "err" ? LIVE_ST.err : "",
+    /* v119：5 日 / 20 日。histView() 每次重算（30 根 × 2，开销可忽略），
+       这样只要 LIVE 晚于 HIST 到达，下一次重画就会自动把今天补进序列。 */
+    hist: histView(),
+    /* 只有「真的试过、真的没有」才写灰字；从没取过（idle）就留空，
+       否则首次打开会先看到一句「没取到」，一秒后才变成数字。 */
+    histErr: HIST_ST.phase === "err" ? HIST_ST.err
+      : (HIST_ST.phase === "ok" && HIST_ST.err) ? HIST_ST.err : "",
   });
   const daily = MARKET
     ? marketPanelHtml(MARKET, { cut: false })
@@ -4448,6 +4473,119 @@ function liveCacheSave() {
   try { localStorage.setItem(LS_LIVE, JSON.stringify(LV.livePack(LIVE, LIVE_ST.at || Date.now()))); } catch (e) { }
 }
 
+/* ---------- v119：指数日 K ---------- */
+
+/**
+ * 拉两个指数的日 K（各 30 根，各一个请求）。
+ * 不做重试：K 线是「锦上添花」的一段，失败就空着，下一次自动刷新再来 ——
+ * 为了它把首屏拖住不值。失败也不弹 toast（silent 与手动都一样），
+ * 原因直接显示在那一行灰字里，比三秒消失的 toast 有用。
+ * @param {{silent?: boolean, force?: boolean}} [opts] force=true 绕过 TTL（用户点「更新此刻」）
+ */
+function histRefresh(opts = {}) {
+  if (_histBusy) return _histBusy;
+  const now = Date.now();
+  if (!opts.force && HIST && now - (HIST_ST.at || 0) < HIST_TTL) return Promise.resolve(true);
+  HIST_ST.phase = "loading";
+  HIST_ST.err = "";
+  HIST_ST.lastTry = now;
+  _histBusy = (async () => {
+    const out = {};
+    let errs = [];
+    for (const k of LV.IDX_HIST_KEYS) {
+      const spec = LV.LIVE_QUOTES.find(q => q.key === k);
+      if (!spec) continue;
+      try {
+        const r = await jsonpGet(n => LV.liveKlineUrl(spec.secid, n), LIVE_TIMEOUT);
+        if (!r.ok) throw new Error(r.why || "请求失败");
+        const p = LV.liveKlineParse(r.data);
+        if (!p.ok) throw new Error(p.why || "解析失败");
+        out[k] = { ok: true, rows: p.rows, why: "" };
+      } catch (e) {
+        const msg = String((e && e.message) || e).slice(0, 100);
+        out[k] = { ok: false, rows: [], why: msg };
+        errs.push(spec.name);
+      }
+    }
+    /* 两个都挂了才算整体失败；挂一个还能显示另一个 —— 与此刻层同一个取舍 */
+    const anyOk = LV.IDX_HIST_KEYS.some(k => out[k] && out[k].ok);
+    if (!anyOk && !HIST) {
+      HIST_ST.phase = "err";
+      HIST_ST.err = errs.length ? `${errs.join("、")}未取到` : "未取到";
+    } else {
+      HIST = Object.assign({}, HIST || {}, out);
+      HIST_ST.phase = "ok";
+      HIST_ST.at = Date.now();
+      HIST_ST.err = errs.length ? `${errs.join("、")}未取到` : "";
+      histCacheSave();
+    }
+    marketPaint();
+    return anyOk;
+  })().finally(() => { _histBusy = null; });
+  return _histBusy;
+}
+
+/**
+ * 渲染用：把「原始 K 线」和「此刻的指数点位」合起来算 5 日 / 20 日。
+ * 之所以不在 histRefresh 里算：那时 LIVE 可能还没到（两条通道并行），
+ * 算出来会少补今天那一根；放到渲染时，只要两者都有就一定是齐的。
+ */
+function histView() {
+  if (!HIST) return null;
+  const td = today();
+  const out = {};
+  for (const k of LV.IDX_HIST_KEYS) {
+    const h = HIST[k];
+    if (!h || !h.ok || !Array.isArray(h.rows) || !h.rows.length) {
+      out[k] = { ok: false, why: (h && h.why) || "没有数据" };
+      continue;
+    }
+    const q = LIVE && LIVE.quotes ? LIVE.quotes[k] : null;
+    out[k] = LV.liveHistCalc(h.rows, {
+      today: td,
+      liveVal: q && isFinite(q.val) ? q.val : null,
+      isTrade: isTradeDay,
+    });
+  }
+  return out;
+}
+
+function histCacheLoad() {
+  try {
+    const raw = localStorage.getItem(LS_HIST);
+    if (!raw) return false;
+    const o = JSON.parse(raw);
+    if (!o || o.v !== LV.LIVE_VER || !o.rows) return false;
+    const clean = {};
+    for (const k of LV.IDX_HIST_KEYS) {
+      const h = o.rows[k];
+      if (!h || !h.ok || !Array.isArray(h.rows)) continue;
+      /* 只认白名单字段，且长度设上限 —— 防手改过的缓存塞进十万根 */
+      const rows = h.rows
+        .filter(r => r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.date)) && isFinite(r.close))
+        .slice(-LV.HIST_BARS * 2)
+        .map(r => ({ date: String(r.date), close: Number(r.close) }));
+      if (rows.length >= 2) clean[k] = { ok: true, rows, why: "" };
+    }
+    if (!Object.keys(clean).length) return false;
+    HIST = clean;
+    HIST_ST.at = Number(o.at) || 0;
+    HIST_ST.phase = "idle";
+    return true;
+  } catch (e) { return false; }
+}
+function histCacheSave() {
+  if (!HIST) return;
+  try {
+    const rows = {};
+    for (const k of LV.IDX_HIST_KEYS) {
+      const h = HIST[k];
+      if (h && h.ok) rows[k] = { ok: true, rows: h.rows.slice(-LV.HIST_BARS), why: "" };
+    }
+    localStorage.setItem(LS_HIST, JSON.stringify({ v: LV.LIVE_VER, at: HIST_ST.at || Date.now(), rows }));
+  } catch (e) { }
+}
+
 /**
  * 拉一次宏观：三项并行，各自独立。一项坏了不影响另两项 ——
  * 与此刻层同一个取舍（10 个报价里挂一个不该全扔），理由也同一个：它们互相不依赖。
@@ -4545,13 +4683,17 @@ function macroFactsForBrief() {
  * 两路并行，互不阻塞：日终层没配同步也不该挡住此刻层。
  * 播报只播此刻层的结果（主诉求）；日终层的成败由状态条自己写在脸上。
  */
-async function marketRefreshAll() {
+/** @param {{force?: boolean}} [opts] force=true 表示用户手动点的，日 K 绕过 15 分钟 TTL */
+async function marketRefreshAll(opts = {}) {
   const liveP = liveRefresh({ silent: true });
   const dayP = syncCfgOk() ? marketRefresh({ silent: true }) : Promise.resolve(false);
   /* v118：宏观一起更新。它慢（月度数据）但不该被这颗「更新此刻」漏掉 ——
      按钮上写的是「更新此刻」，用户的期待是「点一下把这一页的数都换成最新的」。 */
   const macroP = macroRefresh({ silent: true });
-  const [liveOk] = await Promise.all([liveP, dayP, macroP]);
+  /* v119：日 K 一起刷。这里的 force 跟着「更新此刻」走 —— 用户手动点的，就该真去拉一次；
+     自动刷新那条路（marketBoot 打开页面）不带 force，由 15 分钟 TTL 自己节流。 */
+  const histP = histRefresh({ silent: true, force: !!opts.force });
+  const [liveOk] = await Promise.all([liveP, dayP, macroP, histP]);
   if (liveOk && LIVE) {
     const n = Object.keys(LIVE.quotes).length;
     const total = LV.LIVE_QUOTES.length;
@@ -4614,6 +4756,8 @@ function marketBoot() {
   liveCacheLoad();
   /* v118：宏观同理，且只在打开债市页时才去拉新的（月度数据，启动就拉没有意义）。 */
   macroCacheLoad();
+  /* v119：指数日 K。缓存里先拿旧的顶上，再按 15 分钟 TTL 决定要不要拉新的。 */
+  histCacheLoad();
   if (!syncCfgOk()) return;      /* 日终层没配同步就别白发一次必然失败的请求 */
   marketRefresh({ silent: true });
 }
@@ -6912,10 +7056,22 @@ function liveFactsForBrief() {
      再叫「此刻」—— 宁可整段不给，也不能拿旧价冒充实时。判据在 liveFresh()，那边有测试。 */
   if (!LV.liveFresh(LIVE)) return null;
   const q = LIVE.quotes;
+  /* v119：指数的 5 日 / 20 日一起进事实层。页面看得到、研判看不到，
+     模型就会说「只能看到今天」—— 这正是 v117 那次的教训。 */
+  const hv = histView();
   const items = [], nums = [];
   for (const k of BRIEF_LIVE_KEYS) {
     const x = q[k];
     if (!x || !isFinite(x.val)) continue;
+    const h = hv && hv[k];
+    const histParts = [];
+    if (h && h.ok) {
+      if (isFinite(h.d5)) histParts.push("5日 " + LV.histPctText(h.d5));
+      if (isFinite(h.d20)) histParts.push("20日 " + LV.histPctText(h.d20));
+      /* 5 日 / 20 日的分子分母也进白名单，否则模型照抄会被判「编造」 */
+      if (isFinite(h.d5)) nums.push(Math.round(h.d5 * 100) / 100);
+      if (isFinite(h.d20)) nums.push(Math.round(h.d20 * 100) / 100);
+    }
     items.push({
       key: k,
       name: x.name,
@@ -6923,6 +7079,7 @@ function liveFactsForBrief() {
          会让「国债指数 232.41%」写进研判 —— 单位错在事实层，模型无法自查。 */
       valText: LV.liveValText(x) + ((x.kind === "price" || x.kind === "index") ? "" : "%"),
       chgText: LV.liveChgText(x),
+      histText: histParts.join("、"),
     });
     nums.push(x.val);
     if (isFinite(x.bp)) nums.push(x.bp);
@@ -7052,7 +7209,11 @@ async function briefRun(force) {
      两路并行，总封顶仍是 2.5 秒。 */
   const needLive = !LIVE || Date.now() - (LIVE_ST.at || 0) > LIVE_TTL;
   const needMacro = !MACRO || Date.now() - (MACRO_ST.at || 0) > MACRO_TTL;
-  if (needLive || needMacro) {
+  /* v119：日 K 也一起拉，三路并行。★ 也必须并行 —— v118 把宏观接在 live 后面串行，
+     多出的 1.5 秒让 live 请求「晚到」，两次点击之间的指纹当场就不稳了。
+     histRefresh 自己判 15 分钟 TTL，所以这里不用先算 needHist。 */
+  const needHist = !HIST || Date.now() - (HIST_ST.at || 0) > HIST_TTL;
+  if (needLive || needMacro || needHist) {
     _briefPrep = true;
     if (needLive) toast("先取一次盘中行情（最多 2.5 秒）", 2000);
     try {
@@ -7060,6 +7221,7 @@ async function briefRun(force) {
         Promise.all([
           needLive ? liveRefresh({ silent: true }) : null,
           needMacro ? macroRefresh({ silent: true }) : null,
+          needHist ? histRefresh({ silent: true }) : null,
         ]),
         new Promise(r => setTimeout(r, 2500)),
       ]);

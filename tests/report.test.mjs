@@ -278,8 +278,9 @@ test("请求：没有盘中数据时，必须说清「本轮没取到」而不�
 const LIVE_FIX = {
   atText: "13:31", phaseLabel: "盘中", srcText: "东方财富行情", missText: "",
   items: [
-    { name: "国债指数", valText: "232.40", chgText: "-0.03%" },
-    { name: "企债指数", valText: "311.24", chgText: "0.00%" },
+    /* v119 起指数还带 5日/20日 —— 夹具不补这两项，额度测试就还是比真机短一截 */
+    { name: "国债指数", valText: "232.41", chgText: "-0.03%", histText: "5日 +0.12%、20日 +0.46%" },
+    { name: "企债指数", valText: "311.24", chgText: "0.00%", histText: "5日 +0.05%、20日 +0.24%" },
     { name: "10年国债", valText: "1.5983%", chgText: "+0.4bp" },
     { name: "30年国债", valText: "2.0549%", chgText: "+0.8bp" },
     { name: "5年国债", valText: "1.3610%", chgText: "+5.0bp" },
@@ -865,10 +866,13 @@ test("v117 表格：回撤 -0.0004 既不能写 -0.00%，也不能染成亏损�
   assert.match(h2, /<td class="rp-down">-0\.19%<\/td>/);
 });
 
-test("v118 审计：正文里的时刻不算「找不到的数」（截至 15:10 不该拆出 15 与 10）", () => {
+test("v118/v119 审计：时刻与期限标签都不算「找不到的数」", () => {
+  /* v119 改了口径：原来这条断言 total===2，其中一个是「10年」里切出来的 10 ——
+     也就是说它当时是「靠一条误报凑够 2」的。现在 10年、5日、20日 全部按标签整体放行，
+     真正被引用的数只剩 1.5981 一个。 */
   const r = reportNumberAudit("截至 15:10，10年国债 1.5981%。", [1.5981]);
-  assert.equal(r.total, 2, "时刻整体抠掉后只剩 1.5981 这一个数");
-  assert.deepEqual(r.unknown, [], "时刻碎片不许进 unknown");
+  assert.equal(r.total, 1, "时刻与「10年」都该整体抠掉，只剩 1.5981 这一个数");
+  assert.deepEqual(r.unknown, [], "时刻/期限碎片不许进 unknown");
   /* 带秒的也一起放行 */
   const r2 = reportNumberAudit("15:14:29 更新，指数 232.40。", [232.4]);
   assert.deepEqual(r2.unknown, []);
@@ -902,4 +906,18 @@ test("v118 事实层额度（组合）：3 只 + 8 项盘中 + 利差 + 宏观�
   assert.match(txt, /【中票利差】/);
   assert.match(txt, /【宏观】/);
   assert.match(txt, /【盘中参考】/);
+});
+
+test("v119 审计：5日 / 20日 的 5 与 20 不进账，但后面的百分比照查", () => {
+  const r = reportNumberAudit("国债指数 232.41（-0.03%；5日 +0.12%、20日 +0.46%）。", [232.41, -0.03, 0.12, 0.46]);
+  assert.deepEqual(r.unknown, [], "五个数都在白名单，不该有告警");
+  /* 期限标签放行不等于放水：编一个不在白名单的百分比照样要被抓出来 */
+  const bad = reportNumberAudit("国债指数 232.41（5日 +0.88%、20日 +0.46%）。", [232.41, 0.12, 0.46]);
+  assert.deepEqual(bad.unknown, ["+0.88"], "编造的数必须仍被抓住");
+});
+
+test("v119 审计：「2026年10月」整段抠掉，不会留下 10 这个碎片", () => {
+  const r = reportNumberAudit("CPI 同比 0.7%（2026年10月，较上期 -0.2个百分点）。", [0.7, -0.2]);
+  assert.deepEqual(r.unknown, [], "年月是标签，0.7 与 -0.2 在白名单");
+  assert.equal(r.total, 2, "只剩两个真实数据");
 });

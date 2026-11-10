@@ -58,7 +58,20 @@ export const LIVE_GROUPS = [
 export const LIVE_API = {
   quote: "https://push2.eastmoney.com/api/qt/ulist.np/get",
   trend: "https://push2his.eastmoney.com/api/qt/stock/trends2/get",
+  kline: "https://push2his.eastmoney.com/api/qt/stock/kline/get",
 };
+
+/** v119：要算「近期变化」的两项。只有指数做这件事 ——
+    收益率与回购的「5 日变化」是 bp 差，与矩阵里的 bp5d 重复，不必再拉一遍。 */
+export const IDX_HIST_KEYS = ["IDX_GZ", "IDX_QZ"];
+
+/** 取多少根日 K。20 日变化需要 21 根（最新 + 20 根之前），留到 30 根
+    是为了万一接口少给几根（长假 / 停牌）也还有富余。 */
+export const HIST_BARS = 30;
+
+/** 5 日 / 20 日：都是「交易日根数」，不是自然日 —— 用 K 线下标数，
+    自然日会把周末算进去，长假前后偏差能到 3 天以上。 */
+export const HIST_SPANS = [5, 20];
 
 /** 报价请求 URL：一个请求拿全 12 项（实测 total=12，缺的 secid 会被接口直接忽略）。 */
 export function liveQuoteUrl(cb) {
@@ -69,6 +82,112 @@ export function liveQuoteUrl(cb) {
 /** 分时请求 URL：T 主力当日逐分钟（实测 80 点）。 */
 export function liveTrendUrl(cb) {
   return `${LIVE_API.trend}?secid=8.110130&fields1=f1,f2,f3&fields2=f51,f53&iscr=0&ndays=1&cb=${encodeURIComponent(cb)}`;
+}
+
+/** 日 K 请求 URL：一个 secid 一个请求（该接口不支持多 secid 合并，
+    所以两个指数就是两个请求，各约 2.3 KB / 40 ms）。 */
+export function liveKlineUrl(secid, cb) {
+  return `${LIVE_API.kline}?secid=${encodeURIComponent(secid)}`
+    + `&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58`
+    + `&klt=101&fqt=0&end=20500101&lmt=${HIST_BARS}&cb=${encodeURIComponent(cb)}`;
+}
+
+/**
+ * 解析日 K。只留「日期 + 收盘」两个字段 —— 开高低量额振幅都用不上，
+ * 多留一个字段就多一个将来会被误用的东西。
+ *
+ * 原始行：`2026-11-10,232.48,232.41,232.48,232.40,124480288,125094265800.00,0.03`
+ *         日期,开,收,高,低,量,额,振幅
+ * ★ 收盘是第 3 列（下标 2）。第 8 列是**振幅**不是涨跌幅，别拿它当当日涨跌。
+ *
+ * @returns {{ok:boolean, rows:{date:string,close:number}[], why:string}}
+ */
+export function liveKlineParse(json) {
+  const d = json && json.data;
+  const arr = d && Array.isArray(d.klines) ? d.klines : null;
+  if (!arr) return { ok: false, rows: [], why: "返回里没有 data.klines（接口结构变了）" };
+  const rows = [];
+  for (const s of arr) {
+    if (typeof s !== "string") continue;
+    const p = s.split(",");
+    if (p.length < 3) continue;
+    const date = String(p[0]).trim();
+    const raw = String(p[2]).trim();
+    const close = Number(raw);
+    /* raw === "" 要单独挡：Number("") 是 0，0 点位的指数不存在，
+       但 0 会一路算进分母，届时 5 日变化变成 Infinity 而不是「没数据」。 */
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || raw === "" || !isNum(close)) continue;
+    rows.push({ date, close });
+  }
+  return { ok: rows.length > 0, rows, why: rows.length ? "" : "K 线里没有可用的行" };
+}
+
+/**
+ * 算 N 个交易日的累计涨跌。
+ *
+ * ★ 两件容易错的事，都在这里一次做对：
+ *   ① 排序：不依赖接口返回顺序（实测是升序，但降序的接口也存在），一律按日期升序后再取下标。
+ *   ② 补今天：日 K 在盘中常常还没有当天那根（要等收盘才落库）。若直接拿最后一根当「最新」，
+ *      而「当日涨跌」来自实时报价，两者基准日差一天 —— 5 日变化会少算今天的涨跌。
+ *      所以：最后一根 < 今天 且 今天是交易日 且 手上有实时点位时，用实时点位补一根。
+ *      补的那根标 synth=true，页面上据此把「截至」写成今天。
+ *
+ * @param {{date:string,close:number}[]} rows
+ * @param {{today?:string, liveVal?:number|null, isTrade?:(d:string)=>boolean}} opts
+ * @returns {{ok:boolean, n:number, latest:number, latestDate:string, synth:boolean,
+ *   d1:number|null, d5:number|null, d20:number|null,
+ *   from5:string, from20:string, why:string}}
+ */
+export function liveHistCalc(rows, opts = {}) {
+  const src = Array.isArray(rows)
+    ? rows.filter(r => r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.date)) && isNum(r.close))
+    : [];
+  if (src.length < 2) {
+    return { ok: false, n: src.length, latest: null, latestDate: "", synth: false,
+      d1: null, d5: null, d20: null, from5: "", from20: "", why: "K 线不足 2 根，算不出变化" };
+  }
+  const sorted = src.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  /* 同一天出现两条（接口偶尔会重复给）→ 后者覆盖前者，不让 n 虚增 */
+  const uniq = [];
+  for (const r of sorted) {
+    const last = uniq[uniq.length - 1];
+    if (last && last.date === r.date) uniq[uniq.length - 1] = { date: r.date, close: r.close };
+    else uniq.push({ date: r.date, close: r.close });
+  }
+
+  const today = /^\d{4}-\d{2}-\d{2}$/.test(String(opts.today || "")) ? String(opts.today) : "";
+  const liveVal = isNum(opts.liveVal) ? Number(opts.liveVal) : null;
+  const isTrade = typeof opts.isTrade === "function" ? opts.isTrade : null;
+  let synth = false;
+  const tail = uniq[uniq.length - 1];
+  if (today && tail && tail.date < today && liveVal != null && (!isTrade || isTrade(today))) {
+    uniq.push({ date: today, close: liveVal });
+    synth = true;
+  }
+
+  const n = uniq.length;
+  const at = i => uniq[n - 1 - i];        /* at(0) 是最新，at(5) 是 5 个交易日之前 */
+  const latest = uniq[n - 1].close;
+  /* 基准价必须 > 0：0 做分母会得 Infinity，「涨了无穷多」比「没数据」更糟 */
+  const pct = prev => (isNum(prev) && prev > 0 ? (latest / prev - 1) * 100 : null);
+  return {
+    ok: true, n, latest, latestDate: uniq[n - 1].date, synth,
+    d1: n >= 2 ? pct(at(1).close) : null,
+    d5: n >= 6 ? pct(at(5).close) : null,
+    d20: n >= 21 ? pct(at(20).close) : null,
+    from5: n >= 6 ? at(5).date : "",
+    from20: n >= 21 ? at(20).date : "",
+    why: "",
+  };
+}
+
+/** 百分比文案：先舍入再判号（-0.0004 不是「跌」，是 0）。
+    与 report.js 的 zeroFixed 同一套规矩：宁可少一位符号，不许出现 -0.00%。 */
+export function histPctText(v) {
+  if (!isNum(v)) return "";
+  const r = round(v, 2);
+  if (r === 0) return "0.00%";
+  return (r > 0 ? "+" : "") + r.toFixed(2) + "%";
 }
 
 const isNum = v => typeof v === "number" && isFinite(v);
@@ -286,9 +405,49 @@ export function liveSparkHtml(pts, opts = {}) {
 }
 
 /**
+ * 「近期」一行：两个指数的 5 日 / 20 日累计涨跌。
+ *
+ * 为什么单独一行、不塞进格子里：格子是「今天」这一场的快照（3 行高），
+ * 塞进第 4 行会把那两个格子顶高，整排网格错位；而且「5 日」和「当日」
+ * 是两个时间尺度，摆在同一行里最容易被读成「今天 5 日都跌了 0.12%」。
+ *
+ * @param {Object|null} hist  {IDX_GZ: liveHistCalc(...), IDX_QZ: ...}
+ * @param {{err?:string}} opts  err 非空且没有数据时，画一行灰字说明为什么没有
+ */
+export function liveHistHtml(hist, opts = {}) {
+  const keys = IDX_HIST_KEYS;
+  const parts = [];
+  for (const k of keys) {
+    const h = hist && hist[k];
+    if (!h || !h.ok) continue;
+    const spec = LIVE_QUOTES.find(q => q.key === k);
+    const nm = (spec && spec.name) || k;
+    const seg = [];
+    if (isNum(h.d5)) seg.push(`<span class="lv-hs">5日 <i class="lv-${liveDirOf("index", h.d5)}">${esc(histPctText(h.d5))}</i></span>`);
+    if (isNum(h.d20)) seg.push(`<span class="lv-hs">20日 <i class="lv-${liveDirOf("index", h.d20)}">${esc(histPctText(h.d20))}</i></span>`);
+    if (!seg.length) continue;
+    parts.push(`<span class="lv-hi"><b>${esc(nm)}</b>${seg.join("")}</span>`);
+  }
+  if (!parts.length) {
+    if (!opts.err) return "";
+    return `<div class="lv-hist lv-hist-err">5日 / 20日 变化这一次没取到：${esc(opts.err)}</div>`;
+  }
+  /* 补过今天就在标题上标出来 —— 否则读的人会以为「最新」是昨收，
+     而旁边的当日涨跌是实时，两个基准日不同却不说明，是最难查的那种错。 */
+  const synth = keys.some(k => hist && hist[k] && hist[k].ok && hist[k].synth);
+  /* 一个成功一个失败时，不能把失败的悄悄藏起来 —— 只显示一行数字，
+     读的人会以为两个指数都在里面。 */
+  const miss = opts.err ? `<span class="lv-hist-miss">${esc(opts.err)}</span>` : "";
+  /* 「含今日实时」放行尾而不是塞进标签：「近期（含今日实时）」比「近期」宽一倍，
+     标签一长，悬挂缩进的宽度就得跟着变，换行后那两行就对不齐了。 */
+  const syn = synth ? `<span class="lv-hist-syn">含今日实时</span>` : "";
+  return `<div class="lv-hist"><span class="lv-hk">近期</span>${parts.join("")}${syn}${miss}</div>`;
+}
+
+/**
  * 整块 HTML。live 为 null（没取过）→ 只给一句「还没取过」+ 入口提示，不画空格子。
  * @param {object|null} live
- * @param {{now?:number, phase?:{id:string,label:string}, ageText?:string, busy?:boolean, err?:string}} opts
+ * @param {{now?:number, phase?:{id:string,label:string}, ageText?:string, busy?:boolean, err?:string, hist?:Object, histErr?:string}} opts
  */
 export function liveBlockHtml(live, opts = {}) {
   const head = `<div class="lv-head">
@@ -309,10 +468,15 @@ export function liveBlockHtml(live, opts = {}) {
 
   const st = liveStat(live);
   const miss = liveMissText(live);
+  /* v119：「近期」紧贴指数格子下面 —— 它解释的就是上面那两个指数，
+     放到整块末尾会离得太远，中间隔了利率、期货、回购三排。 */
+  const histHtml = liveHistHtml(opts.hist, { err: opts.histErr });
   const groups = LIVE_GROUPS.map(g => {
     const cells = g.keys.map(k => live.quotes[k]).filter(Boolean).map(cellHtml).join("");
-    return cells ? `<div class="lv-g"><div class="lv-gt">${esc(g.title)}</div>
-      <div class="lv-grid">${cells}</div></div>` : "";
+    if (!cells) return "";
+    const extra = g.id === "index" ? histHtml : "";
+    return `<div class="lv-g"><div class="lv-gt">${esc(g.title)}</div>
+      <div class="lv-grid">${cells}</div>${extra}</div>`;
   }).join("");
 
   const age = opts.ageText ? `<span class="lv-age">${esc(opts.ageText)}</span>` : "";
@@ -322,8 +486,9 @@ export function liveBlockHtml(live, opts = {}) {
     ${groups}
     ${liveSparkHtml(live.trend || [], { dir: (live.quotes.T || {}).dir })}
     <div class="cap" style="padding-top:6px">此刻层来自东方财富行情，是盘中参考价，与下面「日终层」的中债估值口径不同，
-      两者不做差、不互补。指数为<b>上证口径</b>（交易所竞价成交），不是中债估值指数；企债指数成分成交清淡，
-      全日不动是常态，看到 0.00% 不等于没取到。回购为交易所口径（GC 系列），不是银行间 DR007。</div>
+      两者不做差、不互补。指数为<b>上证口径</b>（交易所竞价成交），不是中债估值指数；「近期」按交易日数对比，
+      与当日涨跌基准不同，两者不能相加。企债指数成分成交清淡，全日不动是常态，看到 0.00% 不等于没取到。
+      回购为交易所口径（GC 系列），不是银行间 DR007。</div>
   </div>`;
 }
 

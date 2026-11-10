@@ -503,6 +503,23 @@ html:not(.inApp) .app-only{display:none}
 .lv-sp-down{color:var(--down)}
 .lv-sp-flat{color:var(--ink3)}
 .lv-sp-x{display:flex;justify-content:space-between;font-size:9.5px;color:var(--ink3);margin-top:1px}
+/* v119：指数近期变化。一行、贴指数格子下面；颜色只给数字 —— 标签一律灰，
+   否则「5日」和「20日」四个字也跟着红绿，一行里同时出现两种颜色会看不出重点。 */
+/* 悬挂缩进：换行后的第二项从「近期」右边起，而不是贴回最左边 ——
+   否则两行看起来像「近期」只修饰了第一行。宽度 24px 是「近期」两个字（10px 字号）加一点间隙。 */
+.lv-hist{padding:5px 1px 0 24px;text-indent:-24px;font-size:10.5px;color:var(--ink2);font-variant-numeric:tabular-nums;line-height:1.7}
+.lv-hk{display:inline-block;width:24px;text-indent:0;font-size:10px;color:var(--ink3);font-weight:600}
+.lv-hi{text-indent:0;margin-right:12px;white-space:nowrap}
+.lv-hi b{font-weight:600;color:var(--ink3)}
+.lv-hs{margin-left:7px}
+.lv-hist-syn{color:var(--ink3);font-size:10px;margin-left:2px}
+.lv-hist-syn:before{content:"· "}
+.lv-hs i{font-style:normal;font-weight:600}
+.lv-hist .lv-up{color:var(--up)}
+.lv-hist .lv-down{color:var(--down)}
+.lv-hist .lv-flat{color:var(--ink3)}
+.lv-hist-miss{color:#b8860b;font-size:10px}
+.lv-hist-err{display:block;font-size:10.5px;color:var(--ink3)}
 
 /* ---------- v118：中票利差 + 宏观 ----------
    利差表沿用 .mkt-tbl 的骨架（间距、字号、格子形状与矩阵一致），只补两处：

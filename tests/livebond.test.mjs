@@ -7,7 +7,9 @@ import assert from "node:assert/strict";
 import {
   LIVE_QUOTES, LIVE_GROUPS, liveQuoteUrl, liveTrendUrl, liveParse, liveDirOf,
   liveTrendParse, liveStat, livePhaseOf, liveValText, liveChgText, liveTimeText,
-  liveMissText, liveSparkHtml, liveBlockHtml, livePack, liveUnpack, liveFresh } from "../js/core/livebond.js";
+  liveMissText, liveSparkHtml, liveBlockHtml, livePack, liveUnpack, liveFresh,
+  liveKlineUrl, liveKlineParse, liveHistCalc, histPctText, liveHistHtml,
+  IDX_HIST_KEYS, HIST_BARS } from "../js/core/livebond.js";
 
 /** 实测返回（2026-11-10 11:26，fltt=2 口径）。 */
 const RAW = {
@@ -333,4 +335,223 @@ test("指数：块底说明要讲清「不是中债估值指数」", () => {
   const h = liveBlockHtml({ quotes: liveParse(RAW).quotes, miss: [], trend: [], at: Date.now() }, {});
   assert.match(h, /上证口径/);
   assert.match(h, /不是中债估值指数/);
+});
+
+/* ---------- v119：指数日 K 与 5 日 / 20 日变化 ---------- */
+
+/** 造一份 kline 返回。行格式与真接口一致：日期,开,收,高,低,量,额,振幅。 */
+const KL = rows => ({
+  data: {
+    code: "000012", name: "国债指数", decimal: 2, dktotal: 5759,
+    klines: rows.map(r => `${r.date},${r.open},${r.close},${r.high},${r.low},124480288,125094265800.00,${r.amp}`),
+  },
+});
+
+/** 连续交易日序列（跳过周末），从 2026-10-01 起。 */
+const mkRows = (n, start = 232.0, step = 0.01) => {
+  const out = [];
+  const d = new Date(2026, 9, 1);
+  while (out.length < n) {
+    if (d.getDay() !== 0 && d.getDay() !== 6) {
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const close = +(start + out.length * step).toFixed(4);
+      out.push({ date: iso, open: close, close, high: close, low: close, amp: 0.01 });
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+};
+const weekday = d => { const w = new Date(d + "T00:00:00").getDay(); return w > 0 && w < 6; };
+
+test("日K URL：secid 原样、lmt 取 HIST_BARS、带回调名", () => {
+  const u = liveKlineUrl("1.000012", "cbX");
+  assert.match(u, /secid=1\.000012/);
+  assert.match(u, new RegExp("lmt=" + HIST_BARS));
+  assert.match(u, /klt=101/, "日 K 必须是 klt=101");
+  assert.match(u, /fqt=0/, "指数不复权");
+  assert.match(u, /cb=cbX/);
+  /* 点号没被编码掉：secid 里的「1.」是市场号，编码成 %2E 接口会认不出 */
+  assert.ok(!u.includes("1%2E000012"));
+});
+
+test("日K 解析：收盘取第 3 列，不是开盘也不是最低", () => {
+  const p = liveKlineParse(KL([
+    { date: "2026-11-09", open: 232.44, close: 232.46, high: 232.48, low: 232.38, amp: 0.04 },
+    { date: "2026-11-10", open: 232.48, close: 232.41, high: 232.48, low: 232.40, amp: 0.03 },
+  ]));
+  assert.equal(p.ok, true);
+  assert.equal(p.rows.length, 2);
+  assert.equal(p.rows[1].date, "2026-11-10");
+  assert.equal(p.rows[1].close, 232.41, "开盘是 232.48、最低是 232.40，取错了这两个都会露馅");
+});
+
+test("日K 解析：结构不对 / 空收盘 / 坏日期 一律跳过，不整包拒收", () => {
+  assert.equal(liveKlineParse(null).ok, false);
+  assert.equal(liveKlineParse({ data: {} }).ok, false, "没有 klines 要如实说结构变了");
+  const p = liveKlineParse({ data: { klines: [
+    "2026-11-09,1,2,3,4,5,6,7",
+    "2026-11-10,1,,4,5,6,7,8",      /* 第 3 列（收盘）空 → 跳 */
+    "not-a-date,1,2,3,4,5,6,7",     /* 日期坏 → 跳 */
+    "2026-11-11,1,2.5,3,4,5,6,7",
+    "只有两段,1",
+  ] } });
+  assert.deepEqual(p.rows.map(r => r.date), ["2026-11-09", "2026-11-11"]);
+  assert.equal(p.rows[1].close, 2.5);
+});
+
+test("日K 解析：空收盘不许被 Number('') = 0 蒙混过去", () => {
+  /* 0 一旦进了分母，5 日变化就变成 Infinity，界面上会显示「涨了无穷多」——
+     比「没数据」糟得多。所以空字符串必须在这一步就被挡住。 */
+  /* 开=1、收="  "（两个空格）、其余有效 —— Number("  ") 是 0，必须挡住 */
+  const p = liveKlineParse({ data: { klines: ["2026-11-10,1,  ,1,1,1,1,1"] } });
+  assert.deepEqual(p.rows, []);
+  assert.equal(p.ok, false);
+});
+
+test("5日/20日：按交易日根数取下标，不是按自然日", () => {
+  const rows = mkRows(30, 232.0, 0.02);          /* 每天 +0.02 */
+  const h = liveHistCalc(rows, { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  assert.equal(h.n, 30);
+  /* 最新 = 232.0 + 29*0.02 = 232.58；5 个交易日前 = 232.0 + 24*0.02 = 232.48 */
+  assert.equal(h.latest, 232.58);
+  assert.ok(Math.abs(h.d5 - (232.58 / 232.48 - 1) * 100) < 1e-9, "5 日应取第 n-6 根");
+  assert.equal(h.from5, rows[24].date, "基准日必须是 5 个交易日之前那一天");
+  assert.equal(h.from20, rows[9].date);
+});
+
+test("5日/20日：根数不够就给 null，不拿更短的窗口顶替", () => {
+  const h5 = liveHistCalc(mkRows(5), { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  assert.equal(h5.d5, null, "只有 5 根时算不出 5 日（需要 6 根）");
+  assert.equal(h5.d20, null);
+  const h6 = liveHistCalc(mkRows(6), { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  assert.ok(h6.d5 != null, "6 根刚好够算 5 日");
+  assert.equal(h6.d20, null);
+  const h20 = liveHistCalc(mkRows(20), { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  assert.equal(h20.d20, null, "20 根不够算 20 日（需要 21 根）");
+  const h21 = liveHistCalc(mkRows(21), { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  assert.ok(h21.d20 != null, "21 根刚好够算 20 日");
+});
+
+test("5日/20日：接口降序返回也能算对（不依赖返回顺序）", () => {
+  const asc = mkRows(25, 232.0, 0.02);
+  const desc = asc.slice().reverse();
+  const a = liveHistCalc(asc, { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  const b = liveHistCalc(desc, { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  assert.equal(b.latestDate, a.latestDate);
+  assert.ok(Math.abs(b.d5 - a.d5) < 1e-9);
+  assert.ok(Math.abs(b.d20 - a.d20) < 1e-9);
+});
+
+test("5日/20日：同一天重复给两条不虚增 n", () => {
+  const rows = mkRows(10, 232.0, 0.01);
+  const dup = rows.concat([{ date: rows[9].date, close: 999 }]);   /* 同日覆盖 */
+  const h = liveHistCalc(dup, { today: "2026-11-30", liveVal: null, isTrade: weekday });
+  assert.equal(h.n, 10, "10 个交易日 + 1 条重复，n 仍是 10");
+  assert.equal(h.latest, 999, "同日两条时后者覆盖前者");
+});
+
+test("★ 补今天：日K 还没有当天那根时，用实时点位补上，否则 5 日会少算今天", () => {
+  /* 造一个「今天是 11-10 但 K 线只到 11-09」的场景 —— 盘中常态。 */
+  const rows = mkRows(26, 232.0, 0.02);
+  const lastDate = rows[rows.length - 1].date;
+  const today = "2026-12-31";                    /* 远期，确保 > lastDate */
+  const noLive = liveHistCalc(rows, { today, liveVal: null, isTrade: () => true });
+  assert.equal(noLive.synth, false, "没有实时点位就不补");
+  assert.equal(noLive.latestDate, lastDate);
+
+  const liveVal = rows[rows.length - 1].close + 1;   /* 今天涨 1 点 */
+  const withLive = liveHistCalc(rows, { today, liveVal, isTrade: () => true });
+  assert.equal(withLive.synth, true);
+  assert.equal(withLive.latestDate, today, "补的那根日期是今天");
+  assert.equal(withLive.latest, liveVal);
+  assert.equal(withLive.n, noLive.n + 1);
+  /* 5 日必须因为补了今天而变化 —— 这正是「少算一天」那个 bug 的判据 */
+  assert.notEqual(withLive.d5, noLive.d5, "补今天之后 5 日变化必须不一样");
+});
+
+test("补今天：非交易日不补（此时实时点位就等于上一交易日收盘，补了会重复计数）", () => {
+  const rows = mkRows(26, 232.0, 0.02);
+  const h = liveHistCalc(rows, { today: "2026-12-31", liveVal: 999, isTrade: () => false });
+  assert.equal(h.synth, false);
+  assert.ok(h.latest !== 999);
+});
+
+test("补今天：K 线已经含今天时不补（否则今天被算两次）", () => {
+  const rows = mkRows(26, 232.0, 0.02);
+  const today = rows[rows.length - 1].date;
+  const h = liveHistCalc(rows, { today, liveVal: rows[rows.length - 1].close + 5, isTrade: () => true });
+  assert.equal(h.synth, false, "最后一条已经是今天，不该再追加");
+  assert.equal(h.n, 26);
+});
+
+test("分母为 0 不给 Infinity（0 点位的指数不存在，但坏数据能造出来）", () => {
+  const rows = [{ date: "2026-11-02", close: 0 }, { date: "2026-11-03", close: 0 },
+    { date: "2026-11-04", close: 0 }, { date: "2026-11-05", close: 0 },
+    { date: "2026-11-06", close: 0 }, { date: "2026-11-09", close: 0 },
+    { date: "2026-11-10", close: 232 }];
+  const h = liveHistCalc(rows, { today: "2026-11-10", liveVal: null, isTrade: weekday });
+  assert.equal(h.d5, null, "基准是 0 时给 null，不是 Infinity");
+  assert.equal(h.d1, null);
+});
+
+test("histPctText：先舍入再判号，不许出现 -0.00%", () => {
+  assert.equal(histPctText(0.116), "+0.12%");
+  assert.equal(histPctText(-0.116), "-0.12%");
+  assert.equal(histPctText(0), "0.00%");
+  /* -0.0004 舍入后是 0：它是「持平」，不是「跌了 0.00%」 */
+  assert.equal(histPctText(-0.0004), "0.00%");
+  assert.equal(histPctText(0.0004), "0.00%");
+  assert.equal(histPctText(null), "");
+  assert.equal(histPctText(NaN), "");
+});
+
+test("近期一行：颜色跟变化方向走，正数红、负数绿（与指数格子同一套语义）", () => {
+  const h = liveHistHtml({ IDX_GZ: { ok: true, d5: 0.12, d20: -0.34, synth: false } }, {});
+  assert.match(h, /5日 <i class="lv-up">\+0\.12%<\/i>/);
+  assert.match(h, /20日 <i class="lv-down">-0\.34%<\/i>/);
+  assert.match(h, /国债指数/);
+});
+
+test("近期一行：没有数据就整行不画；有错才画灰字说明", () => {
+  assert.equal(liveHistHtml(null, {}), "", "从没取过 → 不画空行");
+  assert.equal(liveHistHtml({ IDX_GZ: { ok: false } }, {}), "");
+  const e = liveHistHtml(null, { err: "超时" });
+  assert.match(e, /这一次没取到：超时/);
+});
+
+test("近期一行：补过今天要标出来（两个基准日不同，不标最容易读错）", () => {
+  const withSynth = liveHistHtml({ IDX_GZ: { ok: true, d5: 0.12, d20: 0.46, synth: true } }, {});
+  assert.match(withSynth, /含今日实时/);
+  const noSynth = liveHistHtml({ IDX_GZ: { ok: true, d5: 0.12, d20: 0.46, synth: false } }, {});
+  assert.ok(!noSynth.includes("含今日实时"));
+});
+
+test("近期一行：一个成功一个失败时，失败的那个要留名，不许悄悄藏掉", () => {
+  const h = liveHistHtml({ IDX_GZ: { ok: true, d5: 0.12, d20: 0.46, synth: false },
+    IDX_QZ: { ok: false } }, { err: "企债指数未取到" });
+  assert.match(h, /国债指数/);
+  assert.match(h, /企债指数未取到/);
+});
+
+test("近期一行：接进整块后紧跟在指数格子下面，不在块末", () => {
+  const h = liveBlockHtml({ quotes: liveParse(RAW).quotes, miss: [], trend: [], at: Date.now() },
+    { hist: { IDX_GZ: { ok: true, d5: 0.12, d20: 0.46, synth: false } } });
+  const iHist = h.indexOf("lv-hist");
+  const iRate = h.indexOf("国债收益率");
+  assert.ok(iHist > 0 && iRate > 0);
+  assert.ok(iHist < iRate, "「近期」应贴在指数分组下，排在利率分组之前");
+});
+
+test("近期一行：只在指数分组里画一次（别四个分组各画一遍）", () => {
+  const h = liveBlockHtml({ quotes: liveParse(RAW).quotes, miss: [], trend: [], at: Date.now() },
+    { hist: { IDX_GZ: { ok: true, d5: 0.12, d20: 0.46, synth: false } } });
+  assert.equal((h.match(/class="lv-hist"/g) || []).length, 1);
+});
+
+test("清单：只有两个指数做近期变化，收益率不重复算（矩阵里已有 bp5d）", () => {
+  assert.deepEqual(IDX_HIST_KEYS, ["IDX_GZ", "IDX_QZ"]);
+  for (const k of IDX_HIST_KEYS) {
+    const q = LIVE_QUOTES.find(x => x.key === k);
+    assert.equal(q.kind, "index", k + " 必须是 index 类");
+  }
 });

@@ -71,10 +71,14 @@ const LV_OK = {
   liveBlockHtml: (_live, opts) => `<LIVE${opts && opts.err ? " ERR=" + opts.err : ""}>`,
 };
 const LIVE_ST_IDLE = { phase: "idle", at: 0, err: "", miss: [], lastTry: 0 };
-const runBar = (m, st, lst = LIVE_ST_IDLE) => new Function(
+/* v119：状态条的「正在摸排」还要看日 K 那条线（HIST / HIST_ST）——
+   只在没有旧数据时才算，否则 15 分钟才拉一次的东西会让按钮一直转。 */
+const HIST_ST_IDLE = { phase: "idle", at: 0, err: "", lastTry: 0 };
+const runBar = (m, st, lst = LIVE_ST_IDLE, hist = null, hst = HIST_ST_IDLE) => new Function(
   "MARKET", "MARKET_ST", "esc", "marketCutoffText", "marketAgeText", "marketStaleText", "LIVE_ST",
+  "HIST", "HIST_ST",
   `${F.marketStateBar.toString()}; return marketStateBar();`)(
-  m, st, s => String(s), cutOk, ageOk, () => "", lst);
+  m, st, s => String(s), cutOk, ageOk, () => "", lst, hist, hst);
 /* v118：宏观块的三个自由变量（MACRO / MACRO_ST / MC）也要注入 ——
    marketHeroHtml 里加了一段宏观渲染。MC 用替身，宏观自己的解析在 macro.test.mjs 真跑。 */
 const MC_OK = { macroBlockHtml: () => "<MACRO>" };
@@ -83,10 +87,10 @@ const liveToday = () => "2026-11-09";
 const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_ST_IDLE, mc = MC_OK) => new Function(
   "MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
   "LV", "LIVE", "LIVE_ST", "isTradeDay", "marketAgeText",
-  "MACRO", "MACRO_ST", "MC", "today",
+  "MACRO", "MACRO_ST", "MC", "today", "histView", "HIST_ST",
   `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(
   m, st, panelOk, aiOk, s => String(s), barOk, LV_OK, null, lst, () => true, ageOk,
-  macro, mst, mc, liveToday);
+  macro, mst, mc, liveToday, () => null, HIST_ST_IDLE);
 const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */
@@ -237,7 +241,8 @@ test("状态条：截止时点 + 本机取数时刻 + 「↻ 更新」，更新�
   const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
   assert.ok(src.includes("marketCutoffText(MARKET)"), "状态条没取截止时间");
   assert.ok(src.includes("marketAgeText(s.at)"), "状态条没显示本机取数时刻");
-  assert.ok(src.includes('onclick="marketRefreshAll()"'), "更新按钮没接 marketRefreshAll");
+  assert.ok(src.includes('onclick="marketRefreshAll({force:true})"'),
+    "更新按钮没接 marketRefreshAll({force:true}) —— 手动点击必须绕过日 K 的 15 分钟 TTL，否则点了没反应");
   assert.ok(src.includes("↻ 更新此刻"), "按钮文案不是「↻ 更新此刻」");
   assert.ok(src.includes('run ? "disabled" : ""'), "更新中没禁用按钮（连点会重复发请求）");
   /* 两块时间必须分开：数据截止 ≠ 本机取数时刻 */
