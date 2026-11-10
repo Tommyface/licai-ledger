@@ -44,6 +44,13 @@ export function daysBetween(from, to) {
 /**
  * 规则表。day 是「每月第几号」，不是算好的日期 —— 顺延由 rollForwardToTradeDay 做。
  * tone：warn 表示这一天通常让资金面更紧，info 表示只是一个信息点。
+ *
+ * v118 加了两条宏观公布窗口。它们的性质与上面四条**不同**：上面四条是资金面事件，
+ * 下面两条是统计局的发布日程，所以：
+ *   · tone 一律 info —— 数据公布本身不抽流动性，把 CPI 标成「偏紧」是误导；
+ *   · soft: true —— 日期是我们按惯例推的，不是官方日程原文，pubCalText 不写「顺延」二字，
+ *     免得读起来像是「统计局顺延了」；
+ *   · pmi 用 noRoll —— 统计局每月最后一日公布 PMI，遇周末照发，不该按交易日推。
  */
 export const PUB_CAL_RULES = [
   { key: "rrr", name: "缴准", day: 15, tone: "info",
@@ -54,11 +61,17 @@ export const PUB_CAL_RULES = [
     note: "每月 20 日 09:15 公布，遇非工作日顺延" },
   { key: "mlf", name: "MLF 操作", day: 25, tone: "info",
     note: "每月 25 日操作（2024 年 7 月起由 15 日改到 25 日），遇非工作日顺延" },
+  { key: "cpi", name: "CPI/PPI 公布", day: 9, tone: "info", soft: true,
+    note: "统计局惯例每月 9 日前后 09:30 公布上月数，遇周末常提前或推后一天，以官方发布日程为准" },
+  { key: "pmi", name: "PMI 公布", day: 31, tone: "info", soft: true, noRoll: true,
+    note: "统计局每月最后一日 09:30 公布当月 PMI，遇周末照发不顺延" },
 ];
 
-/** 顺延到下一个交易日；本来就在交易日就原样返回。 */
-/** @param {string} date @returns {{ date: string, shifted: boolean, from: string }} */
-function rollForward(date) {
+/** 顺延到下一个交易日；本来就在交易日就原样返回。
+    noRoll=true 时原样返回（PMI 那类「遇周末照发」的日子）。 */
+/** @param {string} date @param {boolean} [noRoll] @returns {{ date: string, shifted: boolean, from: string }} */
+function rollForward(date, noRoll) {
+  if (noRoll) return { date, shifted: false, from: date };
   if (isTradeDay(date)) return { date, shifted: false, from: date };
   const nx = nextTradeDay(date);
   return { date: nx || date, shifted: true, from: date };
@@ -110,17 +123,17 @@ export function pubCalNext(today, opts) {
     /* 本月这个日子若已过（按顺延后的日期判），就取下月 —— 用「今天」比，
        不用「今天是不是交易日」比：周日打开时，周一的缴准仍然是「还有 1 天」。 */
     let base = monthDay(today, r.day, 0);
-    let rolled = rollForward(base);
+    let rolled = rollForward(base, !!r.noRoll);
     if (rolled.date < today) {
       base = monthDay(today, r.day, 1);
-      rolled = rollForward(base);
+      rolled = rollForward(base, !!r.noRoll);
     }
     const away = daysBetween(today, rolled.date);
     if (away < 0 || away > days) continue;
     out.push({
       key: r.key, name: r.name, date: rolled.date, wd: wdOf(rolled.date),
       daysAway: away, tone: r.tone, note: r.note,
-      shifted: rolled.shifted, ruleDate: base,
+      shifted: rolled.shifted, ruleDate: base, soft: !!r.soft,
     });
   }
   /* 月末 / 季末：单独算，因为它的「日子」不是固定几号。季末比月末更值得提醒。 */
@@ -155,12 +168,14 @@ export function pubCalText(list, today) {
   const arr = Array.isArray(list) ? list : [];
   if (!arr.length) return "";
   const lines = arr.map(e => {
-    const shift = e.shifted && e.ruleDate !== e.date
+    /* soft 的几条（CPI/PPI、PMI）日期是我们按惯例推的，不是官方顺延 ——
+       写「（11-09 顺延）」会被读成「统计局顺延了」，所以这两条不写。 */
+    const shift = !e.soft && e.shifted && e.ruleDate !== e.date
       ? "（" + e.ruleDate.slice(5) + " 顺延）" : "";
     return "- " + e.date.slice(5) + "（" + e.wd + "）" + e.name + shift
       + "，距今 " + e.daysAway + " 天" + (e.tone === "warn" ? "，通常偏紧" : "");
   });
-  return "【日历】" + today.slice(5) + " 起 " + arr.length + " 个日子（已按交易日顺延）：\n" + lines.join("\n");
+  return "【日历】" + today.slice(5) + " 起 " + arr.length + " 个日子（资金面按交易日顺延；宏观公布为惯例日，非官方日程原文）：\n" + lines.join("\n");
 }
 
 /**

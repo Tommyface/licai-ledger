@@ -2,7 +2,7 @@
    与 v100 的「日终层」并列，不是一个东西，谁也不许替谁说话：
 
    · 日终层：中债官方收益率曲线，33 格矩阵，T-1 日终估值，云端每日生成（js/core/market.js）；
-   · 此刻层：东方财富行情，10 项报价 + T 主力当日分时，盘中秒级，本机直连（本文件）。
+   · 此刻层：东方财富行情，12 项报价 + T 主力当日分时，盘中秒级，本机直连（本文件）。
 
    三条硬规矩（改动前先读）：
    1. 不做差。两层的 10Y 是两个口径（盘中参考价 / 中债估值），界面上不许互相加减，
@@ -12,20 +12,29 @@
       任何加权、打分、预测都不要再加回来。
 
    数据通道：JSONP（`&cb=`）。走 <script> 标签，不受 CORS 限制，网页版与 App 内同一套。
-   一个 ulist 请求拿全 10 项，另一个 trends2 请求拿分时 —— 一次点击两个请求，不批量扫。
+   一个 ulist 请求拿全 12 项，另一个 trends2 请求拿分时 —— 一次点击两个请求，不批量扫。
 
    ★ 判据收口：解析、单位、方向、时点四条规则都在本文件，tests/livebond.test.mjs 是
      它们的对照表。改这里任何一条，先改测试。 */
 
-/** 缓存 schema：结构变了就 +1，旧缓存自然作废（不做迁移，行情没有迁移的价值）。 */
-export const LIVE_VER = 1;
+/** 缓存 schema：结构变了就 +1，旧缓存自然作废（不做迁移，行情没有迁移的价值）。
+    v118：清单从 10 项增到 12 项（加两个交易所指数），升到 2 —— 旧缓存只有 10 项，
+    留着会让「12 项」这句话在屏幕上变成 10 个格子，不如直接作废重取。 */
+export const LIVE_VER = 2;
 /** 来源写死。将来换源时，旧缓存靠这个字段能被认出来并丢弃。 */
 export const LIVE_SRC = "eastmoney";
 
-/** 报价清单。顺序 = 界面顺序：利率 → 期货 → 资金。
+/** 报价清单。顺序 = 界面顺序：指数（整体概览）→ 利率 → 期货 → 资金。
     kind 决定单位与方向规则（见 liveDirOf）：
-      yield 收益率（bp，下行算红） / price 期货价（%，上涨算红） / repo 回购利率（bp，上行算绿） */
+      index 指数点位（%，涨算红） / yield 收益率（bp，下行算红） /
+      price 期货价（%，上涨算红） / repo 回购利率（bp，上行算绿）
+
+    ★ v118 新增的两个指数是**上证口径**（交易所竞价成交），与中债估值指数
+      （银行间估值）不是一个东西：后者在 market.json 的 indexDir 里，仍是代理口径。
+      这两个不许拿去替 indexDir，也不许与中债指数比涨跌。 */
 export const LIVE_QUOTES = [
+  { key: "IDX_GZ", secid: "1.000012", name: "国债指数", kind: "index", dec: 2 },
+  { key: "IDX_QZ", secid: "1.000013", name: "企债指数", kind: "index", dec: 2 },
   { key: "CN10Y", secid: "171.CN10Y", name: "10年国债", kind: "yield", dec: 4 },
   { key: "CN30Y", secid: "171.CN30Y", name: "30年国债", kind: "yield", dec: 4 },
   { key: "CN5Y", secid: "171.CN5Y", name: "5年国债", kind: "yield", dec: 4 },
@@ -40,6 +49,7 @@ export const LIVE_QUOTES = [
 
 /** 分组只影响界面标题，不影响判据。 */
 export const LIVE_GROUPS = [
+  { id: "index", title: "交易所债券指数（上证口径）", keys: ["IDX_GZ", "IDX_QZ"] },
   { id: "rate", title: "国债收益率", keys: ["CN10Y", "CN30Y", "CN5Y", "CN2Y"] },
   { id: "fut", title: "国债期货", keys: ["TL", "T", "TF", "TS"] },
   { id: "cash", title: "交易所回购", keys: ["GC007", "GC001"] },
@@ -50,7 +60,7 @@ export const LIVE_API = {
   trend: "https://push2his.eastmoney.com/api/qt/stock/trends2/get",
 };
 
-/** 报价请求 URL：一个请求拿全 10 项（实测 total=10）。 */
+/** 报价请求 URL：一个请求拿全 12 项（实测 total=12，缺的 secid 会被接口直接忽略）。 */
 export function liveQuoteUrl(cb) {
   const secids = LIVE_QUOTES.map(q => q.secid).join(",");
   return `${LIVE_API.quote}?fltt=2&invt=2&fields=f2,f3,f4,f12,f14&secids=${secids}&cb=${encodeURIComponent(cb)}`;
@@ -88,9 +98,12 @@ export function liveParse(json) {
     const raw = isNum(x.f4) ? Number(x.f4) : 0;
     /* 单位（实测对照，2026-11-10）：
        yield/repo：f2 是百分数（1.5964 = 1.5964%），f4 是百分点差（0.0019）→ bp = f4×100
-       price    ：f2 是价格（110.19），f4 是价格差（-0.04 点），f3 是相对涨跌（-0.04%） */
-    const bp = spec.kind === "price" ? null : round(raw * 100, 2);
-    const pct = spec.kind === "price" ? (isNum(x.f3) ? Number(x.f3) : 0) : null;
+       price    ：f2 是价格（110.19），f4 是价格差（-0.04 点），f3 是相对涨跌（-0.04%）
+       index    ：f2 是点位（232.43），f4 是涨跌点（-0.03），f3 是涨跌幅（-0.01%）
+                  —— 与 price 同构，f4 是「点」不是 bp，绝不能乘 100 当 bp 用 */
+    const isPx = spec.kind === "price" || spec.kind === "index";
+    const bp = isPx ? null : round(raw * 100, 2);
+    const pct = isPx ? (isNum(x.f3) ? Number(x.f3) : 0) : null;
     out.quotes[spec.key] = {
       key: spec.key,
       name: spec.name,
@@ -100,22 +113,23 @@ export function liveParse(json) {
       bp,
       pct,
       /* 方向在解析时就定下来，界面只照着画 —— 免得两处各算一遍算反 */
-      dir: liveDirOf(spec.kind, spec.kind === "price" ? pct : bp),
+      dir: liveDirOf(spec.kind, isPx ? pct : bp),
     };
   }
   out.ok = Object.keys(out.quotes).length > 0;
-  if (!out.ok) out.why = "10 项一项都没解析出来";
+  if (!out.ok) out.why = `${LIVE_QUOTES.length} 项一项都没解析出来`;
   return out;
 }
 
 /**
  * 方向：红=利多债市（价格涨），绿=利空，白=持平，none=没数据。
  * 沿用 market.js 的 MARKET_DIR_LABEL 语义，不另立一套。
- *   yield 收益率下行（bp<0）→ 红；repo 回购利率上行（bp>0）→ 绿；price 涨（pct>0）→ 红。
+ *   index/price 涨（pct>0）→ 红；yield 收益率下行（bp<0）→ 红；
+ *   repo 回购利率上行（bp>0）→ 绿（钱贵了，对债不利）。
  */
 export function liveDirOf(kind, v) {
   if (!isNum(v)) return "none";
-  if (kind === "price") return v > 0 ? "up" : v < 0 ? "down" : "flat";
+  if (kind === "price" || kind === "index") return v > 0 ? "up" : v < 0 ? "down" : "flat";
   if (kind === "repo") return v > 0 ? "down" : v < 0 ? "up" : "flat";
   return v < 0 ? "up" : v > 0 ? "down" : "flat";   /* yield */
 }
@@ -179,10 +193,10 @@ export function liveValText(q) {
   return q.val.toFixed(q.dec || 2);
 }
 
-/** 变动文案：yield/repo 用 bp，price 用 %。正数带 + 号（与矩阵里的写法一致）。 */
+/** 变动文案：yield/repo 用 bp，index/price 用 %。正数带 + 号（与矩阵里的写法一致）。 */
 export function liveChgText(q) {
   if (!q) return "";
-  if (q.kind === "price") {
+  if (q.kind === "price" || q.kind === "index") {
     if (!isNum(q.pct)) return "";
     return `${q.pct > 0 ? "+" : ""}${q.pct.toFixed(2)}%`;
   }
@@ -235,9 +249,11 @@ const esc = s => String(s == null ? "" : s)
 /** 一格。dir 决定数字颜色（红涨绿跌），背景一律浅色 —— 此刻层不该抢日终矩阵的视觉重量。 */
 function cellHtml(q) {
   const d = q.dir || "none";
+  /* 指数是点位、期货是价格，都不该挂「%」；收益率与回购利率才带 */
+  const unit = (q.kind === "price" || q.kind === "index") ? "" : "<i>%</i>";
   return `<div class="lv-i lv-${d}">
     <div class="lv-n">${esc(q.name)}</div>
-    <div class="lv-v">${esc(liveValText(q))}${q.kind === "price" ? "" : "<i>%</i>"}</div>
+    <div class="lv-v">${esc(liveValText(q))}${unit}</div>
     <div class="lv-d">${esc(liveChgText(q) || "—")}</div>
   </div>`;
 }
@@ -306,7 +322,8 @@ export function liveBlockHtml(live, opts = {}) {
     ${groups}
     ${liveSparkHtml(live.trend || [], { dir: (live.quotes.T || {}).dir })}
     <div class="cap" style="padding-top:6px">此刻层来自东方财富行情，是盘中参考价，与下面「日终层」的中债估值口径不同，
-      两者不做差、不互补。回购为交易所口径（GC 系列），不是银行间 DR007。</div>
+      两者不做差、不互补。指数为<b>上证口径</b>（交易所竞价成交），不是中债估值指数；企债指数成分成交清淡，
+      全日不动是常态，看到 0.00% 不等于没取到。回购为交易所口径（GC 系列），不是银行间 DR007。</div>
   </div>`;
 }
 

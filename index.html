@@ -504,6 +504,37 @@ html:not(.inApp) .app-only{display:none}
 .lv-sp-flat{color:var(--ink3)}
 .lv-sp-x{display:flex;justify-content:space-between;font-size:9.5px;color:var(--ink3);margin-top:1px}
 
+/* ---------- v118：中票利差 + 宏观 ----------
+   利差表沿用 .mkt-tbl 的骨架（间距、字号、格子形状与矩阵一致），只补两处：
+   利差那一格用矩阵的涨跌底色（走阔=绿、收窄=红），变化那一列用文字色 ——
+   一行里两个实心块会显得刺眼，而利差本身才是这一行要看的数。
+   宏观表**不染色**：三行月度数撑不起方向判断，理由写在 js/core/macro.js 文件头第 2 条。 */
+.sp-wrap{margin:9px 0 0}
+.sp-t{font-size:11.5px;font-weight:650;color:var(--ink2);margin:0 0 2px;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.sp-x{font-size:10px;color:var(--ink3);font-weight:400}
+.sp-tbl th{text-align:left}
+.sp-tbl td{font-size:11px;padding:5px 3px;font-variant-numeric:tabular-nums}
+/* 利差是**水平值**，给一块浅底让人看得出「这是一格数」，但绝不染涨跌色 ——
+   28.2bp 是曲线位置，不是「跌了 28bp」。方向只由右边「较前一日」那一列表达。 */
+.sp-val{background:var(--bg);border:1px solid var(--line);border-radius:4px;
+  text-align:center;font-weight:650;color:var(--ink)}
+.sp-chg{text-align:right;font-weight:600;white-space:nowrap}
+.sp-up{color:var(--up)} .sp-down{color:var(--down)} .sp-flat{color:var(--ink3)} .sp-none{color:#3a6ea8}
+
+.mc-wrap{margin:12px 0 0}
+.mc-t{font-size:11.5px;font-weight:650;color:var(--ink2);margin:0 0 2px;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.mc-x{font-size:10px;color:var(--ink3);font-weight:400}
+.mc-tbl th{text-align:left;font-size:10.5px}
+.mc-tbl td{font-size:11.5px;padding:5px 3px;font-variant-numeric:tabular-nums}
+.mc-tbl td.mc-v{font-size:14px;font-weight:700;color:var(--ink)}
+.mc-p{font-size:10.5px;color:var(--ink3);white-space:nowrap}
+.mc-d{font-size:10.5px;color:var(--ink2);white-space:nowrap}
+.mc-s{width:88px}
+.mc-sp{width:88px;height:18px;display:block;color:var(--ink3);opacity:.72}
+.mc-lag{margin-left:4px;font-style:normal;font-size:9.5px;color:#b8860b}
+.mc-miss td{color:var(--ink3);font-size:10.5px}
+.mc-empty{font-size:11.5px;color:var(--ink3);line-height:1.6;padding:5px 0 2px}
+
 /* ---------- v108：AI 研判卡片 ----------
    一套样式只服务一份结论：结论句 > 信心 > 分段要点 > 动作 > 盲区 > 来源 > 免责。
    依据徽标（台账/体检/债市/检索/未标注）是这个功能的核心可读性来源，颜色必须区分得开，

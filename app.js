@@ -52,10 +52,14 @@ import { llmReq, llmParse, llmChunkFeed, llmChunkJoin, llmCanRetry,
 import { MARKET_SCHEMA, validateMarket, marketAiBlock, marketAiTextSafe,
   marketPanelHtml, marketStat, marketCutoffText, marketAgeText } from "./js/core/market.js";
 /* v116：债市「此刻」层 —— 东方财富行情，JSONP 直连（<script> 不受 CORS 限制），
-   一次点击两个请求拿全 10 项 + T 主力分时。与上面的日终层并列、不混算：
-   日终层是 33 格中债估值（T-1），此刻层是 10 项盘中参考价，两层各标各的时点。
+   一次点击两个请求拿全 12 项 + T 主力分时。与上面的日终层并列、不混算：
+   日终层是 33 格中债估值（T-1），此刻层是 12 项盘中参考价，两层各标各的时点。
    解析/单位/方向/时点四条规则全在 js/core/livebond.js，app.js 只负责发请求与拼装。 */
 import * as LV from "./js/core/livebond.js";
+/* v118：宏观层 —— CPI / PPI / 制造业 PMI 的月度实际值，同样 JSONP 直连东财数据中心。
+   它既不进此刻层（月度 vs 秒级），也不进日终层（统计口径 vs 估值曲线），自成一个时点。
+   解析与口径在 js/core/macro.js。 */
+import * as MC from "./js/core/macro.js";
 /* v97：微众稳健货架静态索引（同步 import、离线可用）+ 全部判断收口的纯函数模块。
    只认规范化产品代码命中，与 detectOrg（发行方识别）解耦；判断不许在 app.js 另写一套。
    v98：补 shelfFreshness（快照过期判据）与 agentViaTag（代销口径短标签），
@@ -97,7 +101,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v117";
+const APP_VER = "v118";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -211,6 +215,17 @@ const LIVE_TIMEOUT = 8000;              /* 单请求超时：一个 ulist + 一�
 let LIVE = null;
 const LIVE_ST = { phase: "idle", at: 0, err: "", miss: [], lastTry: 0 };
 let _liveBusy = null;
+
+/* ---------- v118：宏观层 ----------
+   月度数据，一天最多变一次，所以 TTL 给 6 小时而不是此刻层的 60 秒 —— 每次打开
+   都拉三个请求纯属浪费；但也不能永久缓存，否则月中公布新数据后永远看不到。
+   三个指标各发一个请求（接口按 reportName 分表，没有合并取法），实测每个约 1.5 KB。 */
+const LS_MACRO = "licai.macro";
+const MACRO_TTL = 6 * 60 * 60 * 1000;
+const MACRO_TIMEOUT = 8000;
+let MACRO = null;
+const MACRO_ST = { phase: "idle", at: 0, err: "", lastTry: 0 };
+let _macroBusy = null;
 let RULES_QUOTES = {};
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳；
    v95：seen = 已提醒过的「产品id@披露日」去重集（B1）；quiet/thresh 默认档出自
@@ -2464,6 +2479,8 @@ function openMarket() {
   /* v116：此刻层 TTL 只有 60 秒 —— 打开就该看到当下，不必先点一次按钮。
      静默失败不打扰：块里会写「这一次没取到」和原因，旧值仍在。 */
   if (Date.now() - (LIVE_ST.lastTry || 0) > LIVE_TTL) liveRefresh({ silent: true });
+  /* v118：宏观 TTL 6 小时。月度数据，没必要每次点开都拉三个请求。 */
+  if (!MACRO || Date.now() - (MACRO_ST.lastTry || 0) > MACRO_TTL) macroRefresh({ silent: true });
 }
 /** 弹层现在开着吗？（遮罩这一层就是「有没有弹层」的唯一真相） */
 function sheetOpen() { return !!($("mask") && $("mask").classList.contains("show")); }
@@ -2547,7 +2564,16 @@ function marketHeroHtml() {
         : "")
     : `<div class="note b" style="margin-top:10px">日终层暂无数据：它来自私有仓 market.json（中债估值，T-1）。
         点上面的「↻ 更新此刻」会一并拉一次；拉不到就按没有处理，页面不编造任何数字。</div>`;
-  return bar + liveHtml + daily;
+  /* v118：宏观放在日终层之后 —— 时间尺度从「T-1 估值」走到「上一个月的统计」，
+     越往下越慢，与页面的阅读顺序一致。没数据且没出错时不画（第一次点开正在取）。 */
+  const macroHtml = (MACRO || MACRO_ST.phase === "err")
+    ? MC.macroBlockHtml(MACRO, {
+      today: today(),
+      atText: MACRO_ST.at ? marketAgeText(MACRO_ST.at) : "",
+      err: MACRO_ST.phase === "err" ? MACRO_ST.err : "",
+    })
+    : "";
+  return bar + liveHtml + daily + macroHtml;
 }
 /** 共用的「接着问」对话区。withMarket=true 时把行情块嵌在快照行之后
     （设置页「模型接入」保持原样）；债市页传 false —— 行情已在上部单独渲染，
@@ -4423,6 +4449,98 @@ function liveCacheSave() {
 }
 
 /**
+ * 拉一次宏观：三项并行，各自独立。一项坏了不影响另两项 ——
+ * 与此刻层同一个取舍（10 个报价里挂一个不该全扔），理由也同一个：它们互相不依赖。
+ * @param {{silent?: boolean}} [opts]
+ */
+function macroRefresh(opts = {}) {
+  if (_macroBusy) return _macroBusy;
+  MACRO_ST.phase = "loading";
+  MACRO_ST.err = "";
+  MACRO_ST.lastTry = Date.now();
+  _macroBusy = (async () => {
+    try {
+      const rs = await Promise.all(MC.MACRO_ITEMS.map(
+        it => jsonpGet(n => MC.macroUrl(it, n), MACRO_TIMEOUT)));
+      /** @type {Record<string, any>} */
+      const out = {};
+      const whys = [];
+      for (let i = 0; i < MC.MACRO_ITEMS.length; i++) {
+        const it = MC.MACRO_ITEMS[i], r = rs[i];
+        if (!r.ok) {
+          out[it.key] = { key: it.key, ok: false, why: r.why || "没取到", series: [], latest: null, prev: null };
+          whys.push(`${it.key}：${r.why || "没取到"}`);
+          continue;
+        }
+        const p = MC.macroParse(r.data, it);
+        out[it.key] = p;
+        if (!p.ok) whys.push(`${it.key}：${p.why}`);
+      }
+      /* 三项全挂才算这一次失败；部分成功照收，缺的那项在块里自己说明原因。 */
+      if (!MC.MACRO_ITEMS.some(it => out[it.key] && out[it.key].ok)) {
+        throw new Error(whys.join("；") || "三项都没取到");
+      }
+      MACRO = out;
+      MACRO_ST.phase = "ok";
+      MACRO_ST.err = whys.length ? whys.join("；") : "";
+      MACRO_ST.at = Date.now();
+      macroCacheSave();
+      marketPaint();
+      return true;
+    } catch (e) {
+      MACRO_ST.phase = "err";
+      MACRO_ST.err = String((e && e.message) || e).slice(0, 140);
+      marketPaint();
+      if (!opts.silent) toast(`宏观没取到：${MACRO_ST.err}`, 4200);
+      return false;
+    } finally { _macroBusy = null; }
+  })();
+  return _macroBusy;
+}
+
+/** 读本机缓存。版本/来源不符就当没有 —— 与此刻层同一条规矩。 */
+function macroCacheLoad() {
+  try {
+    const raw = localStorage.getItem(LS_MACRO);
+    if (!raw) return false;
+    const o = JSON.parse(raw);
+    const items = MC.macroUnpack(o);
+    if (!items) { console.warn("宏观缓存版本/结构不符，丢弃"); return false; }
+    MACRO = items;
+    MACRO_ST.at = Number(o && o.at) || 0;
+    MACRO_ST.phase = "idle";
+    return true;
+  } catch (e) { return false; }
+}
+function macroCacheSave() {
+  if (!MACRO) return;
+  try { localStorage.setItem(LS_MACRO, JSON.stringify(MC.macroPack(MACRO, MACRO_ST.at || Date.now()))); } catch (e) { }
+}
+
+/**
+ * v118：把宏观压成研判事实层要的形状。没有就返回 null（调用方据此写「本轮没取到」）。
+ * @returns {null|{items:Array<{key:string,name:string,valText:string,periodText:string,
+ *   deltaText:string,period:string,val:number}>}}
+ */
+function macroFactsForBrief() {
+  if (!MACRO) return null;
+  const items = [];
+  for (const it of MC.MACRO_ITEMS) {
+    const x = MACRO[it.key];
+    if (!x || !x.ok || !x.latest) continue;
+    items.push({
+      key: it.key, name: it.name,
+      valText: MC.macroValText(x.latest.val, it),
+      periodText: MC.macroPeriodText(x.latest.period),
+      deltaText: MC.macroDeltaText(x.latest.val, x.prev && x.prev.val, it),
+      period: x.latest.period,
+      val: x.latest.val,
+    });
+  }
+  return items.length ? { items } : null;
+}
+
+/**
  * v116：一颗按钮同时更新两层 —— 此刻层（东财直连）与日终层（私有仓快照）。
  * 两路并行，互不阻塞：日终层没配同步也不该挡住此刻层。
  * 播报只播此刻层的结果（主诉求）；日终层的成败由状态条自己写在脸上。
@@ -4430,7 +4548,10 @@ function liveCacheSave() {
 async function marketRefreshAll() {
   const liveP = liveRefresh({ silent: true });
   const dayP = syncCfgOk() ? marketRefresh({ silent: true }) : Promise.resolve(false);
-  const [liveOk] = await Promise.all([liveP, dayP]);
+  /* v118：宏观一起更新。它慢（月度数据）但不该被这颗「更新此刻」漏掉 ——
+     按钮上写的是「更新此刻」，用户的期待是「点一下把这一页的数都换成最新的」。 */
+  const macroP = macroRefresh({ silent: true });
+  const [liveOk] = await Promise.all([liveP, dayP, macroP]);
   if (liveOk && LIVE) {
     const n = Object.keys(LIVE.quotes).length;
     const total = LV.LIVE_QUOTES.length;
@@ -4491,6 +4612,8 @@ function marketBoot() {
   marketCacheLoad();
   /* v116：此刻层的缓存与数据同步无关 —— 没配 GitHub 同步也该能看上次那批行情。 */
   liveCacheLoad();
+  /* v118：宏观同理，且只在打开债市页时才去拉新的（月度数据，启动就拉没有意义）。 */
+  macroCacheLoad();
   if (!syncCfgOk()) return;      /* 日终层没配同步就别白发一次必然失败的请求 */
   marketRefresh({ silent: true });
 }
@@ -6770,7 +6893,11 @@ function briefGaps(live) {
  */
 /** 研判里带哪几项：只取核心 5 项。10 项全塞进去，模型反而抓不住重点 ——
     研报正文只有三段，给它的数越多，越容易写成报菜名。其余 5 项债市页随时能看。 */
-const BRIEF_LIVE_KEYS = ["CN10Y", "CN30Y", "T", "TL", "GC007"];
+/* v118：指数进研判 —— 「今天债市整体涨跌」是最直观的一个维度，不该只在页面上看得到。
+   排在利率前面，因为进场先说整体、再说期限结构。
+   同日补 5 年：2026-11-10 那天 5 年单边上行 5bp，是四个期限里最大的异动，
+   而原来的 7 项里没有它 —— 研判会漏掉当天最该讲的那件事。 */
+const BRIEF_LIVE_KEYS = ["IDX_GZ", "IDX_QZ", "CN10Y", "CN30Y", "CN5Y", "T", "TL", "GC007"];
 
 /**
  * v117：把此刻层压成研判事实层要的形状。
@@ -6792,7 +6919,9 @@ function liveFactsForBrief() {
     items.push({
       key: k,
       name: x.name,
-      valText: LV.liveValText(x) + (x.kind === "price" ? "" : "%"),
+      /* ★ 指数与期货都不带 %（一个点位、一个价格）。v118 加指数时这里漏改过一次，
+         会让「国债指数 232.41%」写进研判 —— 单位错在事实层，模型无法自查。 */
+      valText: LV.liveValText(x) + ((x.kind === "price" || x.kind === "index") ? "" : "%"),
       chgText: LV.liveChgText(x),
     });
     nums.push(x.val);
@@ -6827,8 +6956,14 @@ function briefFacts() {
   const mk = mk0;
   const agg = BRIEF.tier === BRIEF_TIER_AGG;
   /* v114：公开日历一次算好，两处用 —— 请求里给模型，卡片上给用户。
-     days=21 是有意的：太远的日子对「这周要不要动」没有意义，反而稀释注意力。 */
-  const cal = pubCalNext(td, { days: 21, limit: 4 });
+     days=21 是有意的：太远的日子对「这周要不要动」没有意义，反而稀释注意力。
+     v118：limit 4 → 6。加了 CPI/PPI 与 PMI 两条公布窗口之后，4 条额度会被
+     缴准/税期/LPR/MLF 占满，宏观那条永远轮不到显示 —— 用户要的「宏观日历」
+     就只进了事实层、卡片上根本看不见。6 条正好容得下「资金面 4 + 宏观 2」。 */
+  const cal = pubCalNext(td, { days: 21, limit: 6 });
+  /* v118：宏观三项。null 表示确实没取到 —— 与「取到了但为空」要分开，
+     前者要模型写「数据块里没有」，后者不该出现（macroParse 空序列算失败）。 */
+  const mcBrief = macroFactsForBrief();
   if (t.kind === "product") {
     const it = all.find(x => x.id === t.id) || {};
     const p = DATA.products.find(x => x.id === t.id);
@@ -6837,7 +6972,7 @@ function briefFacts() {
       session: ses, kind: "product",
       name: agg ? "这一只（名称已隐去）" : String(it.name || ""),
       inst: agg ? "" : String(it.inst || ""),
-      nav, market: mk, cal, live: lvBrief,
+      nav, market: mk, cal, live: lvBrief, macro: mcBrief,
       scenarios: reportScenarios(nav, { k: 5 }),
       watch: reportWatch(nav, mk, ses, { cal }), gaps: briefGaps(lvBrief),
     };
@@ -6845,7 +6980,7 @@ function briefFacts() {
   const rows = reportPortfolioRows(all, { today: td })
     .map((r, i) => (agg ? Object.assign({}, r, { name: "产品" + (i + 1) }) : r));
   return {
-    session: ses, kind: "portfolio", rows, market: mk, cal, live: lvBrief,
+    session: ses, kind: "portfolio", rows, market: mk, cal, live: lvBrief, macro: mcBrief,
     watch: reportWatch(null, mk, ses, { rows, today: td, cal }), gaps: briefGaps(lvBrief),
   };
 }
@@ -6856,7 +6991,7 @@ function briefPack() {
   const input = reportFactsText({
     session: facts.session, kind: facts.kind, name: facts.name, inst: facts.inst,
     nav: facts.nav, rows: facts.rows, market: facts.market, gaps: facts.gaps, live: facts.live,
-    scenarios: facts.scenarios, cal: facts.cal, today: today(),
+    scenarios: facts.scenarios, cal: facts.cal, macro: facts.macro, today: today(),
   });
   const built = {
     v: 2, input, instructions: REPORT_INSTRUCTIONS, chars: input.length,
@@ -6911,13 +7046,21 @@ async function briefRun(force) {
      用户只能猜是不是没点到。这类静默中断比报错难查得多。 */
   /* v117：研判要盘中数据。发之前先拉一次此刻层，**2.5 秒封顶** —— 拉到了就是最新价，
      拉不到就按没有处理（事实层整段不写），绝不为了「有数据」把研判拖成 11 秒。
-     只有手里这份超过 TTL 才拉：一分钟内刚点过「更新此刻」的，直接复用。 */
-  if (!LIVE || Date.now() - (LIVE_ST.at || 0) > LIVE_TTL) {
+     只有手里这份超过 TTL 才拉：一分钟内刚点过「更新此刻」的，直接复用。
+     v118：宏观一起拉，**并行**而不是接在后面 —— 串行会让总等待变成 2.5 + 1.5 = 4 秒，
+     而且给此刻层的请求多留了 1.5 秒去「晚到」，反而让指纹在两次点击之间变得不稳。
+     两路并行，总封顶仍是 2.5 秒。 */
+  const needLive = !LIVE || Date.now() - (LIVE_ST.at || 0) > LIVE_TTL;
+  const needMacro = !MACRO || Date.now() - (MACRO_ST.at || 0) > MACRO_TTL;
+  if (needLive || needMacro) {
     _briefPrep = true;
-    toast("先取一次盘中行情（最多 2.5 秒）", 2000);
+    if (needLive) toast("先取一次盘中行情（最多 2.5 秒）", 2000);
     try {
       await Promise.race([
-        liveRefresh({ silent: true }),
+        Promise.all([
+          needLive ? liveRefresh({ silent: true }) : null,
+          needMacro ? macroRefresh({ silent: true }) : null,
+        ]),
         new Promise(r => setTimeout(r, 2500)),
       ]);
     } catch (e) { /* 取不到就取不到，下面按没有处理 */ }
@@ -7214,6 +7357,13 @@ function briefAuditValues() {
   /* v117：盘中参考价的数也要进白名单。不收就会把「10Y 1.5983%」判成编造 ——
      那是误报，而且是最伤信任的一种：模型明明照着数据块抄的。 */
   if (f.live && Array.isArray(f.live.nums)) for (const n of f.live.nums) push(n);
+  /* v118：中票利差与宏观值。同一类误报：模型照抄「AAA 1年 28.2bp」「CPI 0.7」，
+     不在集合里就会被判成编造。利差把两端收益率也收进来 —— 模型可能写成
+     「1.45% 减 1.1683%」，那是它算得对，不该拦。 */
+  if (f.market && f.market.ok && Array.isArray(f.market.spreads)) {
+    for (const s of f.market.spreads) { push(s.spread); push(s.chg); push(s.creditYield); push(s.govtYield); }
+  }
+  if (f.macro && Array.isArray(f.macro.items)) for (const it of f.macro.items) push(it.val);
   return v;
 }
 /** 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。

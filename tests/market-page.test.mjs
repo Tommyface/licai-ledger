@@ -75,11 +75,18 @@ const runBar = (m, st, lst = LIVE_ST_IDLE) => new Function(
   "MARKET", "MARKET_ST", "esc", "marketCutoffText", "marketAgeText", "marketStaleText", "LIVE_ST",
   `${F.marketStateBar.toString()}; return marketStateBar();`)(
   m, st, s => String(s), cutOk, ageOk, () => "", lst);
-const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE) => new Function(
+/* v118：宏观块的三个自由变量（MACRO / MACRO_ST / MC）也要注入 ——
+   marketHeroHtml 里加了一段宏观渲染。MC 用替身，宏观自己的解析在 macro.test.mjs 真跑。 */
+const MC_OK = { macroBlockHtml: () => "<MACRO>" };
+const MACRO_ST_IDLE = { phase: "idle", at: 0, err: "", lastTry: 0 };
+const liveToday = () => "2026-11-09";
+const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_ST_IDLE, mc = MC_OK) => new Function(
   "MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
   "LV", "LIVE", "LIVE_ST", "isTradeDay", "marketAgeText",
+  "MACRO", "MACRO_ST", "MC", "today",
   `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(
-  m, st, panelOk, aiOk, s => String(s), barOk, LV_OK, null, lst, () => true, ageOk);
+  m, st, panelOk, aiOk, s => String(s), barOk, LV_OK, null, lst, () => true, ageOk,
+  macro, mst, mc, liveToday);
 const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */
@@ -376,4 +383,33 @@ test("APP_VER / SW CACHE 同步，market.js 仍在离线清单", () => {
   assert.ok(ver && cache, "读不到版本号");
   assert.equal(ver, cache, "APP_VER 与 SW CACHE 版本不一致");
   assert.ok(sw.includes("./js/core/market.js"), "market.js 掉出 SW 预缓存清单");
+});
+
+/* ---------- 8. v118：宏观块接线 ---------- */
+test("v118 宏观块：排在日终层之后（时间尺度从上到下一次变慢）", () => {
+  const cached = { CPI: { ok: true, latest: { period: "2026-10", val: 0.7 }, series: [] } };
+  const h = runHero(ref, ST_IDLE, LIVE_ST_IDLE, cached);
+  const iLive = h.indexOf("<LIVE");
+  const iPanel = h.indexOf("<PANEL");
+  const iMacro = h.indexOf("<MACRO");
+  assert.ok(iLive >= 0 && iPanel >= 0 && iMacro >= 0, "三块都该出现");
+  assert.ok(iLive < iPanel && iPanel < iMacro, `顺序不对：live=${iLive} panel=${iPanel} macro=${iMacro}`);
+});
+
+test("v118 宏观块：还没取过且没出错时不画（首次点开正在取，不先摆一个空表）", () => {
+  const h = runHero(ref, ST_IDLE, LIVE_ST_IDLE, null, MACRO_ST_IDLE);
+  assert.ok(!h.includes("<MACRO"), "没数据也没错，不该画宏观块");
+  /* 出错时要画 —— 否则用户永远不知道为什么看不到宏观 */
+  const e = runHero(ref, ST_IDLE, LIVE_ST_IDLE, null, { phase: "err", at: 0, err: "超时", lastTry: 1 });
+  assert.ok(e.includes("<MACRO"), "出错时反而该画出来说明原因");
+});
+
+test("v118 宏观块：有缓存数据时照画，且把本机取数时刻传进去", () => {
+  let seen = null;
+  const mc = { macroBlockHtml: (_m, o) => { seen = o; return "<MACRO>"; } };
+  const cached = { CPI: { ok: true, latest: { period: "2026-10", val: 0.7 }, series: [] } };
+  const h = runHero(ref, ST_IDLE, LIVE_ST_IDLE, cached, { phase: "idle", at: 1794279605000, err: "", lastTry: 1 }, mc);
+  assert.ok(h.includes("<MACRO"));
+  assert.equal(seen.today, "2026-11-09", "要把今天传进去，否则判不出数据滞后几个月");
+  assert.ok(seen.atText, "有取数时刻就要写出来");
 });

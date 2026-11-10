@@ -300,3 +300,87 @@ test("marketPanelHtml：截止时间进面板，「17:00」配的是收盘口径
   assert.ok(html.includes("现券") && html.includes("收盘"), "截止时点没写口径");
   assert.ok(!html.includes("17:00 发布") && !html.includes("发布时刻"), "把收盘时点说成了发布时刻");
 });
+
+/* ---------- v118：中票利差（从同一份 33 格派生） ---------- */
+import { marketSpreads, spreadChgText, spreadHtml, MARKET_SPREAD_TENORS } from "../js/core/market.js";
+
+const CELL = (group, issuer, tenor, y, bp1, dir) => ({
+  group, issuer, tenor, dir,
+  source: { url: "u", tier: "official", dataDate: "2026-11-06" },
+  basis: { yieldPct: y, prevYieldPct: y - bp1 / 100, bp1d: bp1 },
+});
+
+test("利差：只算能对上的期限（信用 1月/3月/6月 不对国债 1年 凑数）", () => {
+  assert.deepEqual(MARKET_SPREAD_TENORS, ["1年", "3年", "5年"]);
+  const m = { weather: { cells: [
+    CELL("rate", "国债", "1年", 1.1683, -0.3, "up"),
+    CELL("rate", "国债", "3年", 1.2291, -1.1, "up"),
+    CELL("credit", "AAA", "1月", 1.4000, 0.1, "down"),
+    CELL("credit", "AAA", "1年", 1.4500, -0.1, "up"),
+    CELL("credit", "AAA", "3年", 1.5821, -1.0, "up"),
+  ] } };
+  const sp = marketSpreads(m);
+  assert.deepEqual(sp.map(s => s.issuer + s.tenor), ["AAA1年", "AAA3年"], "6 个月中票没有对应国债，不该出现");
+});
+
+test("利差：数值 = 信用 − 国债，一位小数；变化 = 两个 bp1d 相减", () => {
+  const m = { weather: { cells: [
+    CELL("rate", "国债", "1年", 1.1683, -0.3, "up"),
+    CELL("credit", "AAA", "1年", 1.4500, -0.1, "up"),
+  ] } };
+  const s = marketSpreads(m)[0];
+  assert.equal(s.spread, 28.2, "1.45 − 1.1683 = 0.2817 → 28.2bp");
+  assert.equal(s.chg, 0.2, "−0.1 − (−0.3) = +0.2");
+  assert.equal(s.dir, "down", "利差走阔 = 信用债跑输 = 绿");
+});
+
+test("利差方向：走阔绿、收窄红、持平白 —— 与矩阵同一套语义", () => {
+  const mk = (crBp, gvBp) => ({ weather: { cells: [
+    CELL("rate", "国债", "1年", 1.1683, gvBp, "up"),
+    CELL("credit", "AAA", "1年", 1.4500, crBp, "up"),
+  ] } });
+  assert.equal(marketSpreads(mk(-1.0, -0.3))[0].dir, "up", "信用下行更多 = 利差收窄 → 红");
+  assert.equal(marketSpreads(mk(0.2, -0.3))[0].dir, "down", "利差走阔 → 绿");
+  assert.equal(marketSpreads(mk(-0.8, -0.3))[0].dir, "up", "利差收窄 → 红");
+  assert.equal(marketSpreads(mk(-0.3, -0.3))[0].dir, "flat", "同步变动 → 白");
+});
+
+test("利差：缺国债那一档就不算，绝不拿别的期限顶", () => {
+  const m = { weather: { cells: [
+    CELL("rate", "国债", "1年", 1.1683, -0.3, "up"),
+    CELL("credit", "AAA", "5年", 1.6428, -1.2, "up"),
+  ] } };
+  assert.deepEqual(marketSpreads(m), [], "5 年国债不在表里，5 年利差算不出来");
+});
+
+test("利差：none 格与缺 basis 一律跳过", () => {
+  const m = { weather: { cells: [
+    CELL("rate", "国债", "1年", 1.1683, -0.3, "up"),
+    { group: "credit", issuer: "AAA", tenor: "1年", dir: "none",
+      source: { url: "u", tier: "official", dataDate: "2026-11-06" }, basis: { reason: "未发布" } },
+  ] } };
+  assert.deepEqual(marketSpreads(m), []);
+});
+
+test("利差文案：带符号、零值写持平、缺值给空串", () => {
+  assert.equal(spreadChgText({ chg: 0.2 }), "+0.2bp");
+  assert.equal(spreadChgText({ chg: -0.2 }), "-0.2bp");
+  assert.equal(spreadChgText({ chg: 0 }), "持平");
+  assert.equal(spreadChgText({ chg: null }), "");
+  assert.equal(spreadChgText(null), "");
+});
+
+test("利差表：标题与说明都必须写「中票」，且明说不是城投", () => {
+  const sp = [{ issuer: "AAA", tenor: "1年", spread: 28.2, chg: 0.2, creditYield: 1.45, govtYield: 1.1683, dir: "down" }];
+  const h = spreadHtml(sp);
+  assert.match(h, /中票利差/);
+  assert.match(h, /中短期票据 − 同期限国债/);
+  assert.match(h, /不是城投利差/);
+  assert.match(h, /本项目没有城投曲线，不做替代/);
+  assert.ok(!/城投利差：/.test(h), "不许出现「城投利差：xx」这种写法");
+});
+
+test("利差表：空数组 → 空串（不画一张空表）", () => {
+  assert.equal(spreadHtml([]), "");
+  assert.equal(spreadHtml(null), "");
+});

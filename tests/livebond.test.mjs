@@ -12,7 +12,7 @@ import {
 /** 实测返回（2026-11-10 11:26，fltt=2 口径）。 */
 const RAW = {
   data: {
-    total: 10,
+    total: 12,
     diff: [
       { f2: 1.5964, f3: 0.12, f4: 0.0019, f12: "CN10Y", f14: "中国10年期国债" },
       { f2: 2.0546, f3: 0.31, f4: 0.0063, f12: "CN30Y", f14: "中国30年期国债" },
@@ -24,6 +24,10 @@ const RAW = {
       { f2: 102.668, f3: -0.01, f4: -0.012, f12: "130130", f14: "TS主力合约" },
       { f2: 1.365, f3: 1.11, f4: 0.015, f12: "204007", f14: "GC007" },
       { f2: 1.26, f3: 7.69, f4: 0.09, f12: "204001", f14: "GC001" },
+      /* v118 新增两项交易所指数：f2 是点位、f3 是涨跌幅、f4 是涨跌「点」——
+         与期货同构，绝不能把 f4 乘 100 当 bp（232.41 点的指数不存在 bp 这回事）。 */
+      { f2: 232.41, f3: -0.02, f4: -0.05, f12: "000012", f14: "国债指数" },
+      { f2: 311.24, f3: 0.0, f4: 0.0, f12: "000013", f14: "企债指数" },
     ],
   },
 };
@@ -36,20 +40,20 @@ const at = (h, mi, s = 0) => new Date(2026, 10, 10, h, mi, s);   /* 本地时间
 const always = () => true;
 const never = () => false;
 
-test("清单：10 项、三组，secid 不重复", () => {
-  assert.equal(LIVE_QUOTES.length, 10);
-  assert.equal(new Set(LIVE_QUOTES.map(q => q.secid)).size, 10);
+test("清单：12 项、四组，secid 不重复", () => {
+  assert.equal(LIVE_QUOTES.length, 12);
+  assert.equal(new Set(LIVE_QUOTES.map(q => q.secid)).size, 12);
   const keys = LIVE_GROUPS.flatMap(g => g.keys);
   assert.deepEqual(keys.slice().sort(), LIVE_QUOTES.map(q => q.key).sort());
   for (const g of LIVE_GROUPS) assert.ok(g.keys.length >= 2, `${g.id} 组太短`);
 });
 
-test("URL：报价一个请求带全 10 个 secid，且带回调名", () => {
+test("URL：报价一个请求带全 12 个 secid，且带回调名", () => {
   const u = liveQuoteUrl("__cb1");
   assert.match(u, /^https:\/\/push2\.eastmoney\.com\/api\/qt\/ulist\.np\/get\?/);
   assert.match(u, /cb=__cb1/);
   for (const q of LIVE_QUOTES) assert.ok(u.includes(q.secid), `URL 缺 ${q.secid}`);
-  assert.equal(u.split("secids=")[1].split("&")[0].split(",").length, 10);
+  assert.equal(u.split("secids=")[1].split("&")[0].split(",").length, 12);
 });
 
 test("URL：分时走 push2his，取 T 主力", () => {
@@ -59,10 +63,10 @@ test("URL：分时走 push2his，取 T 主力", () => {
   assert.match(u, /cb=__cb2/);
 });
 
-test("解析：10 项全拿到，ok=true、miss 为空", () => {
+test("解析：12 项全拿到，ok=true、miss 为空", () => {
   const p = liveParse(RAW);
   assert.equal(p.ok, true, p.why);
-  assert.equal(Object.keys(p.quotes).length, 10);
+  assert.equal(Object.keys(p.quotes).length, 12);
   assert.deepEqual(p.miss, []);
 });
 
@@ -119,7 +123,7 @@ test("缺项：少一项只让那一项进 miss，其余照收（不整包拒收
   cut.data.diff = cut.data.diff.filter(x => x.f12 !== "204007");
   const p = liveParse(cut);
   assert.equal(p.ok, true);
-  assert.equal(Object.keys(p.quotes).length, 9);
+  assert.equal(Object.keys(p.quotes).length, 11);
   assert.deepEqual(p.miss, ["GC007"]);
   assert.equal(liveMissText({ miss: p.miss }), "缺 GC007");
 });
@@ -145,7 +149,7 @@ test("统计：miss 计入 none，不计入 flat（白是「真的持平」）",
   const p = liveParse(RAW);
   const st = liveStat({ quotes: p.quotes, miss: ["GC007", "GC001"] });
   assert.equal(st.none, 2);
-  assert.equal(st.up + st.down + st.flat, 10);
+  assert.equal(st.up + st.down + st.flat, 12);
 });
 
 test("分时：逐分钟解析成 [hh:mm, price]，坏点跳过", () => {
@@ -205,7 +209,7 @@ test("折线：少于 2 个点不画（一个点连不成线）", () => {
 test("缓存：pack → unpack 往返一致", () => {
   const p = liveParse(RAW);
   const packed = livePack({ quotes: p.quotes, miss: p.miss, trend: [["09:30", 110.2], ["09:31", 110.3]] }, 1794279605000);
-  assert.equal(packed.v, 1);
+  assert.equal(packed.v, 2);
   assert.equal(packed.src, "eastmoney");
   const back = liveUnpack(JSON.parse(JSON.stringify(packed)));
   assert.ok(back);
@@ -243,11 +247,11 @@ test("整块：没取过时给「还没取过」，不画空格子", () => {
   assert.doesNotMatch(h, /lv-grid/, "没有数据就不该有格子");
 });
 
-test("整块：有数据时渲染 10 格、统计行、口径说明", () => {
+test("整块：有数据时渲染 12 格、统计行、口径说明", () => {
   const p = liveParse(RAW);
   const h = liveBlockHtml({ quotes: p.quotes, miss: [], trend: [["09:30", 110.2], ["09:31", 110.3]], at: Date.now() },
     { phase: { id: "intraday", label: "盘中" } });
-  assert.equal((h.match(/class="lv-i /g) || []).length, 10);
+  assert.equal((h.match(/class="lv-i /g) || []).length, 12);
   assert.match(h, /10年国债/);
   assert.match(h, /盘中/);
   assert.match(h, /东方财富行情/, "来源要写在块里");
@@ -288,4 +292,45 @@ test("liveFresh：没有时点、时点在未来、时点非法，一律当不�
   assert.equal(liveFresh({ at: 0 }, now), false);
   assert.equal(liveFresh({ at: "abc" }, now), false);
   assert.equal(liveFresh({ at: now + 60 * 1000 }, now), false, "未来时刻说明时钟不对，不能信");
+});
+
+/* ---------- v118：交易所债券指数 ---------- */
+
+test("指数：点位 2 位小数、不产 bp、方向跟当日涨跌幅走", () => {
+  const q = liveParse(RAW).quotes;
+  assert.equal(q.IDX_GZ.val, 232.41, "点位保留 2 位");
+  assert.equal(q.IDX_GZ.bp, null, "指数没有 bp —— f4 是「点」，不是百分点");
+  assert.equal(q.IDX_GZ.pct, -0.02);
+  assert.equal(q.IDX_GZ.dir, "down", "指数跌 = 绿，与期货同一套颜色语义");
+  assert.equal(liveValText(q.IDX_GZ), "232.41");
+  assert.equal(liveChgText(q.IDX_GZ), "-0.02%");
+});
+
+test("指数：单位不带 %（点位不是百分比），期货也不带", () => {
+  const h = liveBlockHtml({ quotes: liveParse(RAW).quotes, miss: [], trend: [], at: Date.now() }, {});
+  /* 指数格子里不该出现「232.41%」这种写法 */
+  assert.match(h, /232\.41<\/div>/);
+  assert.ok(!/232\.41<[^>]*>%/.test(h), "指数点位后面不许跟 %");
+  /* 收益率那几格仍然要带 %（<i>%</i> 是那个小号单位标记） */
+  assert.match(h, /1\.5964<i>%<\/i><\/div>/);
+});
+
+test("指数：涨跌为 0 是「白·持平」，不是「蓝·暂无」——两者含义完全相反", () => {
+  const q = liveParse(RAW).quotes.IDX_QZ;
+  assert.equal(q.val, 311.24);
+  assert.equal(q.dir, "flat");
+  assert.equal(liveDirOf("index", 0), "flat");
+  assert.equal(liveDirOf("index", null), "none");
+});
+
+test("指数：分组排在最前（先看整体涨跌，再看期限结构）", () => {
+  assert.equal(LIVE_GROUPS[0].id, "index");
+  assert.deepEqual(LIVE_GROUPS[0].keys, ["IDX_GZ", "IDX_QZ"]);
+  assert.match(LIVE_GROUPS[0].title, /上证口径/, "标题必须写出交易所口径");
+});
+
+test("指数：块底说明要讲清「不是中债估值指数」", () => {
+  const h = liveBlockHtml({ quotes: liveParse(RAW).quotes, miss: [], trend: [], at: Date.now() }, {});
+  assert.match(h, /上证口径/);
+  assert.match(h, /不是中债估值指数/);
 });

@@ -2,7 +2,7 @@
    外壳缓存优先；数据由 GitHub 同步，不走缓存
    注意：改 app.js / index.html 后必须把下面的 CACHE 版本号 +1，
         并与 app.js 里的 APP_VER 保持一致（scripts/check-version.sh 会校验）。 */
-const CACHE = "licai-ledger-v117";
+const CACHE = "licai-ledger-v118";
 const SHELL = ["./", "./index.html", "./app.js", "./manifest.json", "./icon-192.png", "./icon-512.png",
   /* 拆出去的 ES module：漏一个就会「index 新、模块旧」或装完离线打不开
      （check-version.sh 会从 app.js 的 import 逐层走一遍，比对这张表） */
@@ -15,6 +15,8 @@ const SHELL = ["./", "./index.html", "./app.js", "./manifest.json", "./icon-192.
   "./js/core/market.js",
   /* v116：债市「此刻」层（东财行情 JSONP 直连，与日终层并列、不混算） */
   "./js/core/livebond.js",
+  /* v118：宏观层（CPI/PPI/PMI 月度实际值，同为 JSONP 直连，第三个时点） */
+  "./js/core/macro.js",
   "./js/domain/nav.js", "./js/domain/position.js", "./js/domain/ocr.js",
   "./js/domain/calendar.js", "./js/domain/tomb.js", "./js/domain/sync.js",
   "./js/domain/syncstatus.js", "./js/domain/update.js",

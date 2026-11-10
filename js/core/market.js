@@ -175,6 +175,95 @@ export function marketStat(m) {
   return st;
 }
 
+/* ============================================================
+   中票利差（v118）—— 从已有的 33 格派生，不新增任何数据源
+   ============================================================ */
+
+/** 能算利差的期限：信用曲线有 1月/3月/6月/1年/3年/5年，国债只有 1/3/5/7/10 年，
+    交集只有这三档。没有交集就不算 —— 绝不拿 6 个月中票减 1 年国债凑一个数，
+    那算出来的东西在任何口径下都不叫利差。AA+/AA 曲线只发布至 1 年，所以它们只有 1年一档。 */
+export const MARKET_SPREAD_TENORS = ["1年", "3年", "5年"];
+
+/**
+ * 中票利差 = 中短期票据收益率 − 同期限国债收益率。
+ *
+ * ★ 必须写「中票」：数据源是**中短期票据**曲线，我们手上没有城投曲线。
+ *   写成「城投利差」就是拿一个没有的数据去回答一个有这个名词的问题。
+ *
+ * 利差的 1 日变化 = Δy_credit − Δy_govt。因为两格都是「同期限收益率的变化（bp）」，
+ * 相减就是利差变化，不需要再除以任何东西，也不需要额外取历史。
+ *
+ * @param {any} m market.json
+ * @returns {Array<{issuer:string,tenor:string,spread:number,chg:number|null,
+ *   creditYield:number,govtYield:number,dir:string,source:any}>}
+ */
+export function marketSpreads(m) {
+  const cells = (m && m.weather && Array.isArray(m.weather.cells)) ? m.weather.cells : [];
+  if (!cells.length) return [];
+  /** @type {Record<string, any>} */
+  const govt = {};
+  for (const c of cells) {
+    if (!c || c.group !== "rate" || c.issuer !== "国债" || c.dir === "none") continue;
+    if (!c.basis || !isFiniteNum(c.basis.yieldPct)) continue;
+    govt[c.tenor] = c;
+  }
+  const out = [];
+  for (const issuer of MARKET_CREDIT_ISSUERS) {
+    for (const tenor of MARKET_SPREAD_TENORS) {
+      const cre = cells.find(c => c && c.group === "credit" && c.issuer === issuer && c.tenor === tenor);
+      const g = govt[tenor];
+      if (!cre || cre.dir === "none" || !g) continue;
+      const cb = cre.basis || {}, gb = g.basis || {};
+      if (!isFiniteNum(cb.yieldPct) || !isFiniteNum(gb.yieldPct)) continue;
+      /* 两个百分数相减 ×100 得 bp；先 ×1000 再 round 再 /10 = 保留一位小数，
+         不带浮点尾巴（0.28169999… 直接 toFixed 也能得到 28.2，但中间值要能复用）。 */
+      const spread = Math.round((cb.yieldPct - gb.yieldPct) * 1000) / 10;
+      const chg = (isFiniteNum(cb.bp1d) && isFiniteNum(gb.bp1d))
+        ? Math.round((cb.bp1d - gb.bp1d) * 10) / 10 : null;
+      out.push({
+        issuer, tenor, spread, chg,
+        creditYield: cb.yieldPct, govtYield: gb.yieldPct,
+        /* 方向沿用矩阵语义，不另立一套：利差走阔(chg>0) = 信用债跑输国债 = 绿(down)；
+           收窄 = 红(up)；持平 = 白。 */
+        dir: chg == null ? "none" : chg > 0 ? "down" : chg < 0 ? "up" : "flat",
+        source: cre.source,
+      });
+    }
+  }
+  return out;
+}
+
+/** 利差文案：「AAA 1年 28.2bp」「+0.2bp」。没有 chg 就只给利差本身，不给变化。 */
+export function spreadChgText(s) {
+  if (!s || !isFiniteNum(s.chg)) return "";
+  if (s.chg === 0) return "持平";
+  return `${s.chg > 0 ? "+" : ""}${s.chg.toFixed(1)}bp`;
+}
+
+/** 利差表：一行一个评级×期限。标题与 caption 都写「中票」，不许写「城投」。
+ *
+ * ★ 「利差」那一格**不染涨跌色**：它是个**水平值**（28.2bp 是这条曲线的位置），
+ *   不是变化。染成实心绿等于说「跌了 28bp」—— 语义完全错了。
+ *   颜色只给「较前一日」那一列，那里才是方向。 */
+export function spreadHtml(spreads, opts = {}) {
+  const arr = Array.isArray(spreads) ? spreads : [];
+  if (!arr.length) return "";
+  const rows = arr.map(s => `<tr>
+      <th>${esc(s.issuer)}</th><td>${esc(s.tenor)}</td>
+      <td class="sp-val" title="${esc(`${s.creditYield}% − ${s.govtYield}%`)}">${esc(s.spread.toFixed(1))}bp</td>
+      <td class="sp-chg sp-${esc(s.dir)}">${esc(spreadChgText(s) || "—")}</td>
+    </tr>`).join("");
+  const head = opts.head === false ? "" : `<div class="sp-t">中票利差<span class="sp-x">中短期票据 − 同期限国债</span></div>`;
+  return `<div class="sp-wrap">${head}
+    <table class="mkt-tbl sp-tbl">
+      <tr><th>评级</th><th>期限</th><th>利差</th><th>较前一日</th></tr>
+      ${rows}
+    </table>
+    <div class="cap" style="padding-top:3px">来源同一份中债曲线（T-1 日终）。这是<b>中短期票据</b>利差，
+      不是城投利差 —— 本项目没有城投曲线，不做替代。</div>
+  </div>`;
+}
+
 /**
  * aiText 的安全读法：类型不对 / 超长 / 命中禁用词 一律返回 ""。
  * 这是公开仓复扫那一道 —— 云端引擎已拦过，这里再拦一次，两边任一失守都拦得住。
@@ -248,6 +337,7 @@ export function marketPanelHtml(m, opts = {}) {
     ${cut ? `<div class="mkt-cut"><b>${esc(cut)}</b><span class="mkt-cut-x">日终估值 · 现券 ${esc(MARKET_CLOSE_HHMM)} 收盘</span></div>` : ""}
     ${matrixHtml(groups.rate, MARKET_RATE_ISSUERS, MARKET_RATE_TENORS, "利率债（收益率曲线每日方向）")}
     ${matrixHtml(groups.credit, MARKET_CREDIT_ISSUERS, MARKET_CREDIT_TENORS, "信用债（中短票据曲线，AA+/AA 只发布至 1 年）")}
+    ${spreadHtml(marketSpreads(m))}
     <div class="cap" style="padding-top:4px">${esc((m.meta && m.meta.disclaimer) || "")}</div>
   </div>`;
 }

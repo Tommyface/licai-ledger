@@ -272,11 +272,20 @@ test("请求：没有盘中数据时，必须说清「本轮没取到」而不�
 
 /* ---------- v117：盘中参考层 ---------- */
 
+/* 一份与真机同形的盘中夹具：8 项（BRIEF_LIVE_KEYS 全量）。
+   ★ 这里原来只有 2 项，于是「事实层不许超长」那条测试算出来的长度比真机短两百多字，
+     阈值形同虚设 —— 夹具不反映真实场景，守护就是假的。 */
 const LIVE_FIX = {
   atText: "13:31", phaseLabel: "盘中", srcText: "东方财富行情", missText: "",
   items: [
+    { name: "国债指数", valText: "232.40", chgText: "-0.03%" },
+    { name: "企债指数", valText: "311.24", chgText: "0.00%" },
     { name: "10年国债", valText: "1.5983%", chgText: "+0.4bp" },
-    { name: "T 主力", valText: "110.210", chgText: "-0.02%" },
+    { name: "30年国债", valText: "2.0549%", chgText: "+0.8bp" },
+    { name: "5年国债", valText: "1.3610%", chgText: "+5.0bp" },
+    { name: "T 主力", valText: "110.155", chgText: "-0.07%" },
+    { name: "TL 主力", valText: "118.410", chgText: "-0.24%" },
+    { name: "GC007", valText: "1.340%", chgText: "-0.6bp" },
   ],
 };
 
@@ -309,13 +318,65 @@ test("v117 盘中：盘中说明只覆盖三类，不冒充全市场", () => {
   assert.match(txt, /国开、信用债等仍为上一交易日收盘/);
 });
 
-test("v117 盘中：加了这一段也不许超长（超了模型会丢后半截）", () => {
+test("v118 事实层总额度：单只 + 盘中 8 项 + 利差 + 宏观，不许超 1600", () => {
+  /* 额度是怎么算出来的（改之前先看这两个数）：
+       真机实测（2026-11-10，market.json 33 格全量 + 8 项盘中 + 宏观）  1535
+       本文件夹具（信用曲线只有 AAA 3/5 两年，利差只算得出 2 条）        ~1490
+     取 1600 = 真机 1535 + 65 字余量。
+     原额度 1100 是 v117 的口径（那时还没有利差与宏观）。加了两个真实信息段，
+     额度必须跟着涨；但涨要涨得有名目 —— 所以另有三条段落级额度
+     （利差 ≤165 / 宏观 ≤130），下一次往这两段里加东西，要么在额度内加，
+     要么显式改这三条。单纯把总额度调大而不动段落额度的改动，一律视为逃逸。 */
   const txt = reportFactsText({
     session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31"),
     kind: "product", name: "诚享7天29号", inst: "北银理财", nav: NAV, market: MK,
     gaps: ["资金面：没有 DR001 / DR007", "国债期货"], live: LIVE_FIX,
   });
-  assert.ok(txt.length <= 1100, "加了盘中段就超长了：" + txt.length);
+  assert.ok(txt.length <= 1600, "事实层超长了：" + txt.length);
+});
+
+test("v118 段落额度：利差段不超 165 字（它是一张 5 行的表，不该长过正文）", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: MK,
+    gaps: [], today: "2026-11-09",
+  });
+  const seg = txt.split("\n").filter(l => l.includes("中票利差") || /^\s+(AAA|AA)/.test(l) || l.includes("括号内为较前一日"));
+  assert.ok(seg.length >= 3, "利差段应有标题 + 数据行 + 读法三行");
+  const len = seg.join("\n").length;
+  assert.ok(len <= 165, "利差段超长：" + len);
+  assert.ok(seg[0].includes("非城投"), "标题必须写明不是城投曲线");
+});
+
+test("v118 段落额度：宏观段不超 130 字，且三项同月时月份只写一次", () => {
+  const MACRO = { items: [
+    { name: "CPI 同比", valText: "0.7%", periodText: "2026年10月", deltaText: "-0.2个百分点" },
+    { name: "PPI 同比", valText: "5.7%", periodText: "2026年10月", deltaText: "+0.7个百分点" },
+    { name: "制造业 PMI", valText: "49.3", periodText: "2026年10月", deltaText: "-0.8点" },
+  ] };
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [],
+    market: { ok: false }, gaps: [], today: "2026-11-09", macro: MACRO,
+  });
+  const seg = txt.split("\n").filter(l => l.includes("【宏观】") || l.includes("月度实际值"));
+  const len = seg.join("\n").length;
+  assert.ok(len <= 130, "宏观段超长：" + len);
+  assert.match(seg[0], /【宏观】2026年10月：/, "三项同月时月份要提到句首");
+  assert.equal((seg[0].match(/2026年10月/g) || []).length, 1, "月份重复写了");
+  assert.match(seg[1], /不许写「超预期 \/ 低于预期」/);
+});
+
+test("v118 段落额度：三个月的月份不同时，各自标月份，不许张冠李戴", () => {
+  const MACRO = { items: [
+    { name: "CPI 同比", valText: "0.7%", periodText: "2026年10月", deltaText: "-0.2个百分点" },
+    { name: "制造业 PMI", valText: "49.3", periodText: "2026年11月", deltaText: "-0.8点" },
+  ] };
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [],
+    market: { ok: false }, gaps: [], today: "2026-11-09", macro: MACRO,
+  });
+  const line = txt.split("\n").find(l => l.includes("【宏观】"));
+  assert.match(line, /CPI 同比 0\.7%（2026年10月，-0\.2个百分点）/);
+  assert.match(line, /制造业 PMI 49\.3（2026年11月，-0\.8点）/);
 });
 
 test("v117 盘中：卡片坐标多一颗胶囊，且带时分", () => {
@@ -802,4 +863,43 @@ test("v117 表格：回撤 -0.0004 既不能写 -0.00%，也不能染成亏损�
     rows: [{ name: "匠心灵动14天9G", nav: 1.0120, d30: 0.21, dd: -0.19, gapBp: 9.4 }],
   });
   assert.match(h2, /<td class="rp-down">-0\.19%<\/td>/);
+});
+
+test("v118 审计：正文里的时刻不算「找不到的数」（截至 15:10 不该拆出 15 与 10）", () => {
+  const r = reportNumberAudit("截至 15:10，10年国债 1.5981%。", [1.5981]);
+  assert.equal(r.total, 2, "时刻整体抠掉后只剩 1.5981 这一个数");
+  assert.deepEqual(r.unknown, [], "时刻碎片不许进 unknown");
+  /* 带秒的也一起放行 */
+  const r2 = reportNumberAudit("15:14:29 更新，指数 232.40。", [232.4]);
+  assert.deepEqual(r2.unknown, []);
+  /* 但编造的数照抓 —— 别让这条改动把审计变松 */
+  const r3 = reportNumberAudit("截至 15:10，10年国债 9.9999%。", [1.5981]);
+  assert.deepEqual(r3.unknown, ["9.9999"]);
+});
+
+/* v118：宏观夹具（三项同月，与真机形状一致） */
+const MACRO_FIX = { items: [
+  { name: "CPI 同比", valText: "0.7%", periodText: "2026年10月", deltaText: "-0.2个百分点" },
+  { name: "PPI 同比", valText: "5.7%", periodText: "2026年10月", deltaText: "+0.7个百分点" },
+  { name: "制造业 PMI", valText: "49.3", periodText: "2026年10月", deltaText: "-0.8点" },
+] };
+
+test("v118 事实层额度（组合）：3 只 + 8 项盘中 + 利差 + 宏观，不许超 1550", () => {
+  /* 组合层比单只长：没有净值明细，但每只一行 + 观察项。实测真机（2026-11-10）
+     组合形态 1487 字，这里留 63 字余量。
+     单只那条额度是 1450，两者分开写 —— 混成一个数会让其中一个失去意义。 */
+  const rows = [1, 2, 3].map(i => ({
+    name: "产品" + i, nav: 1.01 + i * 0.001, navDate: "2026-10-30",
+    d30: 0.3, dd: -0.1, gapBp: 5 + i, w: 30, lag: 1, stale: true,
+  }));
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "2026-11-06", "13:31"),
+    kind: "portfolio", rows, market: MK, gaps: ["资金面：没有 DR001 / DR007"],
+    live: LIVE_FIX, macro: MACRO_FIX, today: "2026-11-09",
+  });
+  assert.ok(txt.length <= 1550, "组合事实层超长了：" + txt.length);
+  /* 三个新段一个都不能少 —— 额度是给内容的，不是把内容挤掉 */
+  assert.match(txt, /【中票利差】/);
+  assert.match(txt, /【宏观】/);
+  assert.match(txt, /【盘中参考】/);
 });

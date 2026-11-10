@@ -33,6 +33,9 @@
 import { esc } from "../core/util.js";
 import { isTradeDay, nextTradeDay, tradeDaysBetween, addTradeDays } from "./calendar.js";
 import { pubCalChips, pubCalText, pubCalNext } from "./pubcal.js";
+/* v118：中票利差是 market.js 从同一份 33 格里派生的，这里直接用，不重算一遍 ——
+   两处各写一遍公式，迟早在某个边角上算出两个数。 */
+import { marketSpreads } from "../core/market.js";
 
 /* ---------------- 时点 ---------------- */
 
@@ -391,6 +394,9 @@ export function reportMarketFacts(m, today) {
     lagTradeDays: /^\d{4}-\d{2}-\d{2}$/.test(asOf) && /^\d{4}-\d{2}-\d{2}$/.test(String(today || ""))
       ? tradeDaysBetween(asOf, today) : 0,
     rows, small, aaa, allDown, allUp,
+    /* v118：中票利差（对同期限国债）。只有 1年/3年/5年 三档算得出来，
+       AA+/AA 因曲线只发布至 1 年而只有一档 —— 缺的档不会出现在这里。 */
+    spreads: marketSpreads(m),
     gaps: (m.meta && Array.isArray(m.meta.gaps)) ? m.meta.gaps.filter((g) => typeof g === "string" && g) : [],
     capturedAt: String((m.meta && m.meta.capturedAt) || ""),
   };
@@ -623,8 +629,35 @@ export function reportFactsText(q) {
     if (mk.aaa.length) L.push("  信用AAA：" + mk.aaa.map(s => s.tenor + " " + fx(s.y, 4) + "%/" + s.bp1.toFixed(1)).join("、"));
     if (mk.allDown) L.push("  当日方向：全期限下行，无一处反转");
     else if (mk.allUp) L.push("  当日方向：全期限上行，无一处反转");
+    /* v118：中票利差。用词必须是「中票」—— 数据源是中短期票据曲线，
+       本项目没有城投曲线。模型若把这里读成「城投」，整段结论就架空了。 */
+    if (Array.isArray(mk.spreads) && mk.spreads.length) {
+      L.push("【中票利差】对同期限国债（bp，中短期票据曲线，非城投）");
+      L.push("  " + mk.spreads.map(s => s.issuer + s.tenor + " " + s.spread.toFixed(1)
+        + (isFinite(s.chg) && s.chg !== 0 ? "(" + (s.chg > 0 ? "+" : "") + s.chg.toFixed(1) + ")" : ""))
+        .join("｜"));
+      L.push("  括号内为较前一日；走阔=信用债跑输国债（不利），收窄=跑赢。仅 1/3/5 年可算。");
+    }
   } else {
     L.push("【债市】本轮没有可用的债市快照。凡涉及市场环境的判断只能写「数据块里没有」。");
+  }
+
+  /* v118：宏观。三项月度实际值，放在债市之后、盘中之前 —— 从「债市本身」
+     扩到「更宽的经济背景」，再落到「此刻」。不写「超预期」：没有预期值可比。
+     ★ 月份相同就提到句首只写一次：三项通常同月，逐个标「（2026年10月…）」
+       要多花一倍字，而这一段的价值在数不在日期。 */
+  const mc = o.macro;
+  if (mc && Array.isArray(mc.items) && mc.items.length) {
+    const periods = [];
+    for (const it of mc.items) if (periods.indexOf(it.periodText) < 0) periods.push(it.periodText);
+    const same = periods.length === 1;
+    L.push("【宏观】" + (same ? periods[0] + "：" : "")
+      + mc.items.map(it => it.name + " " + it.valText
+        + (it.deltaText ? "（" + (same ? "" : it.periodText + "，") + it.deltaText + "）" : ""))
+        .join("｜"));
+    L.push("  月度实际值，没有预期值：不许写「超预期 / 低于预期」，不许推断下次数据。");
+  } else if (mc === null || (mc && mc.none)) {
+    L.push("【宏观】本轮没取到 CPI / PPI / PMI。凡需要宏观数据的话只能写「数据块里没有」。");
   }
 
   /* v117：盘中参考价。与上面【债市】不是同一口径 —— 一个是中债估值（收盘后才有），
@@ -848,8 +881,12 @@ export function reportNumberAudit(text, values) {
     }
   }
   /* 日期先整体抠掉：11-02 会被切成 11 与 -02、10-29 会被切成 10 与 -29，
-     两个碎片都不在事实集里，一次就误报两条。日期不是「数据」，不该进这个账。 */
-  const s = String(text == null ? "" : text).replace(/\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}/g, " ");
+     两个碎片都不在事实集里，一次就误报两条。日期不是「数据」，不该进这个账。
+     v118：时刻同理 —— 「截至 15:10」会被切成 15 与 10，两个碎片照样不在集合里。
+     时点是时点，不是数；不放行的话，只要正文带「截至 HH:MM」就必留一条假告警。 */
+  const s = String(text == null ? "" : text)
+    .replace(/\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}/g, " ")
+    .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ");
   /* 负号要吃掉：模型写 −11.5bp 与 -11.5bp 是同一个数。 */
   const re = /[−\-+]?\d+(?:\.\d+)?/g;
   const total = [];
