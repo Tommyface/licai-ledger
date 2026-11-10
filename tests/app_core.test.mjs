@@ -1933,3 +1933,160 @@ test("研判缓存换代：解析口径变了，旧条目必须判不认", () =>
   const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
   assert.match(body, /Number\(e\.ver\)\s*!==\s*BRIEF_CACHE_VER/, "读取时不校验版本：旧坏条目还会被认");
 });
+
+/* ---------- v113：检索开关要能在研判这一屏关掉 ---------- */
+
+test("v113：改检索开关必须整份带上端点与模型（setConfig 是整份覆盖）", () => {
+  /* 原生 LlmBridge.setConfig 认四个键，缺哪个就把哪个清成默认值。
+     只写 {search:false} 会把 baseUrl / model 一起清掉 —— 用户点完「关掉检索」，
+     下一发得到的是「还没配端点」。这条守的就是这个。 */
+  const i = APP_SRC.indexOf("function llmSetSearch(");
+  assert.ok(i > 0, "没有 llmSetSearch");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /baseUrl:\s*c\.baseUrl/, "没带上端点：会被清空");
+  assert.match(body, /model:\s*c\.model/, "没带上模型：会被清空");
+  assert.match(body, /search:\s*!!on/, "没写检索开关本身");
+  assert.match(body, /apiStyle/, "新壳的协议选择会被一起清掉");
+});
+
+test("v113：研判卡要能一键关检索，超时卡要能关掉再发", () => {
+  const i = APP_SRC.indexOf("function renderBriefSheet(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /briefSearchOff\(\)/, "研判页没有「先关掉检索」入口");
+  const j = APP_SRC.indexOf("function briefCardArea(");
+  const area = APP_SRC.slice(j, APP_SRC.indexOf("\nfunction ", j + 10));
+  assert.match(area, /briefSearchOffRetry\(\)/, "超时卡没有一键自救的按钮");
+  /* 只有超时才给这个按钮：别的错误（401 / 400 / 没配端点）关检索没用，给了就是误导。 */
+  assert.match(area, /timeout\|timed\\s\*out\|超时/, "没有先判「是不是超时」");
+});
+
+test("v113：关检索再发，必须先挡住「正在生成」这一态", () => {
+  /* 生成中再点一次就是第二发计费；这一条与 briefRun 的闸门同一口径。 */
+  const i = APP_SRC.indexOf("function briefSearchOffRetry(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /BRIEF\.phase === "running"/, "没有挡住生成中重发");
+  assert.match(body, /briefRun\(true\)/, "没有真的重发");
+});
+
+test("v113：设置页不能再单说「关掉就没出处」—— 要讲清研判用不上它", () => {
+  /* 旧文案「出处就从检索里来；关掉它多半一条来源都拿不到」会把人吓住：
+     他以为关了就废了，于是宁可每次超时。事实是研判根本不需要检索。 */
+  assert.ok(APP_SRC.indexOf("关掉它多半一条来源都拿不到") < 0, "旧文案还在，会劝退用户");
+  assert.match(APP_SRC, /「AI 研判」用不上/, "设置页没说明研判不需要检索");
+});
+
+/* ---------- v114（P1）：情景 / 日历 / 横向表 ---------- */
+
+test("v114：日历一次算好，请求与观察项共用同一份", () => {
+  const i = APP_SRC.indexOf("function briefFacts(");
+  assert.ok(i > 0);
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /pubCalNext\(/, "没有算公开日历");
+  assert.match(body, /cal,/, "日历没进事实层");
+  /* 请求与观察项必须是同一份 cal：分开算两次，两处就可能对不上（跨午夜、跨时区）。 */
+  const k1 = body.indexOf("watch: reportWatch(");
+  assert.ok(k1 > 0);
+  assert.match(body.slice(k1, k1 + 120), /cal/, "观察项没拿到日历");
+});
+
+test("v114：三档情景只在单只产品上算，组合层不硬凑", () => {
+  const i = APP_SRC.indexOf("function briefFacts(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  const kProd = body.indexOf("kind: \"product\"");
+  const kSc = body.indexOf("reportScenarios(");
+  assert.ok(kSc > kProd, "情景应挂在单只产品那一支");
+  const kPort = body.indexOf("reportPortfolioRows(");
+  assert.ok(kPort > kSc, "组合层不该有情景表（没有单条净值序列）");
+});
+
+test("v114：情景的数必须进数字白名单，否则模型一引用就被判编造", () => {
+  const i = APP_SRC.indexOf("function briefAuditValues(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /f\.scenarios/, "情景没进事实集");
+  assert.match(body, /r\.cumBp/, "累计 bp 没进事实集");
+  assert.match(body, /r\.nav/, "情景净值没进事实集");
+});
+
+test("v114：占比在本机回填，隐藏金额时留空而不是 0%", () => {
+  const i = APP_SRC.indexOf("function briefItems(");
+  const body = APP_SRC.slice(i, APP_SRC.indexOf("\nfunction ", i + 10));
+  assert.match(body, /held\.length > 1 && total > 0 && r\.value > 0 \? r\.value \/ total : null/,
+    "占比要么是真实比例，要么是 null，不许变成 0；只有一只持有时也不该给 100%");
+});
+
+/* ---------- v115：切页面不打断生成的请求 ---------- */
+
+test("v115：弹层重绘不许再用 closeSheet —— 那是退一格历史，真机上会重载文档", () => {
+  /* 这是本次 bug 的根因：render*Sheet 每重绘一次就 history.back() 一次。
+     浏览器里同文档退栈看不出问题，WebView 上 goBack 落到初始条目会重新加载文档，
+     JS 上下文重建 —— 正在跑的那一发回来时没人接得住，用户看到的就是「切页面就打断」。
+     openSheet 本身已经做了「换内容 + 显示 + 该压哨兵时压一条」，够用。 */
+  for (const fn of ["renderBriefSheet", "renderLlmSheet", "renderMarketSheet"]) {
+    /* 只认「独立成行的调用」：注释里解释这件事时当然会写到这个名字 */
+    assert.ok(!/^\s*closeSheet\(\);\s*$/m.test(fnBody(fn)), fn + " 里又在重绘时退栈了");
+  }
+});
+
+test("v115：只有两颗取消按钮能打断请求，别处一律不许调 cancel", () => {
+  /* cancel 是「不再等」，不是「撤回」，可能已经计费 —— 这种决定只能由人做。
+     切页面、关弹层、换宿主、重绘，任何一条自动路径都不许碰它。 */
+  const hits = [];
+  const re = /\.cancel\s*\(/g;
+  let m;
+  while ((m = re.exec(APP_SRC))) hits.push(m.index);
+  assert.equal(hits.length, 2, "cancel 调用点应恰好 2 处（研判 / 追问各一），实际 " + hits.length);
+  const inFn = (idx, name) => {
+    const i = APP_SRC.indexOf("function " + name + "(");
+    const j = APP_SRC.indexOf("\nfunction ", i + 10);
+    return idx > i && idx < (j < 0 ? APP_SRC.length : j);
+  };
+  for (const h of hits) {
+    assert.ok(inFn(h, "briefCancel") || inFn(h, "llmCancel"),
+      "有 cancel 调用落在了取消按钮之外的位置");
+  }
+});
+
+test("v115：发请求前先记账 —— 反过来的话，文档在 ask 返回前被回收就认不回了", () => {
+  const b = fnBody("briefRun");
+  const w = b.indexOf('inflightWrite("brief"');
+  const a = b.indexOf("b.ask(");
+  assert.ok(w > 0, "briefRun 没有记「在路上」");
+  assert.ok(a > 0, "briefRun 没找到 b.ask");
+  assert.ok(w < a, "记账必须早于 b.ask");
+  const l = fnBody("llmSend");
+  assert.ok(l.indexOf('inflightWrite("llm"') < l.indexOf("b.ask("), "追问也必须是先记账再发");
+});
+
+test("v115：落定 / 取消 / 超时都要把「在路上」这条记录清掉", () => {
+  /* 不清的话，下次启动会认领一条早就不存在的请求，用户白等 90 秒。 */
+  assert.match(fnBody("briefDone"), /inflightClear\("brief"\)/);
+  assert.match(fnBody("briefCancel"), /inflightClear\("brief"\)/);
+  assert.match(fnBody("llmCancel"), /inflightClear\("llm"\)/);
+  assert.match(fnBody("llmTimeout"), /inflightClear\("llm"\)/);
+  const kDone = APP_SRC.indexOf("window.__llmDone = function");
+  assert.ok(kDone > 0);
+  assert.match(APP_SRC.slice(kDone, kDone + 2600), /inflightClear\("llm"\)/);
+});
+
+test("v115：页面起来时要接回还在路上的那一发", () => {
+  assert.match(APP_SRC, /function briefInflightAdopt\(/);
+  assert.match(APP_SRC, /function llmInflightAdopt\(/);
+  const i = APP_SRC.indexOf("(function init()");
+  const head = APP_SRC.slice(i, i + 800);
+  assert.match(head, /briefInflightAdopt\(\)/, "init 没有接回研判");
+  assert.match(head, /llmInflightAdopt\(\)/, "init 没有接回追问");
+});
+
+test("v115：弹层关了就不许再画 —— 画一次就是替用户把窗口弹回来", () => {
+  assert.match(fnBody("briefRepaint"), /sheetOpen\(\)/, "briefRepaint 没守门");
+  assert.match(fnBody("llmRepaint"), /sheetOpen\(\)/, "llmRepaint 没守门");
+});
+
+test("v115：生成中打开研判要能看见进度，不能只弹一句 toast", () => {
+  const b = fnBody("openBrief");
+  const i = b.indexOf('BRIEF.phase === "running"');
+  assert.ok(i > 0, "没有生成中分支");
+  const seg = b.slice(i, i + 420);
+  assert.match(seg, /renderBriefSheet\(\)/, "生成中打开没有画界面（用户点了会以为没反应）");
+  assert.match(seg, /briefSameTarget\(/, "没有区分「同一个目标」和「换目标」");
+});

@@ -35,7 +35,7 @@ import { esc } from "../core/util.js";
 import { marketAiBlock } from "../core/market.js";
 /* v112：研报体。事实层在 report.js，这里只做「契约解析 + 卡片拼装」——
    单向依赖，report.js 不 import 本文件（否则 brief.conf 与 report 的枚举会成环）。 */
-import { reportTableHtml, reportCoordsHtml } from "./report.js";
+import { reportTableHtml, reportCoordsHtml, reportCalHtml } from "./report.js";
 
 /** 提示词版本：改 BRIEF_INSTRUCTIONS / 输出契约 / 四段框架，必须 +1。
     它进指纹 —— 不加版本号会出的事：提示词改了、指纹没变，用户看到旧结论却以为是新的。 */
@@ -815,9 +815,26 @@ export function parseReport(text) {
     if (!(k in fields)) fields[k] = m[2];
   }
   const verdict = verdictOf(fields["结论"] || fields["verdict"]) || "watch";
-  let conf = Number(String(fields["信心"] || fields["confidence"] || "").replace(/[^\d.]/g, ""));
+  /* 信心：模型该写 0 到 1 的小数，也认百分数（>1 且 ≤100 就除以 100）。
+     ★ v115 修：抓不到数字必须是 null，不能是 0。原来 `replace(/[^\d.]/g,"")` 把
+       「中」「较高」「拿不准」全抹成空串，`Number("") === 0` —— 屏幕于是画出
+       「信心 0%（低）」。模型说的是「中」，卡片说的是「很低」，正好是
+       briefConfText 开头警告过的那件事，只是发生在解析这一头。 */
+  const confRaw = String(fields["信心"] || fields["confidence"] || "");
+  const confDigits = confRaw.replace(/[^\d.]/g, "").trim();
+  let conf = confDigits === "" ? NaN : Number(confDigits);
   if (isFinite(conf) && conf > 1 && conf <= 100) conf = conf / 100;
   const confidence = (isFinite(conf) && conf >= 0 && conf <= 1) ? Math.round(conf * 100) / 100 : null;
+  /* 只给了中文档位（高 / 中 / 低）时单独存一份：能显示，但不许换算成百分比 ——
+     「中」不是 50%，那是替模型编一个它没说的数。顺序有讲究：
+     先认两字词，否则「中等」会被「中」抢先、「较高」会被「高」抢先。 */
+  const CONF_LEVELS = [["较高", "较高"], ["高", "较高"], ["中等", "中"], ["中", "中"], ["较低", "低"], ["低", "低"]];
+  let confLevel = "";
+  if (confidence == null) {
+    for (const pair of CONF_LEVELS) {
+      if (confRaw.indexOf(pair[0]) >= 0) { confLevel = pair[1]; break; }
+    }
+  }
   const headline = cleanText(fields["标题"] || fields["headline"] || "", 60);
   if (headline && BRIEF_BANNED_RE.test(headline)) {
     return { ok: false, why: "模型给出了收益预测或目标价类表述，这份结论不予采用" };
@@ -852,7 +869,7 @@ export function parseReport(text) {
   const hasHead = !!String(fields["结论"] || fields["verdict"] || "").trim() || !!headline;
   return {
     ok: true,
-    report: { verdict, confidence, headline, paras, partial: !hasHead, promptVer: REPORT_PROMPT_VER },
+    report: { verdict, confidence, confLevel, headline, paras, partial: !hasHead, promptVer: REPORT_PROMPT_VER },
     dropped,
   };
 }
@@ -918,18 +935,26 @@ export function reportCardHtml(opts) {
     + (o.rep && o.rep.partial
       ? `<span class="bf-verdict bf-v-collect">未结构化</span>`
       : o.rep ? `<span class="bf-verdict bf-v-${esc(o.rep.verdict || "watch")}">${esc(BRIEF_VERDICT_TEXT[o.rep.verdict] || BRIEF_VERDICT_TEXT.watch)}</span>` : "")
-    + `</div>${coords}`;
+    + `</div>${coords}${reportCalHtml(f.cal)}`;
 
+  /* 信心这一行：有数值就照旧画百分比 + 进度条；模型只写了「中 / 较高 / 低」这种档位时，
+     只画那句话，**不画进度条** —— 条的长度必须对应一个数，没有数就没有长度。 */
+  const confText = o.rep
+    ? (o.rep.confLevel ? "信心：" + o.rep.confLevel : briefConfText(o.rep.confidence))
+    : "";
   const lead = o.rep && o.rep.headline
     ? `<div class="rp-lead"><div class="rp-hl">${esc(o.rep.headline)}</div>`
-      + (!o.rep.partial && briefConfText(o.rep.confidence)
-        ? `<div class="rp-m"><span>${esc(briefConfText(o.rep.confidence))}</span>`
-          + `<span class="rp-bar"><i style="width:${Math.round((Number(o.rep.confidence) || 0) * 100)}%"></i></span></div>`
+      + (!o.rep.partial && confText
+        ? `<div class="rp-m"><span>${esc(confText)}</span>`
+          + (o.rep.confidence != null
+            ? `<span class="rp-bar"><i style="width:${Math.round((Number(o.rep.confidence) || 0) * 100)}%"></i></span>`
+            : "")
+          + `</div>`
         : "")
       + `</div>`
     : "";
 
-  const tables = reportTableHtml({ kind, nav, rows: f.rows, market: f.market });
+  const tables = reportTableHtml({ kind, nav, rows: f.rows, market: f.market, scenarios: f.scenarios });
   /* 没有叙述时画什么，由调用方给：运行中要画转圈与取消，出错要画错误原文，还没跑要画引导。
      这三种长得很不一样，塞进这里就变成了「组件猜业务」。placeholderHtml 由调用方负责转义。 */
   const narr = o.rep

@@ -556,6 +556,17 @@ html:not(.inApp) .app-only{display:none}
 .rp-co{font-size:10.5px;color:#5a5f7d;background:rgba(91,91,214,.07);border:1px solid rgba(91,91,214,.13);
   border-radius:7px;padding:1px 7px;font-variant-numeric:tabular-nums}
 .rp-co.warn{background:#fdf6e6;border-color:#eedfb8;color:#8a6100}
+/* v114：公开日历。与时间坐标同一层级 —— 都是日期，都不参与结论，
+   所以用同一套胶囊形制、再淡一档，避免它抢走「净值/债市」那两个坐标的注意力。 */
+.rp-cal{display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.rp-cal-h{font-size:10px;color:var(--ink3);letter-spacing:.4px;margin-right:1px}
+.rp-pc{display:inline-flex;align-items:baseline;gap:4px;font-size:10.5px;color:var(--ink2);
+  background:rgba(120,125,170,.07);border:1px solid rgba(120,125,170,.14);border-radius:7px;
+  padding:1px 7px;font-variant-numeric:tabular-nums}
+.rp-pc b{font-weight:600;color:#4a4f6d}
+.rp-pc i{font-style:normal;font-size:9.5px;color:var(--ink3);margin-left:1px}
+.rp-pc.warn{background:#fdf6e6;border-color:#eedfb8;color:#8a6100}
+.rp-pc.warn b{color:#7a5600}
 .rp-lead{margin-top:11px}
 .rp-hl{font-size:14px;font-weight:650;line-height:1.5;letter-spacing:.1px}
 .rp-m{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}

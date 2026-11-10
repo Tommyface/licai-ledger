@@ -69,7 +69,10 @@ import { BRIEF_TIER_DETAIL, BRIEF_TIER_AGG, BRIEF_TIER_LABEL,
   REPORT_PROMPT_VER, REPORT_INSTRUCTIONS, parseReport, reportCardHtml, reportSummaryText }
   from "./js/domain/brief.js";
 import { reportSession, reportNavFacts, reportMarketFacts, reportPortfolioRows,
-  reportWatch, reportFactsText, reportNumberAudit } from "./js/domain/report.js";
+  reportWatch, reportFactsText, reportNumberAudit,
+  /* v114（P1）：三档情景 + 日历胶囊。三档是三种速度，不是三个判断。 */
+  reportScenarios, reportCalHtml } from "./js/domain/report.js";
+import { pubCalNext } from "./js/domain/pubcal.js";
 
 /* ---------- 常量 ---------- */
 const LS_DATA = "licai_ledger_v1";
@@ -89,7 +92,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v112";
+const APP_VER = "v115";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1250,6 +1253,14 @@ function openSheet(html) {
   if (sheetPopPending) { sheetWantPush = true; return; }
   sheetPush();
 }
+/* ★ v115：重绘一个已经打开着的弹层，用 openSheet()，**绝不要先 closeSheet()**。
+   这里踩过一个很贵的坑：三个 render*Sheet 的开头都写着 closeSheet()，
+   而 closeSheet() 是「退一格历史」。研判每来一块数据就重绘一次，等于每来一块就退一格。
+   浏览器里 pushState 的退栈是同文档的，看不出问题；真机 WebView 上 goBack 落到
+   初始导航条目会**重新加载文档**（MainActivity 里那条「goBack 落回本页」的注释
+   记的就是这个），JS 上下文一重建，正在跑的那一发就没人接得住了 ——
+   用户看到的就是「切页面就把研判打断了」。
+   openSheet 本身已经做了三件事：换内容、显示遮罩、该压哨兵时压一条。够用。 */
 function closeSheet() {
   $("mask").classList.remove("show");
   if (!sheetSentinel) return;
@@ -2331,6 +2342,43 @@ function llmSaveCfg() {
   toast(canStyle ? "已保存端点、模型与协议" : "已保存端点与模型", 2400);
   llmRepaint();
 }
+/**
+ * 只改「联网检索」这一个开关（v113）。
+ * ★ 必须整份带上 baseUrl / model / apiStyle：原生 setConfig 是**整份覆盖**，
+ *   少写一个键就等于把它清成默认值 —— 端点被清掉之后，用户点生成只会得到
+ *   「还没配端点」，比不改更糟。所以这里从 LLM.cfg 原样搬，不自己拼。
+ * ★ 为什么研判要单独有这条路：研判只读本机算好的数，检索对它毫无用处，却会让模型
+ *   为了凑出处去搜。真机实测（2026-11-10）：同一份数据、同一个 spark-x2.6，
+ *   开着 91 秒撞上原生 90 秒读超时、一个字没回来；关掉 15 秒回来。差别只在那一个勾。
+ * @param {boolean} on
+ * @returns {boolean} 是否写成功
+ */
+function llmSetSearch(on) {
+  const b = llmBridge();
+  if (!b) return false;
+  const c = LLM.cfg || {};
+  /** @type {any} */
+  const out = { baseUrl: c.baseUrl || "", model: c.model || "", search: !!on };
+  if (llmCanStyle()) out.apiStyle = c.apiStyle === "chat" ? "chat" : "responses";
+  try { b.setConfig(JSON.stringify(out)); }
+  catch (e) { toast("改「联网检索」失败：" + e, 3600); return false; }
+  llmReadCfg();
+  return true;
+}
+/** 研判卡上的「先关掉检索」：只改开关、只重画，**不重发** —— 关和发是两件事，别合并。 */
+function briefSearchOff() {
+  if (!llmSetSearch(false)) return toast("只在本机 App 内可改这个开关", 3200);
+  toast("已关掉联网检索：研判用不上它；下面的追问也不会再带出处", 4600);
+  renderBriefSheet();
+}
+/** 超时卡上那一个按钮：关掉检索，立刻把同一份数据再发一次。
+    这是一次新的计费 —— 按钮上已经写明「另计一次」，不在代码里替用户省这一步。 */
+function briefSearchOffRetry() {
+  if (BRIEF.phase === "running") return;
+  if (!llmSetSearch(false)) return toast("只在本机 App 内可改这个开关", 3200);
+  toast("已关掉联网检索，正在重发", 3000);
+  briefRun(true);
+}
 /** 一轮问答的结果区。phase 只有 idle / running / done / error / timeout / cancelled 六种。
     标题那行「第 N 轮 · 问」是为了发出去之后还看得见发的是哪一句 —— 输入框发完就清了。 */
 function llmResultHtml() {
@@ -2396,7 +2444,20 @@ function openMarket() {
      不 await —— 网络慢不该让「点开债市」这件事卡在转圈上。 */
   if (Date.now() - (MARKET_ST.at || 0) > MARKET_TTL) marketRefresh({ silent: true });
 }
+/** 弹层现在开着吗？（遮罩这一层就是「有没有弹层」的唯一真相） */
+function sheetOpen() { return !!($("mask") && $("mask").classList.contains("show")); }
 function llmRepaint() {
+  /* ★ v115：弹层已经关掉就不再画 —— 画一次就是 openSheet 一次，等于把窗口替用户弹回来。
+     追问的回答晚到十几秒，用户早就切走了，屏幕突然跳出一个弹层是很吓人的事。
+     但「设置页里那块内联面板」不是弹层：它发问时也该刷新，所以走 renderLlm()，只换内容。 */
+  if (!sheetOpen()) {
+    if (LLM.host !== "brief" && LLM.host !== "market") {
+      renderLlm();
+      /* 与研判对称：答回来了但人不在那一屏，说一句就够，别把窗口弹回去。 */
+      if (LLM.phase === "done") toast("问的答回来了 — 点「接着问」就能看", 3800);
+    }
+    return;
+  }
   if (LLM.host === "market") renderMarketSheet();
   else if (LLM.host === "brief") renderBriefSheet();
   else renderLlmSheet();
@@ -2499,7 +2560,8 @@ function llmPanelHtml(withMarket, heading) {
 }
 /** 宿主一：设置页「模型接入」。端点与模型配置只在这一页出现。 */
 function renderLlmSheet() {
-  closeSheet();
+  /* 同 renderBriefSheet：重绘不退栈。这一个是追问的宿主，问题一样 —— 追问流式回来时
+     每块都重绘，每块都退一格历史。 */
   if (!llmBridge()) { renderLlm(); return toast(llmDegrade({ inApp: false, hasKey: false, shell: inShellHost() }), 4200); }
   llmReadCfg();
   const c = LLM.cfg || {};
@@ -2525,7 +2587,9 @@ function renderLlmSheet() {
       : `<div class="cap" style="padding-top:2px">这台机器的 App 还不支持换协议（更新 App 之后这一项才会出现），现在只能按 Responses 形制发。</div>`}
     <div class="chk-row"><label><input type="checkbox" id="llmSearch" ${c.search === false ? "" : "checked"}>
       要求端点做联网检索</label></div>
-    <div class="cap" style="padding-top:2px">出处就从检索里来；关掉它多半一条来源都拿不到。</div>
+    <div class="cap" style="padding-top:2px">追问要出处，靠的就是它。但<b>「AI 研判」用不上</b>：研判只读本机算好的数，
+      开着它模型会为了凑出处去搜 —— 真机实测同一份数据，开着 <b>91 秒</b>（撞原生 90 秒读超时，没回来），关掉 <b>15 秒</b>。
+      研判卡上有一键关闭，不必回这一页。</div>
     <div class="row-btn" style="margin-top:2px">
       <button class="btn gh" style="flex:1" onclick="llmSaveCfg()">保存端点</button>
       <button class="btn gh" style="flex:1" onclick="llmClearKey()">清除密钥</button>
@@ -2535,7 +2599,6 @@ function renderLlmSheet() {
 /** 宿主二：首页「债市晴雨表」。上部行情、下部对话框，一次弹层里两件事都在。
     网页版没有模型桥时行情照显，对话框给降级提示（llmStatusLine 内已收口）。 */
 function renderMarketSheet() {
-  closeSheet();
   openSheet(`<div class="sheet-t"><h3>债市晴雨表</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div id="mktHero">${marketHeroHtml()}</div>
     ${llmStatusLine()}
@@ -2568,6 +2631,8 @@ function llmSend(text) {
   try {
     /* 快照在勾了的时候才拼 —— 没勾，发出去的就是光的一句问题。 */
     const snap = LLM.withData ? llmSnapText() : "";
+    /* v115：先记账再发（理由同 briefRun）。追问这一槽存问题本身，重载后答回来能对上问的是哪句。 */
+    inflightWrite("llm", { id: LLM.id, t0: Date.now(), q });
     b.ask(LLM.id, JSON.stringify(llmReq({
       input: llmRoundInput(LLM.turns, q, snap),
       instructions: "回答只依据这条消息里给出的台账快照与上文；没给到的信息就说没给到，不要编；"
@@ -2576,6 +2641,7 @@ function llmSend(text) {
   } catch (e) {
     clearTimeout(dead); LLM.timer = 0; LLM.phase = "error"; LLM.err = "桥调用失败：" + e;
     LLM.turn.err = "桥调用失败：" + e;
+    inflightClear("llm");
   }
   llmRepaint();
 }
@@ -2593,6 +2659,7 @@ function llmCancel() {
   if (LLM.timer) { clearTimeout(LLM.timer); LLM.timer = 0; }
   LLM.id = "";                     /* 先把自己那把锁摘了：迟到的回传一律不认 */
   LLM.phase = "cancelled"; LLM.res = null; LLM.err = ""; LLM.buf = null; LLM.meta = null;
+  inflightClear("llm");
   if (LLM.turn) LLM.turn.err = LLM_CANCEL_TEXT;   /* 上文里下一轮看得见：这一轮是人停的，不是模型答的 */
   if (b && b.cancel) { try { b.cancel(id); } catch (e) { /* 原生没接上也只是继续断开连接，屏上的话不变 */ } }
   llmRepaint();
@@ -2617,6 +2684,7 @@ function llmClearChat() {
 function llmTimeout(id) {
   if (LLM.phase !== "running" || LLM.id !== id) return;
   LLM.phase = "timeout"; LLM.err = ""; LLM.buf = null;
+  inflightClear("llm");
   /* 超时这一轮写进上文时带的是「没回」，不是空字符串 —— 下一轮的模型看得见上一轮没答上。 */
   if (LLM.turn) LLM.turn.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一次可能已经计费）";
   llmRepaint();
@@ -2632,6 +2700,7 @@ window.__llmChunk = function (id, seq, total, text) {
   LLM.buf = r.st;
   if (r.error) {
     LLM.phase = "error"; LLM.err = "分块组装失败：" + r.error;
+    inflightClear("llm");
     if (LLM.turn) LLM.turn.err = LLM.err;
     llmRepaint();
   }
@@ -2651,13 +2720,17 @@ window.__llmDone = function (id, metaJson) {
      对不上的是类型，所以这一次连类型也钉进 check_bridge_guard.py 第 6 项。 */
   const rd = llmMetaOf(metaJson);
   const meta = rd.meta;
-  const body = LLM.buf ? llmChunkJoin(LLM.buf) : "";
+  /* 同 briefDone：正常走分块，留一条 meta.body 的退路。 */
+  const metaBody = /** @type {any} */ (meta);
+  const body = LLM.buf ? llmChunkJoin(LLM.buf)
+    : (metaBody && typeof metaBody.body === "string" ? metaBody.body : "");
   LLM.meta = meta;
   if (!meta || !meta.ok) {
     LLM.phase = "error";
     LLM.err = llmMetaErr(meta, rd.why, body.length);
     if (meta && meta.status) LLM.err += "（HTTP " + meta.status + "）";
     LLM.buf = null;
+    inflightClear("llm");
     if (LLM.turn) LLM.turn.err = LLM.err;              /* 失败也进上文：下一轮得知道上一轮没答上 */
     llmRepaint(); return;
   }
@@ -2668,6 +2741,7 @@ window.__llmDone = function (id, metaJson) {
   LLM.res = res;
   LLM.err = res.ok ? "" : (res.error || "响应里没有正文");
   LLM.buf = null;
+  inflightClear("llm");      /* 落定了，这一发不再「在路上」 */
   if (LLM.turn) {
     /* 落进上文的是「问 + 答的正文」，来源与 token 数只给人看，不进模型的那段文本。 */
     LLM.turn.a = res.text;
@@ -6231,6 +6305,32 @@ const BRIEF = {
   runs: 0,               /* 本次页面生命周期内已发几次（刷新归零，与 LLM 轮次同一口径） */
   stale: "",             /* 缓存命中但指纹已变时的那句话 */
 };
+/* ---------- 「这一发还在路上」记录（v115）----------
+   WebView 被系统回收、或历史回退落到初始条目重载文档时，JS 里的 BRIEF.id / LLM.id
+   会跟着一起没掉。可原生的请求跑在 Java 线程上，不随文档死；它回传时按 id 找人，
+   找不到就当「不是我的」丢掉（llmRoute 的默认分支）—— 用户看到的就是「切页面把研判打断了」，
+   其实请求还在，只是没人接。
+   所以发出去的那一刻把「我是谁、几点发的」写进本机，页面重新起来时接回来。
+   ★ 只记 id 与时间，不记任何内容：这一条不是缓存，它只是一把钥匙。 */
+const LS_INFLIGHT = "licai.llmInflight";
+function inflightRead() {
+  try {
+    const raw = localStorage.getItem(LS_INFLIGHT);
+    const o = raw ? JSON.parse(raw) : null;
+    return (o && typeof o === "object" && !Array.isArray(o)) ? o : {};
+  } catch (e) { return {}; }
+}
+/** @param {"brief"|"llm"} slot @param {any} o 传 null = 删掉这一槽 */
+function inflightWrite(slot, o) {
+  try {
+    const all = inflightRead();
+    if (o) all[slot] = o; else delete all[slot];
+    if (Object.keys(all).length) localStorage.setItem(LS_INFLIGHT, JSON.stringify(all));
+    else localStorage.removeItem(LS_INFLIGHT);
+  } catch (e) { /* 存储满 / 隐私模式：退化成「不跨文档」，绝不因此中断任何正常流程 */ }
+}
+function inflightClear(slot) { inflightWrite(slot, null); }
+
 /** 研判缓存键：组合与单只分开存，互不覆盖。 */
 function briefKey(t) {
   const x = t || BRIEF.target || { kind: "portfolio" };
@@ -6269,7 +6369,8 @@ function briefCacheGet() {
     （同一个 llmPanelHtml、同一套轮次与计费口径），所以"和现在一样"是结构上的一样，
     不是照着画了一遍。 */
 function renderBriefSheet() {
-  closeSheet();
+  /* ★ 这里原来有一句 closeSheet()。它是「切页面就打断研判」的元凶：
+     每次重绘都退一格历史，真机上退到初始条目会重载文档。详见 openSheet 下面那段。 */
   let pack = null, packErr = "";
   try { pack = briefPack(); } catch (e) { packErr = String(e); }
   const label = briefTargetLabel();
@@ -6283,6 +6384,8 @@ function renderBriefSheet() {
     stale = "数据或时点已变（这份生成于 " + briefTimeText(BRIEF.at) + "）—— 点「重新生成」看新的";
   }
   const hasOut = !!(BRIEF.res || BRIEF.raw);
+  /* v113：检索开关的状态要在这一屏就能看见、能关 —— 用户没有理由为了关一个勾跑一趟设置页。 */
+  const searchOn = !!(llmBridge() && LLM.cfg && LLM.cfg.search !== false);
   const btnText = running ? "生成中…"
     : (BRIEF.phase === "error" ? "重试（另计一次）"
       : (hasOut ? "重新生成（另计一次）" : "生成研报（1 次请求）"));
@@ -6298,7 +6401,14 @@ function renderBriefSheet() {
     </div>
     <div class="bf-chips">${tierBtn(BRIEF_TIER_DETAIL, "明细档")}${tierBtn(BRIEF_TIER_AGG, "聚合档（不发产品名）")}</div>
     ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：<b>研报数据块 ${built.chars} 字</b>（${built.kind === "product" ? "净值轨迹 + 本地测算" : "持仓一览 + 本地测算"} + 债市表，全部由本机算出；模型只写怎么读）</div>` : ""}
-    ${(LLM.cfg && LLM.cfg.search !== false) ? `<div class="cap" style="padding:0 0 8px">端点开着<b>「要求端点做联网检索」</b>：研判只用本机数据，用不上它；模型为了凑出处去搜，正是超时的来源。要是超时，到「设置 → 模型接入」把这个勾去掉再试。</div>` : ""}
+    ${searchOn ? `<div class="note r" style="margin:0 0 10px">
+      端点开着<b>「要求端点做联网检索」</b>，研判用不上它 —— 模型为了凑出处会去搜。
+      真机实测：同一份数据、同一个模型，开着 <b>91 秒</b>（撞原生 90 秒读超时，一个字没回来），关掉 <b>15 秒</b>。
+      <div class="row-btn" style="margin-top:8px">
+        <button class="btn gh" style="flex:1" onclick="briefSearchOff()">先关掉检索（不重发）</button>
+      </div>
+      <div class="cap" style="padding:6px 0 0">关掉之后，下面的追问也不会再带出处 —— 需要出处时回设置页再勾上。</div>
+    </div>` : ""}
     ${packErr ? `<div class="note r">装配数据块时出错：${esc(packErr)}</div>` : ""}
     ${area}
     <div class="cap" style="padding:10px 0 0">
@@ -6351,11 +6461,16 @@ function briefCardArea(stale) {
   let ph = "";
   if (BRIEF.phase === "running") {
     ph = `<div class="rp-sec"><div class="bf-run"><div class="bf-dot"></div>
-      <div><b>正在写解读</b><div class="bf-run-s">上面两张表已经算好，不用等它 · 通常 20 到 60 秒 · 超过 90 秒原生会断开</div></div></div>
+      <div><b>正在写解读</b><div class="bf-run-s">上面两张表已经算好，不用等它 · 检索关掉时通常 15 到 40 秒 · 超过 90 秒原生会断开</div></div></div>
       <button class="btn gh" style="width:100%;margin-top:8px" onclick="briefCancel()">取消这一份（不再等 · 已发出的那一发撤回不了）</button></div>`;
   } else if (BRIEF.phase === "error") {
+    /* v113：超时这一档必须能一键自救。老文案让人「去设置页取消勾选再回来重试」——
+       一路点过去，回到研判层时上下文已经散了，多数人就放弃了。 */
+    const tmo = /timeout|timed\s*out|超时/i.test(BRIEF.err || "");
+    const canOff = tmo && !!(llmBridge() && LLM.cfg && LLM.cfg.search !== false);
     ph = `<div class="rp-sec"><div class="bf bf-err" style="margin:0"><b>解读没生成出来</b><div>${esc(BRIEF.err || "原因不明")}</div>
-      <div class="bf-run-s">${BRIEF.ms ? "用时 " + Math.max(1, Math.round(BRIEF.ms / 1000)) + " 秒 · " : ""}表格与结论是本地算的，不受影响；代码不会自己重发。</div></div></div>`;
+      <div class="bf-run-s">${BRIEF.ms ? "用时 " + Math.max(1, Math.round(BRIEF.ms / 1000)) + " 秒 · " : ""}表格与结论是本地算的，不受影响；代码不会自己重发。</div>
+      ${canOff ? `<button class="btn pri" style="width:100%;margin-top:8px" onclick="briefSearchOffRetry()">关掉联网检索再发一次（另计一次）</button>` : ""}</div></div>`;
   } else if (!llmBridge()) {
     ph = `<div class="rp-sec"><div class="rp-none">网页版没有模型桥：密钥与端点都在 App 里，解读只在手机上能生成。<b>上面两张表照常可用。</b></div></div>`;
   } else if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) {
@@ -6366,11 +6481,34 @@ function briefCardArea(stale) {
   return reportCardHtml(Object.assign({ rep: null, placeholderHtml: ph }, opt));
 }
 /**
+ * 同一个目标吗？研判「生成中能不能重新打开」全靠这一条判断。
+ * @param {{kind?: string, id?: string}} [t]
+ * @returns {boolean}
+ */
+function briefSameTarget(t) {
+  const a = BRIEF.target || { kind: "portfolio" };
+  const b = t || { kind: "portfolio" };
+  if ((a.kind || "portfolio") !== (b.kind || "portfolio")) return false;
+  if ((a.kind || "portfolio") !== "product") return true;
+  return String(a.id || "") === String(b.id || "");
+}
+/**
  * 打开研判层。
  * @param {{kind?: string, id?: string}} [t]
  */
 function openBrief(t) {
-  if (BRIEF.phase === "running") return toast("这一份还在生成，等它落定再切换目标", 3400);
+  /* ★ v115：生成中也允许打开 —— 这里原来是一句 toast 之后直接 return，
+     于是「切走再回来」看到的是「点了没反应」，屏幕上什么都没有，用户只能以为被打断了。
+     口径：同一个目标就正常打开看进度（卡上有用时和取消按钮）；
+     换目标才提示 —— 换目标必须清状态，那一发就真白费了。 */
+  if (BRIEF.phase === "running") {
+    if (!briefSameTarget(t)) {
+      return toast("这一份（" + briefTargetLabel() + "）还在生成，等它落定再换目标 — 现在打开就是它", 4200);
+    }
+    LLM.host = "brief";
+    renderBriefSheet();
+    return;
+  }
   BRIEF.target = t || { kind: "portfolio" };
   LLM.host = "brief";
   /* 切目标必须清干净：不清就会把上一只的结论画在新目标头上 —— 那种错看起来"很像真的"。 */
@@ -6410,7 +6548,7 @@ function briefTierSet(t) {
 /** 每只产品的事实（供研报的事实层装配）。
     指标全在本地算完再交出去 —— 模型拿不到原始序列，也就没有"自己算一遍"的机会。 */
 function briefItems() {
-  return DATA.products.map(p => {
+  const rows = DATA.products.map(p => {
     const pos = position(p);
     return {
       id: p.id, name: p.name, inst: p.inst, code: p.prodCode || p.code || "",
@@ -6418,6 +6556,8 @@ function briefItems() {
       kind: p.inst || "未填",
       nav: pos.lastNav, navDate: pos.lastDate || "",
       shares: pos.shares, cost: pos.cost, holdDays: pos.holdDays,
+      /* v114：横向表的「占比」列。金额隐藏时手头根本没有份额，硬算会得到一串 0%。 */
+      value: (Number(pos.shares) || 0) * (Number(pos.lastNav) || 0),
       state: pos.inTransit ? "在途（份额未确认）"
         : (pos.shares > 0 ? "持仓中" : (hasAnyTradeIn(p, DATA.trades) ? "已清仓" : "从未建仓")),
       metrics: briefMetrics(navSeries(p)),
@@ -6426,6 +6566,13 @@ function briefItems() {
       series: navSeries(p),
     };
   });
+  /* 占比在全部行算完后回填（需要分母）。这一段只用于本地渲染，不进请求。
+     ★ 只有一只真正持有时不显示占比：那时它必然是 100%，其余是「—」——
+       看着像算错了，其实只是分母只有一个。 */
+  const held = rows.filter(r => isFinite(r.value) && r.value > 0);
+  const total = held.reduce((s, r) => s + r.value, 0);
+  for (const r of rows) r.w = held.length > 1 && total > 0 && r.value > 0 ? r.value / total : null;
+  return rows;
 }
 /** 目标名（画在弹层标题与按钮上）。 */
 function briefTargetLabel() {
@@ -6457,6 +6604,9 @@ function briefFacts() {
   const ses = reportSession(0, td, mk0 && mk0.ok ? mk0.asOf : "");
   const mk = mk0;
   const agg = BRIEF.tier === BRIEF_TIER_AGG;
+  /* v114：公开日历一次算好，两处用 —— 请求里给模型，卡片上给用户。
+     days=21 是有意的：太远的日子对「这周要不要动」没有意义，反而稀释注意力。 */
+  const cal = pubCalNext(td, { days: 21, limit: 4 });
   if (t.kind === "product") {
     const it = all.find(x => x.id === t.id) || {};
     const p = DATA.products.find(x => x.id === t.id);
@@ -6465,14 +6615,16 @@ function briefFacts() {
       session: ses, kind: "product",
       name: agg ? "这一只（名称已隐去）" : String(it.name || ""),
       inst: agg ? "" : String(it.inst || ""),
-      nav, market: mk,
-      watch: reportWatch(nav, mk, ses), gaps: BRIEF_GAPS,
+      nav, market: mk, cal,
+      scenarios: reportScenarios(nav, { k: 5 }),
+      watch: reportWatch(nav, mk, ses, { cal }), gaps: BRIEF_GAPS,
     };
   }
-  const rows = reportPortfolioRows(all).map((r, i) => (agg ? Object.assign({}, r, { name: "产品" + (i + 1) }) : r));
+  const rows = reportPortfolioRows(all, { today: td })
+    .map((r, i) => (agg ? Object.assign({}, r, { name: "产品" + (i + 1) }) : r));
   return {
-    session: ses, kind: "portfolio", rows, market: mk,
-    watch: reportWatch(null, mk, ses, { rows, today: td }), gaps: BRIEF_GAPS,
+    session: ses, kind: "portfolio", rows, market: mk, cal,
+    watch: reportWatch(null, mk, ses, { rows, today: td, cal }), gaps: BRIEF_GAPS,
   };
 }
 /** 装配一次：请求体、指纹、事实层。**不发请求**，所以可以随便调（重绘时也在调）。 */
@@ -6482,6 +6634,7 @@ function briefPack() {
   const input = reportFactsText({
     session: facts.session, kind: facts.kind, name: facts.name, inst: facts.inst,
     nav: facts.nav, rows: facts.rows, market: facts.market, gaps: facts.gaps,
+    scenarios: facts.scenarios, cal: facts.cal, today: today(),
   });
   const built = {
     v: 2, input, instructions: REPORT_INSTRUCTIONS, chars: input.length,
@@ -6552,30 +6705,95 @@ function briefRun(force) {
     BRIEF.phase = "error";
     BRIEF.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一发可能已经计费）";
     BRIEF.buf = null; BRIEF.id = "";
+    inflightClear("brief");
     briefRepaint();
   }, LLM_TIMEOUT_MS);
   try {
+    /* 先记账再发：反过来的话，真机上文档恰好在 ask 返回之前被回收，这一发就永远认不回来了。 */
+    inflightWrite("brief", { id: BRIEF.id, t0: BRIEF.t0, target: BRIEF.target,
+      tier: BRIEF.tier, chars: BRIEF.chars, fp: BRIEF.fp });
     b.ask(BRIEF.id, JSON.stringify(llmReq({ input: pack.built.input, instructions: pack.built.instructions })));
   } catch (e) {
     clearTimeout(BRIEF.timer); BRIEF.timer = 0;
     BRIEF.phase = "error"; BRIEF.id = ""; BRIEF.err = "桥调用失败：" + e;
+    inflightClear("brief");
   }
   briefRepaint();
 }
-/** 取消：与追问同一条口径 —— 这是「不再等」，不是「撤回」，可能已经计费。 */
+/** 取消：与追问同一条口径 —— 这是「不再等」，不是「撤回」，可能已经计费。
+    ★ v115 起这是**唯一**能让研判停下来的人手入口：切页面、关弹层、换宿主都不再取消。
+      想打断只有这颗按钮（以及超时兜底）。 */
 function briefCancel() {
   if (BRIEF.phase !== "running") return toast("这一份已经落定了，没有要取消的东西", 3000);
   const id = BRIEF.id, b = llmBridge();
   if (BRIEF.timer) { clearTimeout(BRIEF.timer); BRIEF.timer = 0; }
   BRIEF.id = ""; BRIEF.phase = "idle"; BRIEF.buf = null;
+  inflightClear("brief");
   if (b && b.cancel) { try { b.cancel(id); } catch (e) { /* 原生没接上也只是继续断开连接 */ } }
   briefRepaint();
   toast("已取消这一份（不再等它，但那一发可能已经计费）", 4200);
 }
+/**
+ * 页面重新起来时，把「还在路上」的那一发接回来（v115）。
+ *
+ * 没有它，WebView 一旦重载（系统回收、history 回退落到初始条目），
+ * 原生那边的答案回来时本机已经没有这把 id，`llmRoute` 找不到人就丢掉 ——
+ * 而用户花了钱、等了十几秒，屏幕上什么都没有。这不是「打断」，是「失联」。
+ *
+ * 只做两件事：接回 id 与出发时刻、按**剩余**时间重设超时。
+ * 不重发、不补算、不假装它已经完成 —— 三种都属于替用户做决定。
+ * @returns {boolean} 是否接回了一条还在路上的
+ */
+function briefInflightAdopt() {
+  const rec = inflightRead().brief;
+  if (!rec || !rec.id || !rec.t0) return false;
+  const t0 = Number(rec.t0);
+  const age = Date.now() - t0;
+  /* 已经超过上限的那一发不必接：接回来也只能立刻判超时，反而把「上一份结论」顶掉。 */
+  if (!(age >= 0) || age >= LLM_TIMEOUT_MS) { inflightClear("brief"); return false; }
+  BRIEF.target = rec.target && rec.target.kind ? rec.target : { kind: "portfolio" };
+  BRIEF.tier = rec.tier === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
+  BRIEF.chars = Number(rec.chars) || 0;
+  BRIEF.fp = String(rec.fp || "");
+  BRIEF.id = String(rec.id);
+  BRIEF.t0 = t0;
+  BRIEF.phase = "running";
+  BRIEF.buf = null;
+  BRIEF.timer = setTimeout(() => {
+    if (BRIEF.phase !== "running") return;
+    BRIEF.ms = BRIEF.t0 ? Date.now() - BRIEF.t0 : 0;
+    BRIEF.phase = "error";
+    BRIEF.err = "等满 " + Math.round(LLM_TIMEOUT_MS / 1000) + " 秒没回（这一发可能已经计费）"
+      + " —— 这一发是在页面刷新前发出的，超时从那时算起";
+    BRIEF.buf = null; BRIEF.id = "";
+    inflightClear("brief");
+    briefRepaint();
+  }, Math.max(1000, LLM_TIMEOUT_MS - age));
+  return true;
+}
+/** 追问那一侧的同一件事。差别只有一个：重载后上文已经没了，所以把问题本身存下来，
+    答回来时至少能对上「这句回答的是哪个问题」。 */
+function llmInflightAdopt() {
+  const rec = inflightRead().llm;
+  if (!rec || !rec.id || !rec.t0) return false;
+  const t0 = Number(rec.t0);
+  const age = Date.now() - t0;
+  if (!(age >= 0) || age >= LLM_TIMEOUT_MS) { inflightClear("llm"); return false; }
+  LLM.id = String(rec.id);
+  LLM.q = String(rec.q || "");
+  LLM.phase = "running";
+  LLM.res = null; LLM.err = ""; LLM.buf = null; LLM.meta = null;
+  LLM.turn = { q: LLM.q, a: "", err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 } };
+  LLM.timer = setTimeout(() => llmTimeout(LLM.id), Math.max(1000, LLM_TIMEOUT_MS - age));
+  return true;
+}
 /** 只重绘研判这一层。刻意不复用 llmRepaint：那一支在 host 被换成 market 时会把
     债市弹层画出来，而研判的回传迟到时不该顺手改别的宿主。 */
 function briefRepaint() {
-  if (LLM.host === "brief") renderBriefSheet();
+  if (LLM.host === "brief" && sheetOpen()) { renderBriefSheet(); return; }
+  /* 弹层已经关了 / 人在别的页面：结论回来时提醒一句，但**绝不把窗口弹回来**。
+     不提醒的话，用户只能靠自己再点开才发现 —— 在他的感受里那十几秒就是「被打断了」。 */
+  if (BRIEF.phase === "done") toast("研判生成好了 — 回「持仓体检 → AI 研判」就能看", 3800);
 }
 function briefChunk(seq, total, text) {
   if (BRIEF.phase !== "running") return;
@@ -6583,6 +6801,7 @@ function briefChunk(seq, total, text) {
   BRIEF.buf = r.st;
   if (r.error) {
     BRIEF.phase = "error"; BRIEF.err = "分块组装失败：" + r.error; BRIEF.buf = null; BRIEF.id = "";
+    inflightClear("brief");
     briefRepaint();
   }
 }
@@ -6611,8 +6830,8 @@ function briefErrText(text, ms) {
   if (!/timeout|timed\s*out|没等到响应|超时/i.test(s)) return s;
   const secs = ms ? Math.max(1, Math.round(ms / 1000)) : 90;
   return "等满 " + secs + " 秒没回（原生读超时；这一发可能已经计费）。"
-    + "研判只用本机数据，不需要联网 —— 先去「设置 → 模型接入」取消勾选「要求端点做联网检索」，"
-    + "再点上面的重试。原生原话：" + s;
+    + "研判只用本机数据，不需要联网 —— 点下面那个「关掉联网检索再发一次」就行"
+    + "（等价于到「设置 → 模型接入」取消勾选「要求端点做联网检索」）。原生原话：" + s;
 }
 function briefDone(metaJson) {
   if (BRIEF.timer) { clearTimeout(BRIEF.timer); BRIEF.timer = 0; }
@@ -6620,8 +6839,13 @@ function briefDone(metaJson) {
   BRIEF.ms = BRIEF.t0 ? Date.now() - BRIEF.t0 : 0;
   const rd = llmMetaOf(metaJson);
   const meta = rd.meta;
-  const raw = BRIEF.buf ? llmChunkJoin(BRIEF.buf) : "";
+  /* 正文正常走分块（LlmBridge.succeed 先发若干 __llmChunk 再发 __llmDone）。
+     这里多留一条退路：万一某个壳版本把短响应一次性塞进 meta.body，也别把它当空响应。 */
+  const metaBody = /** @type {any} */ (meta);
+  const raw = BRIEF.buf ? llmChunkJoin(BRIEF.buf)
+    : (metaBody && typeof metaBody.body === "string" ? metaBody.body : "");
   BRIEF.buf = null; BRIEF.id = "";
+  inflightClear("brief");     /* 落定了（成 / 败 / 降级都算），这一发不再「在路上」 */
   if (!meta || !meta.ok) {
     BRIEF.phase = "error";
     BRIEF.err = briefErrText(llmMetaErr(meta, rd.why, raw.length), BRIEF.ms);
@@ -6731,7 +6955,13 @@ function briefAuditValues() {
     push(nv.sigmaBp); push(nv.normalBp); push(nv.fastBp);
     push(nv.etaNormal); push(nv.etaFast); push(nv.n);
   }
-  if (Array.isArray(f.rows)) for (const r of f.rows) { push(r.nav); push(r.d30); push(r.dd); push(r.gapBp); }
+  if (Array.isArray(f.rows)) for (const r of f.rows) { push(r.nav); push(r.d30); push(r.dd); push(r.gapBp); push(r.w); push(r.lag); }
+  /* v114：三档情景的数也要进白名单 —— 模型引用「按常态 5 个点累计 +5.7bp」是合法的，
+     不放进集合就会被判成编造，那是误报。 */
+  if (f.scenarios && f.scenarios.ok) {
+    for (const r of f.scenarios.rows) { push(r.perBp); push(r.cumBp); push(r.nav); push(r.pct); }
+    push(f.scenarios.k);
+  }
   if (f.market && f.market.ok) {
     for (const r of f.market.rows) { push(r.y); push(r.bp1); push(r.bp5); push(r.bp20); }
     for (const r of f.market.small) push(r.bp1);
@@ -6770,6 +7000,7 @@ function llmRoute(id) {
    写在花括号里会把整段注释当成一个名字。 */
 Object.assign(window, {
   openBriefPortfolio, openBriefProduct, briefRun, briefCancel, briefTierSet,
+  briefSearchOff, briefSearchOffRetry,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
   exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefresh, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
@@ -6781,6 +7012,10 @@ Object.assign(window, {
 
 (function init() {
   loadLocal();
+  /* v115：页面如果是在一发请求「还在路上」的时候被重载的（系统回收、历史回退），
+     那一发的 id 只存在本机这条记录里。不接回来的话，答案回来时 llmRoute 找不到人，
+     用户花了钱、等了十几秒，屏幕上什么都没有。 */
+  briefInflightAdopt(); llmInflightAdopt();
   applyCalendarConfig();   /* 先合并云端日历（settings.tradeCal），再渲染任何日期 */
   loadNotify();
   /* 启动即做一次数据迁移：销售代码→产品代码、重复产品合并 */

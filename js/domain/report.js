@@ -31,7 +31,8 @@
 */
 
 import { esc } from "../core/util.js";
-import { isTradeDay, nextTradeDay, tradeDaysBetween } from "./calendar.js";
+import { isTradeDay, nextTradeDay, tradeDaysBetween, addTradeDays } from "./calendar.js";
+import { pubCalChips, pubCalText, pubCalNext } from "./pubcal.js";
 
 /* ---------------- 时点 ---------------- */
 
@@ -195,6 +196,28 @@ export function reportNavFacts(series, opts) {
   const step = span > 0 ? span / (win.length - 1) : 0;
   const cadence = step <= 1.6 ? "daily" : step <= 6 ? "weekly" : "sparse";
 
+  /* 序列断点（v114）：相邻两点之间隔了远超常态的交易天数。
+     日更产品里出现 6 个交易日的空档，多半是漏抓或产品暂停披露 —— 两种都得看见。 */
+  const breaks = [];
+  for (let i = 1; i < n; i++) {
+    const gap = tradeDaysBetween(pts[i - 1][0], pts[i][0]);
+    if (gap > Math.max(3, step * 2.5)) breaks.push({ from: pts[i - 1][0], to: pts[i][0], gap });
+  }
+  /* 极端日（v114）：最近 20 个点里 |bp| >= 4σ 的日子。
+     shock 只记「最深的那一天」，但一周里出现两次 4σ 与只出现一次，是两种产品。 */
+  const extreme = [];
+  if (sigma > 0) {
+    for (let i = Math.max(1, n - 20); i < n; i++) {
+      if (Math.abs(bps[i]) >= 4 * sigma) {
+        extreme.push({ date: pts[i][0], bp: bps[i], sigma: Math.abs(bps[i]) / sigma });
+      }
+    }
+  }
+  /* 距最后一次披露过了几个交易日：与 missing 不同 —— missing 只在日更产品上算，
+     这个是「不管什么节奏，都多少天没动静了」。 */
+  const staleDays = /^\d{4}-\d{2}-\d{2}$/.test(String(o.today || ""))
+    ? tradeDaysBetween(last[0], o.today) : 0;
+
   /* 缺失披露点：只在日更产品上算。 */
   const missing = [];
   if (cadence === "daily" && /^\d{4}-\d{2}-\d{2}$/.test(String(o.today || "")) && o.today > last[0]) {
@@ -235,7 +258,60 @@ export function reportNavFacts(series, opts) {
     etaNormal: gapBp > 0 && normalBp > 0 ? Math.max(1, Math.round(gapBp / normalBp)) : 0,
     etaFast: gapBp > 0 && fastBp > 0 ? Math.max(1, Math.round(gapBp / fastBp)) : 0,
     cadence, step, missing,
+    breaks, extreme, staleDays,
   };
+}
+
+/* ---------------- 三档情景 ---------------- */
+
+/**
+ * 把「按什么速度走」摊开成三行（v114）。
+ *
+ * ★ 这不是预测，是**把三个口径并排放**：常态（全样本中位数）、近期（最近两点）、
+ *   压力（再来一次同等级的冲击，或每个点都少 1 个 σ）。三行都写出来，读者自己看
+ *   分歧有多大 —— 这比让模型说一句「概率约 65%」诚实得多：那个数字没有任何依据。
+ *
+ * ★ 一律用「披露点」做时间单位，不换算成自然日：周更产品一周一个点，
+ *   按日推会算出「7 天后到 1.016」这种根本不会发生的数。
+ *
+ * @param {any} nv reportNavFacts 的产出
+ * @param {{ k?: number }} [opts] k = 往前推几个披露点，默认 5
+ * @returns {any}
+ */
+export function reportScenarios(nv, opts) {
+  if (!nv || !nv.ok) return { ok: false };
+  const o = opts || {};
+  const k = Number(o.k) > 0 ? Math.round(Number(o.k)) : 5;
+  const last = nv.last.value;
+  /** note 给表格用（短），why 给请求用（长）—— 表里塞不下长句，模型又需要知道口径。
+   * @param {string} key @param {string} name @param {number} cumBp @param {number|null} perBp
+   * @param {string} note @param {string} why */
+  const mk = (key, name, cumBp, perBp, note, why) => ({
+    key, name, perBp, cumBp,
+    nav: last * (1 + cumBp / 10000),
+    pct: cumBp / 100,
+    note, why,
+  });
+  /** @type {any[]} */
+  const rows = [];
+  rows.push(mk("normal", "按常态", k * nv.normalBp, nv.normalBp, "全部点中位数",
+    "全部披露点的日变动中位数"));
+  rows.push(mk("fast", "按最近两日", k * nv.fastBp, nv.fastBp, "最近 2 点均值",
+    "最近 2 个披露点的均值，只代表眼下"));
+  if (nv.shock && nv.shock.bp < 0) {
+    rows.push(mk("stress", "再来一次冲击", nv.shock.bp + (k - 1) * nv.normalBp, null,
+      "复制 " + nv.shock.date.slice(5) + " 的 " + bpText(nv.shock.bp, 1),
+      "第 1 个点复制 " + nv.shock.date.slice(5) + " 的 " + bpText(nv.shock.bp, 1) + "，其余按常态"));
+  } else if (nv.sigmaBp > 0) {
+    rows.push(mk("stress", "按 −1σ 走", k * (nv.normalBp - nv.sigmaBp), nv.normalBp - nv.sigmaBp,
+      "每点少 1σ",
+      "每个点都比常态少 1 个 σ（" + nv.sigmaBp.toFixed(1) + "bp）"));
+  }
+  const cum = rows.map(r => r.cumBp);
+  /* 推到第 k 个披露点大约是哪天：按最近 21 个点估出来的节奏换算，只做参考。 */
+  const step = nv.step > 0 ? nv.step : 1;
+  const byDate = addTradeDays(nv.last.date, Math.max(1, Math.round(k * step))) || "";
+  return { ok: true, k, byDate, rows, low: Math.min.apply(null, cum), high: Math.max.apply(null, cum) };
 }
 
 /* ---------------- 债市事实 ---------------- */
@@ -302,10 +378,19 @@ export function reportMarketFacts(m, today) {
 
 /**
  * 组合层横向表：每只一行。比单只的净值轨迹更适合看「结构」。
+ *
+ * v114 加三样，都是「一眼能看出谁不对劲」用的：
+ *   · w      持仓占比（调用方算好传进来；隐藏金额时传 null）
+ *   · lag    最新净值距今天几个交易日
+ *   · stale  lag >= 2 就算掉队（与 watch 里那条汇总口径一致）
+ *
  * @param {Array<any>} items briefItems() 的产出
- * @returns {Array<{name:string,nav:number,navDate:string,d30:number|null,dd:number|null,gapBp:number|null}>}
+ * @param {{ today?: string }} [opts]
+ * @returns {Array<any>}
  */
-export function reportPortfolioRows(items) {
+export function reportPortfolioRows(items, opts) {
+  const o = opts || {};
+  const today = /^\d{4}-\d{2}-\d{2}$/.test(String(o.today || "")) ? String(o.today) : "";
   const list = Array.isArray(items) ? items : [];
   return list.map(it => {
     const m = (it && it.metrics) || {};
@@ -315,12 +400,16 @@ export function reportPortfolioRows(items) {
       const f = reportNavFacts(series, {});
       if (f.ok) gapBp = f.gapBp;
     }
+    const navDate = String((it && it.navDate) || "");
+    const lag = today && /^\d{4}-\d{2}-\d{2}$/.test(navDate) ? tradeDaysBetween(navDate, today) : null;
     return {
       name: String((it && it.name) || "（无名）"),
-      nav: num(it && it.nav), navDate: String((it && it.navDate) || ""),
+      nav: num(it && it.nav), navDate,
       d30: m.d30 == null ? null : num(m.d30),
       dd: m.dd == null ? null : num(m.dd),
       gapBp,
+      w: it && it.w != null && isFinite(Number(it.w)) ? Number(it.w) : null,
+      lag, stale: lag != null && lag >= 2,
     };
   });
 }
@@ -341,12 +430,19 @@ export function reportWatch(nv, mk, ses, extra) {
      一只产品掉队，整张表的结论就跟着旧。 */
   const x = extra || {};
   if (!nv && Array.isArray(x.rows) && x.rows.length && /^\d{4}-\d{2}-\d{2}$/.test(String(x.today || ""))) {
-    const dates = x.rows.map(r => String(r.navDate || "")).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
-    const stale = dates.filter(d => tradeDaysBetween(d, x.today) >= 2);
+    /* v114：从「有 3 只掉队」改成点名 —— 只说数量，用户还得自己一行行找是哪三只。
+       lag 允许调用方没算（老调用点 / 手工构造的行），这里按 navDate 兜底算一次。 */
+    const lagOf = r => {
+      if (r && r.lag != null && isFinite(Number(r.lag))) return Number(r.lag);
+      const d = String((r && r.navDate) || "");
+      return /^\d{4}-\d{2}-\d{2}$/.test(d) ? tradeDaysBetween(d, x.today) : null;
+    };
+    const stale = x.rows.filter(r => { const l = lagOf(r); return l != null && l >= 2; });
     if (stale.length) {
+      const names = stale.slice(0, 3).map(r => r.name + "（" + String(r.navDate || "").slice(5) + "）").join("、");
       out.push({
         level: "warn",
-        text: "有 " + stale.length + " 只的净值停在 " + stale[0].slice(5) + " 或更早，落后 2 个交易日以上",
+        text: "有 " + stale.length + " 只的净值落后 2 个交易日以上：" + names + (stale.length > 3 ? " 等" : ""),
         sub: "净值没跟上时，下面所有结论都只对到那一天为止",
       });
     }
@@ -379,6 +475,46 @@ export function reportWatch(nv, mk, ses, extra) {
   if (nv && nv.ok && nv.gapBp > 0 && nv.gapBp <= 1) {
     out.push({ level: "info", text: "距前高只剩 " + nv.gapBp.toFixed(1) + "bp", sub: "再有一个常态日就能回到 " + nv.peak.date.slice(5) + " 的高点" });
   }
+  /* ---- v114 新增三条判据 ---- */
+  /* ① 长期没动静：missing 只在日更产品上算，周更与不定期产品从来没被这条覆盖过。 */
+  if (nv && nv.ok && nv.cadence !== "daily") {
+    const lim = nv.cadence === "weekly" ? 10 : 21;
+    if (nv.staleDays >= lim) {
+      out.push({
+        level: "warn",
+        text: "距最后一次披露已 " + nv.staleDays + " 个交易日（" + nv.last.date.slice(5) + " 之后没有新点）",
+        sub: nv.cadence === "weekly" ? "这只约每周一个点，超过两周没动静就不正常" : "这只披露不定期，但一个月的空档要核对一下是不是停售或漏抓",
+      });
+    }
+  }
+  /* ② 反复极端：shock 只记最深的那一天，但一周里出现两次 4σ 与只出现一次，是两种产品。 */
+  if (nv && nv.ok && Array.isArray(nv.extreme) && nv.extreme.length >= 2) {
+    out.push({
+      level: "warn",
+      text: "最近 20 个点里有 " + nv.extreme.length + " 天超过 4σ（最深 " + bpText(nv.extreme[0].bp) + "）",
+      sub: "单次极端可以是事件，反复出现说明这只产品的波动结构变了",
+    });
+  }
+  /* ③ 序列断点：凭空少掉几个交易日，多半是漏抓。 */
+  if (nv && nv.ok && Array.isArray(nv.breaks) && nv.breaks.length) {
+    const b = nv.breaks[nv.breaks.length - 1];
+    out.push({
+      level: "warn",
+      text: "序列有 " + nv.breaks.length + " 处断点，最近一处 " + b.from.slice(5) + " → " + b.to.slice(5) + "（隔 " + b.gap + " 个交易日）",
+      sub: "断点处的日变动算不出来，那一段的回撤与修复比例都会失真",
+    });
+  }
+  /* ④ 日历：三天内撞上偏紧的日子，提醒一句（只报日子，不猜影响）。 */
+  if (Array.isArray(x.cal) && x.cal.length) {
+    const soon = x.cal.find(e => e && e.tone === "warn" && e.daysAway <= 3);
+    if (soon) {
+      out.push({
+        level: "info",
+        text: soon.date.slice(5) + "（" + soon.wd + "）" + soon.name + "，还有 " + soon.daysAway + " 天",
+        sub: soon.note,
+      });
+    }
+  }
   if (ses && ses.key === "closed") {
     out.push({ level: "info", text: "今天休市（" + ses.wdText + "）", sub: "净值与曲线都不会更新，下一个交易日的口径见下" });
   }
@@ -388,7 +524,8 @@ export function reportWatch(nv, mk, ses, extra) {
 /* ---------------- 拼成请求 ---------------- */
 
 /**
- * 装配模型输入。**约 700 到 800 字** —— 与 v111 同量级，不因为「改成研报」而变长。
+ * 装配模型输入。v112 时约 980 字；v114 加了【情景】与【日历】两段，实测约 1300 字
+ * （单只、带债市）。多出来的 300 多字换的是「不再让模型预测」与「日期不靠它记」。
  * 这里只写算好的结论，不写原始序列：模型拿到序列就会自己再算一遍，然后算错。
  *
  * @param {{ session:any, kind?:string, name?:string, inst?:string, nav?:any, rows?:any[],
@@ -428,6 +565,16 @@ export function reportFactsText(q) {
         : "：已在前高，无需填平"));
       L.push("- 披露节奏：" + (nv.cadence === "daily" ? "日更（每个交易日一个点）" : nv.cadence === "weekly" ? "约每周一个点" : "不定期")
         + (nv.missing.length ? "；缺 " + nv.missing.length + " 个交易日未披露（" + nv.missing.slice(0, 3).map(d => d.slice(5)).join("、") + "）" : "；无缺失"));
+      const sc = o.scenarios;
+      if (sc && sc.ok) {
+        L.push("【情景】往前推 " + sc.k + " 个披露点（约到 " + (sc.byDate ? sc.byDate.slice(5) : "日期不明") + "），三档并列，不是预测：");
+        for (const r of sc.rows) {
+          L.push("  " + r.name + "：每点 " + (r.perBp == null ? "—" : bpText(r.perBp)) + "，累计 "
+            + bpText(r.cumBp) + "，净值 " + r.nav.toFixed(6)
+            + "（" + (r.pct >= 0 ? "+" : "") + r.pct.toFixed(2) + "%）"
+            + (r.key === "stress" ? " —— " + r.why : ""));
+        }
+      }
     } else {
       L.push("【净值】数据块里没有可用的净值序列（不足 2 个点）");
     }
@@ -444,8 +591,7 @@ export function reportFactsText(q) {
 
   if (mk && mk.ok) {
     L.push("【债市】中债官方曲线 " + mk.asOf.slice(5) + " 收盘（上一交易日 " + mk.prevDate.slice(5)
-      + "）；比今天落后 " + mk.lagTradeDays + " 个交易日");
-    L.push("  期限 收益率 当日 5日 20日（单位 bp，负=收益率下行=债券价格上涨）");
+      + "）；比今天落后 " + mk.lagTradeDays + " 个交易日");    L.push("  期限 收益率 当日 5日 20日（单位 bp，负=收益率下行=债券价格上涨）");
     for (const r of mk.rows) {
       L.push("  " + r.tenor + " " + fx(r.y, 4) + "% " + (isFinite(r.bp1) ? r.bp1.toFixed(1) : "—")
         + " " + (isFinite(r.bp5) ? r.bp5.toFixed(1) : "—")
@@ -460,6 +606,12 @@ export function reportFactsText(q) {
   }
 
   const gaps = Array.isArray(o.gaps) ? o.gaps.filter(Boolean) : [];
+  /* 日历（v114）：只给日子与「距今几天」，不给「会抽走多少流动性」——
+     那需要超储率与准备金率，本机没有。模型不许在这上面加戏。 */
+  if (Array.isArray(o.cal) && o.cal.length) {
+    const line = pubCalText(o.cal, /^\d{4}-\d{2}-\d{2}$/.test(String(o.today || "")) ? String(o.today) : "");
+    if (line) L.push(line);
+  }
   L.push("【拿不到的数据】" + (gaps.length ? gaps.join("、") : "无"));
   if (ses.key === "intraday") {
     L.push("【盘中说明】本机没有实时行情：上面所有价格都是上一交易日收盘，今天还没有任何成交数据。");
@@ -477,7 +629,7 @@ const UP = "rp-up", DOWN = "rp-down", FLAT = "rp-flat";
 /**
  * 两张表。**所有数字来自本地**，模型碰不到。
  * 涨跌配色按 A 股习惯：红 = 涨 / 收益率下行（债券价格涨），绿 = 跌。
- * @param {{ nav?:any, rows?:any[], market?:any, kind?:string }} f
+ * @param {{ nav?:any, rows?:any[], market?:any, kind?:string, scenarios?:any }} f
  */
 export function reportTableHtml(f) {
   const o = f || {};
@@ -496,19 +648,28 @@ export function reportTableHtml(f) {
       + `<span class="rp-tag calc">本地算 · 近 ${nv.tail.length} 个披露点</span></div>`
       + `<table class="rp-tb"><tr><th>日期</th><th>净值</th><th>日变动</th></tr>${rows}</table>`
       + `<div class="rp-sum">${esc(navSummary(nv))}</div></div>`;
+    if (o.scenarios && o.scenarios.ok) out += scenarioHtml(o.scenarios);
   } else if (o.kind !== "product" && Array.isArray(o.rows) && o.rows.length) {
+    /* 占比整列都没值（只有一只持仓 / 金额被隐藏）时干脆不画这一列：
+       一列全是「—」既占地方又让人以为算坏了。 */
+    const showW = o.rows.some(r => r && r.w != null);
     const rows = o.rows.map(r => {
       const d30 = r.d30 == null ? "—" : (r.d30 >= 0 ? "+" : "") + r.d30.toFixed(2) + "%";
       const dd = r.dd == null ? "—" : r.dd.toFixed(2) + "%";
       const gap = r.gapBp == null ? "—" : (r.gapBp > 0 ? r.gapBp.toFixed(1) : "前高上");
       const c = r.d30 == null ? FLAT : r.d30 >= 0 ? UP : DOWN;
-      return `<tr><td>${esc(r.name)}</td><td>${esc(fx(r.nav, 4))}</td>`
+      /* v114：占比与「落后」进表 —— 掉队的那只如果只占 3%，和占 40%，处理方式是两回事；
+         落后贴在名字下面，不单开一列（六列在 420px 上已经挤）。 */
+      const w = r.w == null ? "—" : (r.w * 100).toFixed(0) + "%";
+      const late = r.lag != null && r.lag >= 2
+        ? `<i class="rp-mk b">落后 ${r.lag} 日</i>` : "";
+      return `<tr><td>${esc(r.name)}${late}</td>${showW ? `<td>${esc(w)}</td>` : ""}<td>${esc(fx(r.nav, 4))}</td>`
         + `<td class="${c}">${esc(d30)}</td><td class="${r.dd != null && r.dd < 0 ? DOWN : FLAT}">${esc(dd)}</td>`
         + `<td>${esc(gap)}</td></tr>`;
     }).join("");
     out += `<div class="rp-sec"><div class="rp-sh"><h4>持仓一览</h4>`
       + `<span class="rp-tag calc">本地算 · ${o.rows.length} 只</span></div>`
-      + `<table class="rp-tb"><tr><th>产品</th><th>净值</th><th>近30点</th><th>回撤</th><th>距前高 bp</th></tr>${rows}</table></div>`;
+      + `<table class="rp-tb"><tr><th>产品</th>${showW ? "<th>占比</th>" : ""}<th>净值</th><th>近30点</th><th>回撤</th><th>距前高</th></tr>${rows}</table></div>`;
   }
   const mk = o.market;
   if (mk && mk.ok) {
@@ -528,6 +689,31 @@ export function reportTableHtml(f) {
       + `</div></div>`;
   }
   return out;
+}
+
+/** 三档情景表（v114）。三行并列，**没有一档叫「预测」**。 */
+export function scenarioHtml(sc) {
+  if (!sc || !sc.ok) return "";
+  const rows = sc.rows.map(r => {
+    const c = r.cumBp > 0 ? UP : r.cumBp < 0 ? DOWN : FLAT;
+    return `<tr><td>${esc(r.name)}<i class="rp-mk">${esc(r.note)}</i></td>`
+      + `<td>${esc(r.perBp == null ? "—" : bpText(r.perBp, 1))}</td>`
+      + `<td class="${c}">${esc(bpText(r.cumBp, 1))}</td>`
+      + `<td>${esc(r.nav.toFixed(6))}</td></tr>`;
+  }).join("");
+  return `<div class="rp-sec"><div class="rp-sh"><h4>往前推 ${sc.k} 个披露点</h4>`
+    + `<span class="rp-tag calc">本地算 · 三档并列 · 不是预测</span></div>`
+    + `<table class="rp-tb"><tr><th>口径</th><th>每点</th><th>累计</th><th>净值</th></tr>${rows}</table>`
+    + `<div class="rp-sum alt">三档是三种<b>速度</b>，不是三个判断。`
+    + (sc.byDate ? "按最近 21 个点的节奏，第 " + sc.k + " 个点约在 " + esc(sc.byDate.slice(5)) + "。" : "")
+    + `</div></div>`;
+}
+
+/** 日历胶囊（v114）：与时间坐标同一层级，都是日期，都不参与结论。 */
+export function reportCalHtml(cal) {
+  const chips = pubCalChips(cal);
+  if (!chips) return "";
+  return `<div class="rp-cal"><span class="rp-cal-h">日历</span>${chips}</div>`;
 }
 
 /** 表下那句「本地算出来的结论」。措辞固定，才能被测试断言。 */

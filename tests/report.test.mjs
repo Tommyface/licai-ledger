@@ -9,7 +9,9 @@ import {
   REPORT_SESSION_LABEL, reportSession, reportNavFacts, reportMarketFacts,
   reportPortfolioRows, reportWatch, reportFactsText, reportTableHtml,
   reportCoordsHtml, reportNumberAudit, navSummary,
+  reportScenarios, scenarioHtml, reportCalHtml,
 } from "../js/domain/report.js";
+import { pubCalNext } from "../js/domain/pubcal.js";
 import { parseReport, reportCardHtml, reportNarrativeHtml, reportSummaryText,
   REPORT_INSTRUCTIONS, REPORT_PROMPT_VER } from "../js/domain/brief.js";
 
@@ -224,7 +226,10 @@ test("观察项：组合层要挑出「净值掉队」的那几只", () => {
   ];
   const w = reportWatch(null, MK, reportSession(0, "2026-11-02"), { rows, today: "2026-11-02" });
   const text = w.map(x => x.text).join("｜");
-  assert.match(text, /有 2 只的净值停在 10-26/);
+  /* v114 起从「有 2 只」改成点名：只说数量，用户还得自己一行行找是哪两只。 */
+  assert.match(text, /有 2 只的净值落后 2 个交易日以上/);
+  assert.match(text, /B（10-26）/);
+  assert.match(text, /C（10-26）/);
 });
 
 test("坐标：组合层给「最新 + 最早」，只给最新会让人以为整套都到那天了", () => {
@@ -489,4 +494,208 @@ test("组合：每只一行，距前高按各自序列算", () => {
   assert.equal(rows.length, 2);
   assert.ok(Math.abs(rows[0].gapBp - 5.84) < 0.01);
   assert.ok(rows[1].gapBp !== null);
+});
+
+/* ---------- v114（P1）：三档情景 / 断点 / 极端日 / 横向表增强 ---------- */
+
+const near = (a, b, eps) => Math.abs(Number(a) - Number(b)) <= (eps == null ? 1e-9 : eps);
+
+test("情景：三档并排，累计算得对，压力档复制的是那一次冲击", () => {
+  const sc = reportScenarios(NAV, { k: 5 });
+  assert.equal(sc.ok, true);
+  assert.equal(sc.k, 5);
+  assert.equal(sc.rows.length, 3, "有冲击的产品应给三档");
+  assert.deepEqual(sc.rows.map(r => r.key), ["normal", "fast", "stress"]);
+
+  const normal = sc.rows[0];
+  assert.ok(near(normal.cumBp, 5 * NAV.normalBp, 1e-9), "常态档应是 5 × 中位数");
+  assert.ok(near(normal.nav, NAV.last.value * (1 + normal.cumBp / 10000), 1e-12));
+
+  const stress = sc.rows[2];
+  assert.ok(NAV.shock && NAV.shock.bp < 0);
+  assert.ok(near(stress.cumBp, NAV.shock.bp + 4 * NAV.normalBp, 1e-9), "压力档 = 一次冲击 + 其余按常态");
+  assert.equal(stress.perBp, null, "压力档没有「每点」—— 它是单次事件，不是每天的速度");
+  /* 三档必须真的分得开：并排看不出差别，这个表就没有意义 */
+  assert.ok(sc.high - sc.low > 5, "三档差得太小，等于没给");
+});
+
+test("情景：没有冲击、样本又不足 20 点时，只给两档，不硬凑第三档", () => {
+  const short = reportNavFacts(bus("2026-10-01", 6).map((d, i) => [d, 1.01 + i * 0.0001]), {});
+  assert.equal(short.ok, true);
+  assert.equal(short.sigmaBp, 0, "样本不足时 σ 必须是 0");
+  const sc = reportScenarios(short, { k: 3 });
+  assert.equal(sc.ok, true);
+  assert.equal(sc.rows.length, 2, "没有冲击也没有 σ，就不该编一个压力档");
+});
+
+test("情景：时间单位是「披露点」，不是自然日", () => {
+  const sc = reportScenarios(NAV, { k: 5 });
+  /* 日更产品：第 5 个披露点就是 5 个交易日之后 */
+  assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(sc.byDate));
+  assert.ok(sc.byDate > NAV.last.date, "目标日期必须在最后一个披露点之后");
+});
+
+test("情景表：写明「不是预测」，且三档都带口径标签", () => {
+  const html = scenarioHtml(reportScenarios(NAV, { k: 5 }));
+  assert.match(html, /三档并列/);
+  assert.match(html, /不是预测/);
+  assert.match(html, /按常态/);
+  assert.match(html, /按最近两日/);
+  assert.match(html, /再来一次冲击/);
+  assert.match(html, /往前推 5 个披露点/);
+  assert.equal(scenarioHtml({ ok: false }), "");
+});
+
+test("断点：中间少掉一截交易日，要能被指出来", () => {
+  const days = bus("2026-08-03", 30);
+  const cut = days.slice(0, 12).concat(days.slice(20));   // 挖掉 8 个交易日
+  const s = cut.map((d, i) => [d, 1.01 * Math.pow(1.00012, i)]);
+  const f = reportNavFacts(s, { today: "2026-09-30" });
+  assert.equal(f.ok, true);
+  assert.ok(f.breaks.length >= 1, "挖掉 8 个交易日却没报断点");
+  const b = f.breaks[0];
+  assert.ok(b.gap >= 8);
+});
+
+test("极端日：20 个点里出现两次 4σ，要单独计数（不只是记最深的那一次）", () => {
+  const days = bus("2026-06-01", 62);
+  const bps = [];
+  for (let i = 0; i < 61; i++) bps.push(1.0);
+  bps[50] = -15; bps[55] = -15;
+  let v = 1.01;
+  const s = [[days[0], v]];
+  for (let i = 0; i < bps.length; i++) { v *= (1 + bps[i] / 10000); s.push([days[i + 1], v]); }
+  const f = reportNavFacts(s, { today: "2026-09-30" });
+  assert.ok(f.sigmaBp > 0);
+  assert.equal(f.extreme.length, 2, "两次 4σ 应计两次");
+  assert.ok(f.extreme.every(x => Math.abs(x.sigma) >= 4));
+});
+
+test("距最后披露几个交易日：周更产品也能量出来（missing 只管日更）", () => {
+  const f = reportNavFacts(SERIES, { today: "2026-11-05" });
+  assert.ok(f.staleDays > 0);
+  assert.equal(f.cadence, "daily");
+  const weekly = bus("2026-08-03", 40).filter((d, i) => i % 5 === 0)
+    .map((d, i) => [d, 1.01 * Math.pow(1.0008, i)]);
+  const fw = reportNavFacts(weekly, { today: "2026-10-20" });
+  assert.equal(fw.cadence, "weekly");
+  assert.ok(fw.staleDays >= 0);
+});
+
+test("横向表：占比与「落后几日」都要有，隐藏金额时占比是 null 而不是 0%", () => {
+  const items = [
+    { name: "甲", nav: 1.01, navDate: "2026-11-06", w: 0.6, metrics: { d30: 0.3, dd: -0.1 }, series: SERIES },
+    { name: "乙", nav: 1.02, navDate: "2026-11-02", w: null, metrics: { d30: 0.1, dd: 0 }, series: SERIES },
+  ];
+  const rows = reportPortfolioRows(items, { today: "2026-11-09" });
+  assert.equal(rows[0].w, 0.6);
+  assert.equal(rows[1].w, null, "没给占比就是 null，不能填 0");
+  assert.equal(rows[1].lag, 5, "11-02 到 11-09 是 5 个交易日");
+  assert.equal(rows[1].stale, true);
+  assert.equal(rows[0].stale, false);
+});
+
+test("横向表渲染：多一列占比，掉队的在名字下标红", () => {
+  const rows = reportPortfolioRows([
+    { name: "甲", nav: 1.01, navDate: "2026-11-06", w: 0.6, metrics: { d30: 0.3, dd: -0.1 }, series: SERIES },
+    { name: "乙", nav: 1.02, navDate: "2026-11-02", w: 0.4, metrics: { d30: 0.1, dd: 0 }, series: SERIES },
+  ], { today: "2026-11-09" });
+  const html = reportTableHtml({ kind: "portfolio", rows });
+  assert.match(html, /占比/);
+  assert.match(html, /60%/);
+  assert.match(html, /落后 5 日/, "掉队的那只没有标记");
+  assert.match(html, /距前高/);
+});
+
+test("观察项：组合层掉队要点名，不是只说「有 N 只」", () => {
+  const rows = [
+    { name: "甲", navDate: "2026-11-06", stale: false },
+    { name: "乙", navDate: "2026-11-02", stale: true },
+    { name: "丙", navDate: "2026-11-03", stale: true },
+  ];
+  const w = reportWatch(null, MKT ? reportMarketFacts(MKT, "2026-11-09") : null,
+    { key: "afterclose" }, { rows, today: "2026-11-09" });
+  const hit = w.find(x => /落后 2 个交易日以上/.test(x.text));
+  assert.ok(hit, "没有掉队那条");
+  assert.match(hit.text, /乙（11-02）/);
+  assert.match(hit.text, /丙（11-03）/);
+});
+
+test("观察项：日历里三天内撞上偏紧的日子，要提醒一句", () => {
+  const cal = pubCalNext("2026-11-14", { days: 21, limit: 6 });
+  const w = reportWatch(NAV, null, { key: "afterclose" }, { cal });
+  const hit = w.find(x => /税期截止|缴准/.test(x.text));
+  assert.ok(hit, "日历项没进观察项");
+  assert.match(hit.text, /还有 \d+ 天/);
+});
+
+test("日历胶囊：与时间坐标同一层级，顺延的要带规则日", () => {
+  const cal = pubCalNext("2026-11-10", { days: 21, limit: 6 });
+  const html = reportCalHtml(cal);
+  assert.match(html, /日历/);
+  assert.match(html, /11-16/);
+  assert.match(html, /缴准/);
+  assert.match(html, /rp-pc/);
+  assert.equal(reportCalHtml([]), "");
+});
+
+test("请求装配：情景与日历都要进请求，且都标明「不是预测」", () => {
+  const sc = reportScenarios(NAV, { k: 5 });
+  const cal = pubCalNext("2026-11-10", { days: 21, limit: 6 });
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-10"), kind: "product",
+    name: "测试产品", nav: NAV, market: null, gaps: [], scenarios: sc, cal, today: "2026-11-10",
+  });
+  assert.match(txt, /【情景】/);
+  assert.match(txt, /不是预测/);
+  assert.match(txt, /【日历】/);
+  assert.match(txt, /缴准/);
+  assert.match(txt, /11-15 顺延/);
+});
+
+/* ---------- v115：信心那一行不许把「没说清」画成「很低」 ---------- */
+
+const mkReport = conf => parseReport(
+  "结论：继续观察\n信心：" + conf + "\n标题：给个标题\n\n## 这一跌什么性质\n正文一。" +
+  "\n\n## 顺风还是逆风\n正文二。\n\n## 要多久\n正文三。");
+
+test("信心：中文档位要认出档位，且不许换算成百分比", () => {
+  /* 原来 `replace(/[^\d.]/g,"")` 把「中」抹成空串、Number("") === 0，
+     卡片于是画出「信心 0%（低）」—— 模型说的是「中」，屏幕说的是「很低」。 */
+  for (const [word, want] of [["中", "中"], ["较高", "较高"], ["高", "较高"], ["中等", "中"], ["较低", "低"], ["低", "低"]]) {
+    const r = mkReport(word);
+    assert.equal(r.ok, true, word);
+    assert.equal(r.report.confidence, null, word + " 不该被换算成数字");
+    assert.equal(r.report.confLevel, want, word);
+  }
+});
+
+test("信心：0 到 1 的小数与百分数都照旧认", () => {
+  assert.equal(mkReport("0.72").report.confidence, 0.72);
+  assert.equal(mkReport("0.72").report.confLevel, "");
+  assert.equal(mkReport("72%").report.confidence, 0.72, "百分数要除以 100");
+  assert.equal(mkReport("0").report.confidence, 0, "真的写了 0 就是 0，不能被当成「没说」");
+  assert.equal(mkReport("1").report.confidence, 1);
+});
+
+test("信心：既没数字也没档位时，两样都是空 —— 界面不画这一行", () => {
+  const r = mkReport("拿不准");
+  assert.equal(r.report.confidence, null);
+  assert.equal(r.report.confLevel, "");
+  const html = reportCardHtml({ facts: { kind: "portfolio", rows: [] }, rep: r.report });
+  assert.ok(html.indexOf("rp-bar") < 0, "没有数就不许画进度条");
+  assert.ok(html.indexOf("信心") < 0, "没有档位就不许画信心那一行");
+});
+
+test("信心：有档位就只写档位，不画进度条", () => {
+  const r = mkReport("中");
+  const html = reportCardHtml({ facts: { kind: "portfolio", rows: [] }, rep: r.report });
+  assert.match(html, /信心：中/);
+  assert.ok(html.indexOf("rp-bar") < 0, "「中」没有对应数值，画条就是编");
+});
+
+test("信心：有数值时进度条长度跟着数值走", () => {
+  const html = reportCardHtml({ facts: { kind: "portfolio", rows: [] }, rep: mkReport("0.72").report });
+  assert.match(html, /信心 72%（较高）/);
+  assert.match(html, /width:72%/);
 });
