@@ -20,6 +20,9 @@ import { navSeries, navAt, latestNav, navHit, inQuietWindow, filterNavNotify, ne
 /* v106 第 0 期：逐源耗时统计（纯函数，单测在 tests/navstats.test.mjs）。
    只做记录，不参与任何抓取决策 —— 阈值要等这份实测分布出来再定。 */
 import { navStatsPush, navStatsSummary, NAVSTATS_TMO_RE } from "./js/core/navstats.js";
+/* v127：额度监控（阶段 1 探测包）纯函数 —— 候选渠道码派生 / 探测回包整包校验 /
+   结果行格式化。单测在 tests/quota.test.mjs。正式额度监控（后台常驻 + 通知）是阶段 3。 */
+import { QUOTA_PROBE_MODE, quotaCandidateCodes, validateProbe, probeRows } from "./js/core/quota.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
   computePosition } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
@@ -114,7 +117,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v126";
+const APP_VER = "v127";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -1385,6 +1388,8 @@ function go(pid) {
   if (pid === "pg-trade") { renderTrade(); renderProd(); }
   if (pid === "pg-prod") renderBoard();
   if (pid === "pg-set") renderSet();
+  /* v127：额度监控独立页 —— 切过去才渲染，别在首屏扫一遍产品列表。 */
+  if (pid === "pg-monitor") renderMonitor();
 }
 function setRange(btn) {
   document.querySelectorAll("#pg-home .tabs button").forEach(b => b.classList.remove("on"));
@@ -4628,6 +4633,108 @@ function nativeMarketFetch() {
       window.NativeNav.fetch(id, JSON.stringify({ mode: "market" }));
     } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
   });
+}
+
+/* ---------- v127：额度监控（阶段 1 · 连通性探测）----------
+   复用 NativeNav.fetch 那条桥，Python 侧调打进 APK 的 navsources/quota_probe.py。
+   本阶段只回答一个问题：手机网络（运营商出口）到底能不能通微众匿名货架 /
+   建行产品页？云端/CI 出口实测恒 21400044，这一步只能真机做。
+   ★ 不是正式监控：不做后台常驻、不推通知、不显示额度（阶段 2/3 才做）。
+   ★ 网页版没有本机抓取：按钮给 toast，不假装成功。零新增桥出口。 */
+const QUOTA_ST = { phase: "idle", at: 0, err: "", pickId: "", rows: [], codes: [] };
+
+function nativeQuotaProbe(codes) {
+  return new Promise(resolve => {
+    if (!nativeFetchAvailable()) {
+      resolve({ ok: false, error: "网页版没有本机抓取，额度连通性自检只能在 App 内做" });
+      return;
+    }
+    const id = "qp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: "额度探测超时（60 秒）" }), 60000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      window.NativeNav.fetch(id, JSON.stringify({ mode: QUOTA_PROBE_MODE, codes }));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
+
+/** 下拉选产品：只换 pickId 和候选码预览，绝不发请求（探测要用户明确点一次）。 */
+function quotaPickSet(id) {
+  QUOTA_ST.pickId = String(id || "");
+  renderMonitor();
+}
+
+/** 从台账产品派生候选渠道码（纯函数收口在 quota.js，这里只负责取字段）。 */
+function quotaCodesFor(pickId) {
+  const p = DATA.products.find(x => String(x.id || "") === String(pickId || ""))
+         || DATA.products[0];
+  if (!p) return { p: null, codes: [] };
+  return { p, codes: quotaCandidateCodes({
+    quotaCode: p.quotaCode || "", prodCode: p.prodCode || "",
+    regCode: regCodeOf(p) || "", code: p.code || "",
+  }) };
+}
+
+async function quotaProbeRun() {
+  if (QUOTA_ST.phase === "busy") return;
+  if (!nativeFetchAvailable()) { toast("额度连通性自检只在 App 内可用（网页版没有本机抓取）", 4200); return; }
+  const { codes } = quotaCodesFor(QUOTA_ST.pickId);
+  if (!codes.length) { toast("先添加一只带产品代码的产品", 3600); return; }
+  QUOTA_ST.phase = "busy"; QUOTA_ST.err = ""; QUOTA_ST.rows = [];
+  renderMonitor();
+  try {
+    const r = await nativeQuotaProbe(codes);
+    if (!r || r.ok !== true) throw new Error((r && r.error) || "本机探测没返回结果");
+    const chk = validateProbe(r);
+    if (!chk.ok) throw new Error("探测回包整包校验未过：" + chk.why);
+    QUOTA_ST.rows = probeRows(r);
+    QUOTA_ST.codes = (r.probe && r.probe.codes) || codes;
+    QUOTA_ST.phase = "done";
+  } catch (e) {
+    QUOTA_ST.phase = "err";
+    QUOTA_ST.err = String((e && e.message) || e);
+    QUOTA_ST.rows = [];
+  }
+  QUOTA_ST.at = Date.now();
+  renderMonitor();
+}
+
+function renderMonitor() {
+  const box = $("quotaResult"), pick = $("quotaPick"), codeBox = $("quotaCodes");
+  if (!box || !pick) return;                 /* 老壳没有这一页，静默跳过 */
+  const list = DATA.products || [];
+  const cur = QUOTA_ST.pickId || (list[0] && list[0].id) || "";
+  pick.innerHTML = list.length
+    ? list.map(p => `<option value="${esc(p.id)}"${String(p.id) === String(cur) ? " selected" : ""}>${esc(p.name || p.code || p.id)}</option>`).join("")
+    : `<option value="">（台账里还没有产品）</option>`;
+  const { codes } = quotaCodesFor(cur);
+  QUOTA_ST.pickId = cur;
+  if (codeBox) codeBox.textContent = codes.length
+    ? `候选渠道码（${codes.length}）：${codes.join(" · ")}`
+    : "这只产品没有可用的产品代码 / 登记编码，先在「产品」里补上。";
+  const st = QUOTA_ST.phase;
+  if (st === "busy") {
+    box.innerHTML = `<div class="note b">正在用手机网络探测……（最多 60 秒，期间别切走页面）</div>`;
+    return;
+  }
+  if (st === "err") {
+    box.innerHTML = `<div class="note b">探测没完成：${esc(QUOTA_ST.err)}<br>还是旧壳的话先更新 App；手机网络不通也会照实报，不会假装成功。</div>`;
+    return;
+  }
+  if (st === "done") {
+    const head = `<div class="note b">探测完成 · ${esc(new Date(QUOTA_ST.at).toLocaleTimeString("zh-CN"))} · 共 ${QUOTA_ST.rows.length} 路。把这一屏截图发回，就能定下主用数据源和产品代码映射。</div>`;
+    const rows = QUOTA_ST.rows.map(r =>
+      `<div style="margin-top:9px;padding:9px 10px;border:1px solid var(--line);border-radius:10px">` +
+      `<b style="font-size:12.5px">${esc(r.label)}</b>` +
+      `<div style="font-size:12px;margin-top:3px">${esc(r.text)}</div>` +
+      (r.raw ? `<pre style="white-space:pre-wrap;word-break:break-all;font-size:11px;color:var(--ink3);margin:6px 0 0">${esc(r.raw)}</pre>` : "") +
+      `</div>`).join("");
+    box.innerHTML = head + rows;
+    return;
+  }
+  box.innerHTML = `<div class="note b">尚未自检。点上面按钮，用手机网络直抓一次，看出口通不通。<br>只回报 HTTP 状态 / 返回码 / 命中数 / 耗时，不落任何账号凭据。</div>`;
 }
 
 /** 用户点「🔍 检索」才走这里。绝不自动发起（铁律 #5）；读不到不清空上一轮结果。 */
@@ -8100,6 +8207,7 @@ Object.assign(window, {
   exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmPresetXf, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
+  quotaProbeRun, quotaPickSet,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
   setProdRange, setRange, setNotifyQuiet, setNotifyThresh, setNotifyThreshVal, clearNotifyMuted, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });

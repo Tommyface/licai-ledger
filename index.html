@@ -818,6 +818,12 @@ html:not(.inApp) .app-only{display:none}
         <div class="tx"><b>持仓体检</b><span>逐只核对净值、披露与费率口径</span></div>
         <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
       </div>
+      <!-- v127：额度监控独立页入口（放在主页面入口区下方，与月报/晴雨表/体检同一层） -->
+      <div class="entry" onclick="go('pg-monitor')">
+        <div class="ic">额</div>
+        <div class="tx"><b>额度实时监控</b><span>阶段 1 · 手机网络连通性自检</span></div>
+        <button class="go" onclick="event.stopPropagation();go('pg-monitor')">查看</button>
+      </div>
     </div>
 
     <!-- 今日收益 -->
@@ -1021,6 +1027,29 @@ html:not(.inApp) .app-only{display:none}
     </div>
   </div>
 
+  <!-- v127 · 额度监控（阶段 1 连通性探测）独立页：与 pg-home/pg-trade/pg-prod/pg-set 平级 -->
+  <div class="page" id="pg-monitor">
+    <div class="card">
+      <div class="card-t"><h2>额度实时监控</h2><span class="hint">阶段 1 · 连通性自检</span></div>
+      <div class="note b">这一步只验证「手机网络出口能不能查到额度」，还不是正式监控：不做后台常驻、不推通知、不显示额度。装好包点一次自检，把结果截图发回，就能定下主用数据源和产品代码映射。</div>
+    </div>
+    <div class="card">
+      <div class="card-t"><h2>① 选一只台账产品</h2></div>
+      <select id="quotaPick" onchange="quotaPickSet(this.value)" style="width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;color:var(--ink);background:#fff"></select>
+      <div id="quotaCodes" class="muted" style="margin-top:9px;font-size:12px;line-height:1.6"></div>
+      <button class="btn pri full" style="margin-top:11px" onclick="quotaProbeRun()">开始连通性自检（仅 App 内）</button>
+    </div>
+    <div class="card">
+      <div class="card-t"><h2>② 探测结果</h2></div>
+      <div id="quotaResult"></div>
+    </div>
+    <div class="card">
+      <div class="foot" style="text-align:left;padding-top:10px">
+        额度为匿名货架参考值，不等于登录银行 App 后个人实际可买额度。探测只回报 HTTP 状态、返回码与命中数，不落任何账号凭据；原始片段只截前 200 字且仅来自公开匿名接口。
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <!-- 底部导航 -->
@@ -1029,6 +1058,7 @@ html:not(.inApp) .app-only{display:none}
   <button class="tb" data-p="pg-trade" onclick="go('pg-trade')"><span class="i">⇄</span>交易</button>
   <button class="tb" data-p="pg-prod" onclick="go('pg-prod')"><span class="i">▦</span>产品</button>
   <button class="tb" data-p="pg-set" onclick="go('pg-set')"><span class="i">⚙</span>设置</button>
+  <button class="tb" data-p="pg-monitor" onclick="go('pg-monitor')"><span class="i">◉</span>监控</button>
 </div>
 
 <div class="mask" id="mask" onclick="if(event.target===this)closeSheet()"><div class="sheet" id="sheet"></div></div>
