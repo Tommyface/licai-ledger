@@ -34,8 +34,10 @@ import { esc } from "../core/util.js";
 import { isTradeDay, nextTradeDay, tradeDaysBetween, addTradeDays } from "./calendar.js";
 import { pubCalChips, pubCalText, pubCalNext } from "./pubcal.js";
 /* v118：中票利差是 market.js 从同一份 33 格里派生的，这里直接用，不重算一遍 ——
-   两处各写一遍公式，迟早在某个边角上算出两个数。 */
-import { marketSpreads } from "../core/market.js";
+   两处各写一遍公式，迟早在某个边角上算出两个数。
+   v125：晴雨快照摘要（marketAiBlock）同样来自 market.js —— 四色信号与 aiText
+   是云端引擎已核验的定性叙述，与下面【债市】表同源互补：表是数字，这段是读法。 */
+import { marketSpreads, marketAiBlock } from "../core/market.js";
 
 /* ---------------- 时点 ---------------- */
 
@@ -399,6 +401,9 @@ export function reportMarketFacts(m, today) {
     spreads: marketSpreads(m),
     gaps: (m.meta && Array.isArray(m.meta.gaps)) ? m.meta.gaps.filter((g) => typeof g === "string" && g) : [],
     capturedAt: String((m.meta && m.meta.capturedAt) || ""),
+    /* v125：晴雨快照摘要（四色信号 + aiText）。marketAiBlock 内部已判 verified 与
+       禁用词，未核验 / 类型不对返回空串 —— 这里照实带出去，空串由渲染端跳过。 */
+    ai: marketAiBlock(m),
   };
 }
 
@@ -638,8 +643,46 @@ export function reportFactsText(q) {
         .join("｜"));
       L.push("  括号内为较前一日；走阔=信用债跑输国债（不利），收窄=跑赢。仅 1/3/5 年可算。");
     }
+    /* v125：晴雨快照摘要（四色信号 + 定性读法）。marketAiBlock 已在生成端判 verified，
+       未核验返回空串，这里照实跳过 —— 表是数字，这段是已核验的定性叙述，两者同源互补。 */
+    if (mk.ai) L.push(mk.ai);
   } else {
     L.push("【债市】本轮没有可用的债市快照。凡涉及市场环境的判断只能写「数据块里没有」。");
+  }
+
+  /* v125：资金面。银银间回购定盘 FDR ≈ DR 取中位数（**非 DR 本身**），日频、11:30 后发布。
+     没有数据必须显式说出来 —— 资金面是短端定价的第一变量，静默缺失会让模型
+     从债市曲线反猜资金松紧，那比说「没有」更糟。 */
+  const fd = o.funding;
+  if (fd && fd.ok && Array.isArray(fd.rows) && fd.rows.length) {
+    L.push("【资金面】" + (fd.label || "银银间回购定盘利率 FDR") + (fd.asOf ? " · asOf " + fd.asOf.slice(5) : ""));
+    L.push("  " + fd.rows.map(r => r.tenor + " " + r.value + "%").join("｜")
+      + (fd.frText ? "｜" + fd.frText : ""));
+    L.push("  FDR ≈ DR 取中位数，非 DR 本身；日频定盘，11:30 后发布；不与【盘中参考】混算。");
+  } else if (fd) {
+    L.push("【资金面】本轮没有资金面数据" + (fd.gapText ? "（" + fd.gapText + "）" : "")
+      + "。涉及资金面松紧的判断写「数据块里没有」，不许从收益率曲线反推资金面。");
+  }
+
+  /* v125：信息面（直抓线索）。publishedAt 是直抓源自带的真实发布时间，所以这块有
+     时间线；全部 verified=false —— 待核线索，不当事实引用，这是与【债市】表的本质区别。 */
+  const nw = o.news;
+  if (nw && nw.ok && Array.isArray(nw.items) && nw.items.length) {
+    L.push("【信息面】近 3 天线索 " + nw.items.length + " 条（来源直抓 · verified=false 待核，不当事实引用）");
+    for (const it of nw.items) L.push("  " + it.d + " " + it.src + "｜" + it.title);
+  } else if (nw) {
+    L.push("【信息面】近 3 天没有线索" + (nw.asOf ? "（信息面上次更新 " + nw.asOf.slice(5, 16) + "）" : "")
+      + "。涉及新闻面的判断写「数据块里没有」。");
+  }
+
+  /* v125：检索线索（AnySearch）。用户手动点过「🔍 检索」才有这块 —— 研判绝不自动
+     发起检索（一次检索一次配额）。端点无发布时间字段（hits 恒 timeUnknown），
+     所以这块**没有时间线**：只能与【信息面】互证，不得单独作为依据。 */
+  const sr = o.search;
+  if (sr && sr.ok && Array.isArray(sr.items) && sr.items.length) {
+    L.push("【检索线索】AnySearch " + sr.at + " 检索「" + sr.query + "」，" + sr.items.length
+      + " 条（无发布时间，仅作线索；与【信息面】互证后才可引用）");
+    for (const it of sr.items) L.push("  " + (it.src || "来源不明") + "｜" + it.title);
   }
 
   /* v118：宏观。三项月度实际值，放在债市之后、盘中之前 —— 从「债市本身」
@@ -699,6 +742,80 @@ export function reportFactsText(q) {
     ? "三段：这一段走势是什么性质、市场环境是顺风还是逆风、还差多少与要多久。"
     : "三段：结构上有没有需要处理的地方、哪只在什么位置、下一步盯什么。"));
   return L.join("\n");
+}
+
+/* ---------------- v125：信息面三路 → 数据块（纯函数，渲染端只如实画） ---------------- */
+
+const BRIEF_NEWS_DAYS = 3;      /* 线索新鲜度：只带近 3 天，太旧的对「今天怎么办」没意义 */
+const BRIEF_NEWS_MAX = 8;       /* 8 条 ≈ 400 字，与三只持仓的测算体量同量级 */
+const BRIEF_SEARCH_MAX = 5;     /* 检索包 5 条 ≈ 250 字 */
+
+/**
+ * 直抓线索 → 信息面块数据。publishedAt 是直抓源自带的真实发布时间 ——
+ * 这是全数据块里唯一有真实时间线的新闻面来源（检索块没有）。
+ * @param {Array<any>} clues NEWS.clues（verified=false 恒定）
+ * @param {string} asOf NEWS.asOf（整包抓取时点）
+ * @param {number} now 毫秒；0 = 不按时间过滤（夹具用）
+ * @returns {{ok: boolean, asOf: string, items: Array<{d:string,src:string,title:string}>}|null}
+ *   null 表示整包没有（调用端本轮没刷新过信息面），渲染端静默。
+ */
+export function reportNewsFacts(clues, asOf, now) {
+  if (!Array.isArray(clues)) return null;
+  const nowMs = Number(now) || 0;
+  const cut = nowMs ? nowMs - BRIEF_NEWS_DAYS * 864e5 : 0;
+  const items = [];
+  for (const c of clues) {
+    const t = Date.parse(String((c && c.publishedAt) || "").replace(" ", "T"));
+    if (nowMs && (!isFinite(t) || t < cut)) continue;
+    items.push({ t, d: String((c && c.publishedAt) || "").slice(5, 16),
+      src: String((c && c.source) || "").slice(0, 12), title: String((c && c.title) || "").slice(0, 36) });
+  }
+  items.sort((a, b) => b.t - a.t);
+  return { ok: items.length > 0, asOf: String(asOf || ""),
+    items: items.slice(0, BRIEF_NEWS_MAX).map(it => ({ d: it.d, src: it.src, title: it.title })) };
+}
+
+/**
+ * 资金面 → 数据块。FDR ≈ DR 取中位数（**非 DR 本身**），日频 11:30 后发布。
+ * rows 与 fr 全空 = 上游抓取失败：gap 文本原样带出去，让模型知道是
+ * 「上游没抓到」，不是「资金面这回事不存在」—— 这两句在推理里是两回事。
+ * @param {any} funding NEWS.funding
+ * @param {Array<string>} gaps NEWS.gaps
+ */
+export function reportFundingFacts(funding, gaps) {
+  if (!funding || typeof funding !== "object") return null;
+  const rows = Array.isArray(funding.rows) ? funding.rows : [];
+  const fr = (funding.fr && typeof funding.fr === "object" && !Array.isArray(funding.fr)) ? funding.fr : {};
+  if (!rows.length && !Object.keys(fr).length) {
+    const gs = (Array.isArray(gaps) ? gaps : []).filter(g => /货币网|资金/.test(String(g)));
+    return { ok: false, gapText: (gs.slice(0, 2).join("；") || "定盘利率未抓到").slice(0, 60) };
+  }
+  return {
+    ok: true,
+    /* label 截 48：真 label 是「银银间回购定盘利率 FDR（基于 DR 取中位数，非 DR 本身）」
+     —— 33 字 + 全角括号；截 30 会把「非 DR 本身」截掉，口径红线就只剩渲染端那句了。 */
+  label: String(funding.label || "银银间回购定盘利率 FDR").slice(0, 48),
+    asOf: String(funding.asOf || funding.frAsOf || ""),
+    rows: rows.slice(0, 4).map(r => ({ tenor: String((r && r.tenor) || "").slice(0, 8), value: Number(r && r.value) })),
+    frText: Object.keys(fr).slice(0, 2).map(k => k + " " + fr[k] + "%").join("｜"),
+  };
+}
+
+/**
+ * 检索包 → 数据块。pack 为 null/空 = 用户没检索过：渲染端整段静默
+ * （检索是手动动作，不该当缺口喊）。包级 asOf 是检索时点（validateHits 校验过）。
+ * @param {any} pack 过 validateHits 的 hits 包
+ */
+export function reportSearchFacts(pack) {
+  if (!pack || !Array.isArray(pack.hits) || !pack.hits.length) return null;
+  const hostOf = u => { try { return new URL(String(u)).host; } catch (e) { return ""; } };
+  return {
+    ok: true,
+    at: String(pack.asOf || "").slice(5, 16),
+    query: String(pack.query || "").slice(0, 40),
+    items: pack.hits.slice(0, BRIEF_SEARCH_MAX).map(h => ({
+      src: hostOf(h && h.url), title: String((h && h.title) || "").slice(0, 36) })),
+  };
 }
 
 /* ---------------- 渲染 ---------------- */

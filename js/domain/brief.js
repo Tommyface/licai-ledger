@@ -468,9 +468,10 @@ function fnv1a(str) {
 
 /**
  * 数据指纹：什么变了才需要重算。
- * 组成 = 目标 + 每只的「id + 最新净值 + 净值日」+ 债市 asOf + 档位 + 提示词版本。
+ * 组成 = 目标 + 每只的「id + 最新净值 + 净值日」+ 债市 asOf + 信息面三路时点 + 档位 + 提示词版本。
  * ★ 刻意不含金额与份额：开关「隐藏金额」不该让结论作废（与 anaFingerprint 同一条理由）。
  * @param {{ target?: {kind?:string,id?:string}, items?: Array<object>, marketAsOf?: string,
+ *   newsAsOf?: string, fundingAsOf?: string, ayAt?: string,
  *   tier?: string, ver?: string }} q
  */
 export function briefFingerprint(q) {
@@ -484,6 +485,10 @@ export function briefFingerprint(q) {
   const parts = [
     "k=" + kind, "id=" + id, "d=" + items,
     "m=" + String(o.marketAsOf || ""),
+    /* v125：信息面三路的时点 —— 任何一个变了，同一份数据就该重新生成。 */
+    "n=" + String(o.newsAsOf || ""),
+    "f=" + String(o.fundingAsOf || ""),
+    "y=" + String(o.ayAt || ""),
     "t=" + String(o.tier || ""),
     "v=" + String(o.ver || BRIEF_PROMPT_VER),
   ];
@@ -736,7 +741,7 @@ export function briefSummaryText(b) {
    ============================================================ */
 
 /** 提示词版本。改指令 / 改格式 / 改分段数，必须 +1 —— 它进指纹。 */
-export const REPORT_PROMPT_VER = "report-1";
+export const REPORT_PROMPT_VER = "report-2";
 
 /** 分段上限：模型偶尔会写成六段。多出来的丢，并在卡片底部计数。 */
 const REPORT_MAX_PARAS = 5;
@@ -758,6 +763,16 @@ export const REPORT_INSTRUCTIONS = [
   "- 不做收益预测；不给概率；不给目标净值、止损价、止盈价。",
   "- 推断句以「可能 / 倾向于 / 若…则…」开头，与事实句分开写。",
   "- 不要联网检索，不要给链接，不要给出处，不要写免责声明（页面自带）。",
+  "",
+  /* v125：四种新块的读法。口径写在指令里，是因为这些块的性质与【债市】表不同 ——
+     有已核验的（晴雨摘要）、有待核的（信息面）、有连时间都没有的（检索线索）。
+     不写清楚，模型要么把线索当事实引用，要么把已核验摘要当成普通叙述。 */
+  "【四种新块的口径】",
+  "- 【晴雨快照】（在【债市】表后）：官方曲线推导的已核验定性摘要，与表同源，可互相印证。",
+  "- 【资金面】：银银间回购定盘 FDR ≈ DR 取中位数，非 DR 本身；日频 11:30 后发布；不与【盘中参考】混算。",
+  "- 【信息面】：近 3 天直抓线索，全部待核（verified=false）；引用时必须带来源与时间，不当事实。",
+  "- 【检索线索】：用户手动检索所得，无发布时间；只能与【信息面】互证后才可引用，不得单独作依据。",
+  "- 某一块整段缺失时照块内提示写「数据块里没有」；资金面缺失时不许从收益率曲线反推资金松紧。",
   "",
   "【按时点定重心】数据块里的【时点】与【叙述重心】是这一次的写法，照它来。",
   "本机没有实时行情时，不许把上一交易日说成「今天」。",

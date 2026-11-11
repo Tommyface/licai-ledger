@@ -241,6 +241,18 @@ test("briefFingerprint：净值变 / 净值日变 / 债市日期变 / 版本变 
   assert.notEqual(f0, briefFingerprint({ ...base, ver: "brief-3" }));
 });
 
+/* v125：信息面三路的时点进指纹 —— 线索/资金面/检索包任何一个变了，
+   「数据没变就别再花一次钱」的判据必须判变，否则会拿旧信息面写新研判。 */
+test("briefFingerprint：信息面 asOf / 资金面 asOf / 检索包时点变 → 指纹都变", () => {
+  const base = { target: { kind: "portfolio" }, items: [item()], marketAsOf: "2026-11-06" };
+  const f0 = briefFingerprint(base);
+  assert.notEqual(f0, briefFingerprint({ ...base, newsAsOf: "2026-11-10 20:26:06" }));
+  assert.notEqual(f0, briefFingerprint({ ...base, fundingAsOf: "2026-11-10" }));
+  assert.notEqual(f0, briefFingerprint({ ...base, ayAt: "2026-11-11 09:52:00" }));
+  /* 三路没变（缺省空串）时指纹不变 —— 与 v118 的「金额不算进指纹」同一稳定性口径 */
+  assert.equal(briefFingerprint(base), briefFingerprint({ ...base, newsAsOf: "", fundingAsOf: "", ayAt: "" }));
+});
+
 test("briefFingerprint：金额与份额变化不影响指纹（隐藏开关不该让结论作废）", () => {
   const base = { target: { kind: "portfolio" }, items: [item()], marketAsOf: "2026-11-06" };
   assert.equal(briefFingerprint(base), briefFingerprint({ ...base, items: [item({ shares: 99999, cost: 2.5 })] }));

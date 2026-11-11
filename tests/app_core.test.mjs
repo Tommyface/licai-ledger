@@ -2157,3 +2157,30 @@ test("v117 缺口：一条盘中数据都没有时，退回原样三条", () => 
     assert.ok(g.some(x => /^资金面：没有 DR001 \/ DR007/.test(x)));
   }
 });
+
+/* ---- v125 · 数据块四源合流（晴雨摘要 / 资金面 / 信息面 / 检索线索） ---- */
+test("v125 研判数据块接线：三路 facts 进 reportFactsText，指纹带三路时点", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  /* briefPack 装配请求体必须带上三路 —— 漏一路就是「研判看不见信息面」的原样复发 */
+  const pack = src.slice(src.indexOf("function briefPack()"), src.indexOf("function briefFpNow()"));
+  assert.match(pack, /news: facts\.news/, "briefPack 没带信息面：模型拿不到直抓线索");
+  assert.match(pack, /funding: facts\.funding/, "briefPack 没带资金面：模型拿不到 FDR 定盘");
+  assert.match(pack, /search: facts\.search/, "briefPack 没带检索包：手动检索白点了");
+  const fp = src.slice(src.indexOf("const fp = briefFingerprint"), src.indexOf("return { built, fp, facts }"));
+  assert.match(fp, /newsAsOf:/, "指纹没带信息面 asOf：线索更新后会拿旧信息面写新研判");
+  assert.match(fp, /fundingAsOf:/, "指纹没带资金面 asOf");
+  assert.match(fp, /ayAt:/, "指纹没带检索包时点");
+  /* briefFacts 两个分支（product / portfolio）都要挂三路 */
+  const bf = src.slice(src.indexOf("function briefFacts()"), src.indexOf("function briefPack()"));
+  const hits = (bf.match(/news: newsFactsForBrief\(\), funding: fundingFactsForBrief\(\), search: searchFactsForBrief\(\)/g) || []).length;
+  assert.equal(hits, 2, "briefFacts 的 product / portfolio 两个分支都要带三路，现在 " + hits + " 处");
+});
+
+test("v125 数字审计扩容：资金面定盘值与线索标题数字进白名单", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const av = src.slice(src.indexOf("function briefAuditValues()"), src.indexOf("function briefHistoryText"));
+  assert.match(av, /f\.funding && f\.funding\.ok/, "FDR 定盘值不在白名单：模型照抄「FDR001 1.32%」会被判编造");
+  assert.match(av, /titleNums\(f\.news\.items\)/, "线索标题数字不在白名单：照抄标题里的「1.7bp」会被判编造");
+  assert.match(av, /titleNums\(f\.search\.items\)/, "检索标题数字同理");
+});
+/* 版本闭包不在这里钉：scripts/check-version.sh + handlers 的版本钉子总测是唯一权威（v97 纪律）。 */

@@ -91,7 +91,9 @@ import { BRIEF_TIER_DETAIL, BRIEF_TIER_AGG, BRIEF_TIER_LABEL,
 import { reportSession, reportNavFacts, reportMarketFacts, reportPortfolioRows,
   reportWatch, reportFactsText, reportNumberAudit,
   /* v114（P1）：三档情景 + 日历胶囊。三档是三种速度，不是三个判断。 */
-  reportScenarios, reportCalHtml } from "./js/domain/report.js";
+  reportScenarios, reportCalHtml,
+  /* v125：信息面三路 → 数据块的纯函数（过滤/截断/口径收口都在 report.js，可单测）。 */
+  reportNewsFacts, reportFundingFacts, reportSearchFacts } from "./js/domain/report.js";
 import { pubCalNext } from "./js/domain/pubcal.js";
 
 /* ---------- 常量 ---------- */
@@ -112,7 +114,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v124";
+const APP_VER = "v125";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -7523,6 +7525,20 @@ function liveFactsForBrief() {
   };
 }
 
+/* v125：信息面 → 研判数据块的三路合流（过滤/截断/口径收口在 report.js 的
+   reportNewsFacts / reportFundingFacts / reportSearchFacts 纯函数里，可单测；
+   这里只做本机数据到纯函数的搬运）。三路全部 verified=false / 待核口径，
+   只进数据块当线索；不进事实层、不自动改账。缺数据显式写「没有」，绝不静默。 */
+const newsFactsForBrief = () => {
+  const n = NEWS;
+  return n ? reportNewsFacts(n.clues, n.asOf, Date.now()) : null;
+};
+const fundingFactsForBrief = () => {
+  const n = NEWS;
+  return n ? reportFundingFacts(n.funding, n.gaps) : null;
+};
+const searchFactsForBrief = () => reportSearchFacts(AY_PACK);
+
 function briefFacts() {
   const t = BRIEF.target || { kind: "portfolio" };
   const all = briefItems();
@@ -7554,6 +7570,8 @@ function briefFacts() {
       name: agg ? "这一只（名称已隐去）" : String(it.name || ""),
       inst: agg ? "" : String(it.inst || ""),
       nav, market: mk, cal, live: lvBrief, macro: mcBrief,
+      /* v125：信息面三路（直抓线索 / 资金面 / 检索包）。null = 本机没有这份，渲染端按块内口径写「没有」。 */
+      news: newsFactsForBrief(), funding: fundingFactsForBrief(), search: searchFactsForBrief(),
       scenarios: reportScenarios(nav, { k: 5 }),
       watch: reportWatch(nav, mk, ses, { cal }), gaps: briefGaps(lvBrief),
     };
@@ -7562,6 +7580,7 @@ function briefFacts() {
     .map((r, i) => (agg ? Object.assign({}, r, { name: "产品" + (i + 1) }) : r));
   return {
     session: ses, kind: "portfolio", rows, market: mk, cal, live: lvBrief, macro: mcBrief,
+    news: newsFactsForBrief(), funding: fundingFactsForBrief(), search: searchFactsForBrief(),
     watch: reportWatch(null, mk, ses, { rows, today: td, cal }), gaps: briefGaps(lvBrief),
   };
 }
@@ -7573,6 +7592,8 @@ function briefPack() {
     session: facts.session, kind: facts.kind, name: facts.name, inst: facts.inst,
     nav: facts.nav, rows: facts.rows, market: facts.market, gaps: facts.gaps, live: facts.live,
     scenarios: facts.scenarios, cal: facts.cal, macro: facts.macro, today: today(),
+    /* v125：信息面三路进数据块（晴雨摘要已并入 facts.market.ai，渲染端自取）。 */
+    news: facts.news, funding: facts.funding, search: facts.search,
   });
   const built = {
     v: 2, input, instructions: REPORT_INSTRUCTIONS, chars: input.length,
@@ -7588,6 +7609,11 @@ function briefPack() {
   const fp = briefFingerprint({
     target: t, items: briefItems(),
     marketAsOf: (MARKET && MARKET.weather && MARKET.weather.asOf) || "",
+    /* v125：信息面三路的时点进指纹 —— 线索/资金面/检索包任何一个变了，
+       「数据没变就别再花一次钱」的判据就必须判变，否则会拿旧信息面写新研判。 */
+    newsAsOf: (NEWS && NEWS.asOf) || "",
+    fundingAsOf: (NEWS && NEWS.funding && NEWS.funding.asOf) || "",
+    ayAt: (AY_PACK && AY_PACK.asOf) || "",
     tier: BRIEF.tier,
     ver: REPORT_PROMPT_VER + "|" + facts.session.key + (facts.live ? "|L" + lvSlot : ""),
   });
@@ -7958,6 +7984,26 @@ function briefAuditValues() {
     for (const s of f.market.spreads) { push(s.spread); push(s.chg); push(s.creditYield); push(s.govtYield); }
   }
   if (f.macro && Array.isArray(f.macro.items)) for (const it of f.macro.items) push(it.val);
+  /* v125：资金面定盘值 —— 模型照抄「FDR001 1.32%」是合法引用，不收就是误报。 */
+  if (f.funding && f.funding.ok && Array.isArray(f.funding.rows)) for (const r of f.funding.rows) push(r.value);
+  if (f.funding && f.funding.ok && f.funding.frText) {
+    for (const m of String(f.funding.frText).matchAll(/[−\-+]?\d+(?:\.\d+)?/g)) push(m[0]);
+  }
+  /* v125：信息面与检索线索标题里的数字也进白名单。线索标题本来就带任意数字
+     （「10Y 上行 1.7bp」），模型照抄标题是合法的 —— audit 拦的是编造，不是抄写；
+     这边放宽，换来的是少一整类「明明照抄却被判编造」的误报。日期/时刻形态先抠掉
+     （与 reportNumberAudit 同款规则），期限标签（10Y 的 10）不算数。 */
+  const titleNums = arr => {
+    for (const it of (arr || [])) {
+      const s = String((it && it.title) || "")
+        .replace(/\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}/g, " ")
+        .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ")
+        .replace(/\d+(?:\.\d+)?\s*(?:年|月|日)/g, " ");
+      for (const m of s.matchAll(/[−\-+]?\d+(?:\.\d+)?/g)) push(m[0]);
+    }
+  };
+  if (f.news && f.news.ok) titleNums(f.news.items);
+  if (f.search && f.search.ok) titleNums(f.search.items);
   return v;
 }
 /** 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。

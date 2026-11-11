@@ -10,6 +10,8 @@ import {
   reportPortfolioRows, reportWatch, reportFactsText, reportTableHtml,
   reportCoordsHtml, reportNumberAudit, navSummary,
   reportScenarios, scenarioHtml, reportCalHtml,
+  /* v125：信息面三路纯函数 */
+  reportNewsFacts, reportFundingFacts, reportSearchFacts,
 } from "../js/domain/report.js";
 import { pubCalNext } from "../js/domain/pubcal.js";
 import { parseReport, reportCardHtml, reportNarrativeHtml, reportSummaryText,
@@ -380,6 +382,217 @@ test("v118 段落额度：三个月的月份不同时，各自标月份，不许
   assert.match(line, /制造业 PMI 49\.3（2026年11月，-0\.8点）/);
 });
 
+/* ---------- v125：信息面三路进数据块 ---------- */
+
+/** 晴雨摘要夹具：真机同形（marketAiBlock 产出的尾部元信息行）。 */
+const MK_AI = "【债市快照 11-10】今日债市整体平稳，红 2 / 绿 25 / 白 2 / 蓝 4。"
+  + "（快照日期 2026-11-10，上一交易日 2026-11-09；官方收益率曲线推导，已核验）";
+
+/** 信息面夹具：8 条满额，标题带数字（测数字白名单的场景）。 */
+const NEWS_FIX = {
+  ok: true, asOf: "2026-11-10 20:26:06",
+  items: [
+    { d: "11-10 20:24", src: "财联社", title: "央行开展 80 亿元逆回购操作" },
+    { d: "11-10 19:58", src: "新华财经", title: "10Y 国债上行 1.7bp 至 1.5965%" },
+    { d: "11-10 18:30", src: "财联社", title: "机构观点：信用利差走阔，短久期防御占优" },
+    { d: "11-10 17:12", src: "中国证券报", title: "税期临近，资金面收敛，DR001 上行" },
+    { d: "11-10 15:40", src: "证券时报", title: "保险资金 11 月中旬起配置超长债" },
+    { d: "11-10 14:02", src: "财联社", title: "30 年国债上行 1.4bp" },
+    { d: "11-10 11:20", src: "上海证券报", title: "跨年配置行情启动信号增强" },
+    { d: "11-10 09:31", src: "财联社", title: "公开市场净投放 80 亿元" },
+  ],
+};
+
+/** 资金面夹具：FDR 4 行 + FR 2 行，真机同形。 */
+const FUND_FIX = {
+  ok: true, label: "银银间回购定盘利率 FDR", asOf: "2026-11-10",
+  rows: [{ tenor: "FDR001", value: 1.32 }, { tenor: "FDR007", value: 1.35 },
+    { tenor: "FDR014", value: 1.4 }, { tenor: "FDR1M", value: 1.5 }],
+  frText: "FR001 1.39%｜FR007 1.42%",
+};
+
+/** 检索夹具：5 条满额（无时间字段 —— 恒 timeUnknown 是包级红线）。 */
+const SRCH_FIX = {
+  ok: true, at: "11-11 09:52", query: "银行理财 债市 资金面",
+  items: [
+    { src: "news.example.com", title: "债市蓄势消化期：长端偏震荡" },
+    { src: "bond.example.cn", title: "DR001 连续两日上行 资金面收敛" },
+    { src: "fin.example.net", title: "信用修复第一波结束 结构性挖掘" },
+    { src: "www.example.org", title: "11 月税期高峰临近 央行投放克制" },
+    { src: "m.example.com", title: "跨年配置行情 保险买盘启动" },
+  ],
+};
+
+test("v125 晴雨摘要：进数据块且原文透传（已核验叙述与数字表互补）", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [],
+    market: Object.assign({}, MK, { ai: MK_AI }), gaps: [], today: "2026-11-09",
+  });
+  assert.match(txt, /红 2 \/ 绿 25 \/ 白 2 \/ 蓝 4/);
+  assert.match(txt, /官方收益率曲线推导，已核验/);
+  /* 没带 ai（未核验时 marketAiBlock 返回空串）就整段静默 —— 不画空段 */
+  const txt2 = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: MK, gaps: [], today: "2026-11-09",
+  });
+  assert.ok(!/已核验）/.test(txt2.replace(/【债市】[^【]*$/, "")), "没有 ai 时不得凭空出现晴雨摘要");
+});
+
+test("v125 资金面：数值行 + 「非 DR 本身」口径恒注", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: { ok: false },
+    gaps: [], today: "2026-11-09", funding: FUND_FIX,
+  });
+  assert.match(txt, /【资金面】银银间回购定盘利率 FDR · asOf 11-10/);
+  assert.match(txt, /FDR001 1\.32%/);
+  assert.match(txt, /FDR001 1\.32%｜FDR007 1\.35%/);
+  assert.match(txt, /FR001 1\.39%/);
+  assert.match(txt, /非 DR 本身/);
+  assert.match(txt, /不与【盘中参考】混算/);
+});
+
+test("v125 资金面缺失：带 gap 文本显式说没有，并堵死「从曲线反推」", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: { ok: false },
+    gaps: [], today: "2026-11-09",
+    funding: { ok: false, gapText: "货币网 FDR 抓取失败：HTTPError" },
+  });
+  assert.match(txt, /【资金面】本轮没有资金面数据（货币网 FDR 抓取失败：HTTPError）/);
+  assert.match(txt, /不许从收益率曲线反推资金面/);
+  assert.ok(!/FDR\d+ \d/.test(txt), "失败时不许带任何定盘数值");
+});
+
+test("v125 信息面纯函数：3 天之外的线索被剔除、倒序、8 条上限、发布时间缺失的线索剔除", () => {
+  const now = new Date("2026-11-11T09:00:00").getTime();
+  const mk = (d, i) => ({ title: "线索" + i, source: "财联社", publishedAt: d, url: "https://x/" + i });
+  const clues = [
+    mk("2026-11-10 20:24:36", 1),                          // 昨天：进
+    mk("2026-11-07 20:24:36", 2),                          // 4 天前：剔除（now-3d = 11-08 09:00 之前）
+    mk("2026-11-08 09:00:00", 3),                          // 恰在 3 天边界：进
+    mk("2026-10-20 09:00:00", 4),                          // 一个月前：剔除
+    mk("2026-11-10 21:00:00", 5),                          // 最新：倒序后第一
+    { title: "没有发布时间的线索", source: "财联社", url: "https://x/n" },  // 无时间：剔除
+  ];
+  for (let i = 6; i < 16; i++) clues.push(mk("2026-11-10 1" + (i % 10) + ":00:00", i));  // 凑超 8 条
+  const f = reportNewsFacts(clues, "2026-11-10 20:26:06", now);
+  assert.ok(f && f.ok);
+  assert.equal(f.asOf, "2026-11-10 20:26:06");
+  assert.ok(f.items.length <= 8, "超 8 条必须截断");
+  assert.ok(!f.items.some(it => it.title === "线索4"), "一个月前的线索不进块");
+  assert.ok(!f.items.some(it => it.title === "没有发布时间的线索"), "无发布时间的不进块");
+  assert.equal(f.items[0].title, "线索5", "最新的一条排最前");
+  /* 旧包（全部过期）→ ok:false，渲染端会写「近 3 天没有线索」。
+     取线索4（一个月前）单条：被 3 天闸门剔除后整包为空。 */
+  const empty = reportNewsFacts(clues.slice(3, 4), "2026-10-20 09:00:00", now);
+  assert.ok(empty && empty.ok === false);
+});
+
+test("v125 信息面渲染：带时间线与待核标注，渲染行数与 items 数一致", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: { ok: false },
+    gaps: [], today: "2026-11-09", news: NEWS_FIX,
+  });
+  assert.match(txt, /【信息面】近 3 天线索 8 条（来源直抓 · verified=false 待核，不当事实引用）/);
+  assert.match(txt, /11-10 20:24 财联社｜央行开展 80 亿元逆回购操作/);
+  const lines = txt.split("\n").filter(l => /^  \d{2}-\d{2} \d{2}:\d{2} /.test(l));
+  assert.equal(lines.length, 8, "渲染行数应与 items 数一致");
+});
+
+test("v125 信息面空窗：写「近 3 天没有线索」并带上次更新时间，不留空", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: { ok: false },
+    gaps: [], today: "2026-11-09",
+    news: { ok: false, asOf: "2026-11-10 20:26:06", items: [] },
+  });
+  assert.match(txt, /【信息面】近 3 天没有线索（信息面上次更新 11-10 20:26）/);
+  assert.match(txt, /数据块里没有/);
+});
+
+test("v125 检索纯函数：host 从 url 提取、query 截断 40、5 条上限、空包返回 null", () => {
+  const pack = { asOf: "2026-11-11 09:52:00", query: "x".repeat(80),
+    hits: Array.from({ length: 7 }, (_, i) => ({
+      title: "检索结果" + i, url: "https://host" + i + ".example.com/a?b=" + i,
+      source: "AnySearch", verified: false, timeUnknown: true })) };
+  const f = reportSearchFacts(pack);
+  assert.ok(f && f.ok);
+  assert.equal(f.items.length, 5, "检索包超 5 条必须截断");
+  assert.equal(f.items[0].src, "host0.example.com", "来源取域名");
+  assert.ok(f.query.length <= 40, "检索词必须截断");
+  assert.equal(f.at, "11-11 09:52", "检索时点取包级 asOf");
+  assert.equal(reportSearchFacts(null), null);
+  assert.equal(reportSearchFacts({ hits: [] }), null);
+});
+
+test("v125 资金面纯函数：FDR 行取 4 条、FR 取 2 条、失败时 gap 原样带出", () => {
+  const ok = reportFundingFacts({
+    label: "银银间回购定盘利率 FDR", asOf: "2026-11-10",
+    rows: [{ tenor: "FDR001", value: 1.32 }, { tenor: "FDR007", value: 1.35 },
+      { tenor: "FDR014", value: 1.4 }, { tenor: "FDR1M", value: 1.5 }, { tenor: "FDR3M", value: 1.6 }],
+    fr: { FR001: 1.39, FR007: 1.42, FR014: 1.5 },
+  }, []);
+  assert.ok(ok && ok.ok);
+  assert.equal(ok.rows.length, 4, "FDR 行最多带 4 条");
+  assert.match(ok.frText, /^FR001 1\.39%｜FR007 1\.42%$/, "FR 只带前两条");
+  const bad = reportFundingFacts({ rows: [], fr: {} },
+    ["货币网 FDR 抓取失败：HTTPError", "货币网 FR 抓取失败：HTTPError", "别的 gap"]);
+  assert.ok(bad && bad.ok === false);
+  assert.match(bad.gapText, /货币网 FDR 抓取失败：HTTPError；货币网 FR 抓取失败：HTTPError/, "只带资金面相关 gap");
+  assert.equal(reportFundingFacts(null, []), null);
+});
+
+test("v125 检索线索：块首恒注「无发布时间 / 互证后才可引用」，带检索时点与词", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: { ok: false },
+    gaps: [], today: "2026-11-09", search: SRCH_FIX,
+  });
+  assert.match(txt, /【检索线索】AnySearch 11-11 09:52 检索「银行理财 债市 资金面」，5 条/);
+  assert.match(txt, /无发布时间，仅作线索；与【信息面】互证后才可引用/);
+  assert.match(txt, /news\.example\.com｜债市蓄势消化期/);
+});
+
+test("v125 检索线索：没检索过就整段静默，不写「没有」（检索是手动动作，不该当缺口喊）", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: { ok: false },
+    gaps: [], today: "2026-11-09", search: null,
+  });
+  assert.ok(!txt.includes("【检索线索】"), "没检索过不许出现检索块");
+});
+
+test("v125 段落额度：资金面段不超 190 字 / 信息面段不超 560 字 / 检索段不超 400 字", () => {
+  const txt = reportFactsText({
+    session: reportSession(0, "2026-11-09"), kind: "portfolio", rows: [], market: { ok: false },
+    gaps: [], today: "2026-11-09", news: NEWS_FIX, funding: FUND_FIX, search: SRCH_FIX,
+  });
+  const segOf = (re) => {
+    const ls = txt.split("\n");
+    const i0 = ls.findIndex(l => re.test(l));
+    if (i0 < 0) return { ls: [], len: 0, i0: -1 };
+    const kept = [ls[i0]];
+    for (let i = i0 + 1; i < ls.length && ls[i].startsWith("  "); i++) kept.push(ls[i]);
+    return { ls: kept, len: kept.join("\n").length, i0 };
+  };
+  const fund = segOf(/【资金面】/);
+  assert.ok(fund.len <= 190 && fund.len > 0, "资金面段超长：" + fund.len);
+  const news = segOf(/【信息面】/);
+  assert.ok(news.len <= 560 && news.len > 0, "信息面段超长：" + news.len);
+  const srch = segOf(/【检索线索】/);
+  assert.ok(srch.len <= 400 && srch.len > 0, "检索段超长：" + srch.len);
+});
+
+test("v125 事实层总额度：单只 + 盘中 8 项 + 利差 + 宏观 + 信息面三路满额，不许超 2500", () => {
+  /* 额度名目（v125）：基线 1600（v118 口径）+ 四新块实测
+       晴雨摘要 ~90 / 资金面 ~170 / 信息面 8 条 ~460 / 检索 5 条 ~330 ≈ +1050
+     取 2500 留 ~250 余量。新块全部走段落级额度（上一条测试），总额度只是兜底；
+     往新块加东西要么在段落额度内加，要么显式改段落条款 —— 与 v118 同一条纪律。 */
+  const txt = reportFactsText({
+    session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31"),
+    kind: "product", name: "诚享7天29号", inst: "北银理财", nav: NAV,
+    market: Object.assign({}, MK, { ai: MK_AI }),
+    gaps: ["资金面：没有 DR001 / DR007", "国债期货"], live: LIVE_FIX,
+    news: NEWS_FIX, funding: FUND_FIX, search: SRCH_FIX,
+  });
+  assert.ok(txt.length <= 2500, "事实层超长了：" + txt.length);
+});
+
 test("v117 盘中：卡片坐标多一颗胶囊，且带时分", () => {
   const h = reportCoordsHtml({
     session: reportSession(new Date("2026-11-09T10:00:00").getTime(), "2026-11-09", "", "13:31"),
@@ -547,10 +760,21 @@ test("解析：给了档位就不标 partial", () => {
 });
 
 test("指令：不许出现 sources / 联网，且要求不许新增数字", () => {
-  assert.equal(REPORT_PROMPT_VER, "report-1");
+  assert.equal(REPORT_PROMPT_VER, "report-2");
   assert.ok(REPORT_INSTRUCTIONS.indexOf('"sources"') < 0);
   assert.match(REPORT_INSTRUCTIONS, /不许新增任何数字/);
   assert.match(REPORT_INSTRUCTIONS, /不要联网检索/);
+});
+
+/* v125：四种新块的读法必须写进指令 —— 口径不在指令里，模型要么把线索当事实，
+   要么把资金面当 DR 本身。这一组断言钉住的是「读法跟着块走」。 */
+test("指令：四种新块（晴雨/资金面/信息面/检索线索）的口径齐全", () => {
+  for (const name of ["晴雨快照", "资金面", "信息面", "检索线索"])
+    assert.ok(REPORT_INSTRUCTIONS.includes(name), "指令缺新块名：" + name);
+  assert.match(REPORT_INSTRUCTIONS, /非 DR 本身/);          // 资金面口径红线
+  assert.match(REPORT_INSTRUCTIONS, /待核/);                 // 信息面线索定性
+  assert.match(REPORT_INSTRUCTIONS, /互证后才可引用/);       // 检索线索无时间的补偿判据
+  assert.match(REPORT_INSTRUCTIONS, /不许从收益率曲线反推资金松紧/); // 缺资金面时的红线
 });
 
 /* ---------- 卡片 ---------- */
