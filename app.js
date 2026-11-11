@@ -114,7 +114,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v125";
+const APP_VER = "v126";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -213,7 +213,7 @@ let MARKET = null;
    一个「附带信息」变成推送负载。 */
 const LS_MARKET = "licai.marketCache";
 const MARKET_TTL = 10 * 60 * 1000;      /* 打开债市页的自动刷新阈值 */
-const MARKET_ST = { phase: "idle", at: 0, err: "", cached: false };
+const MARKET_ST = { phase: "idle", at: 0, err: "", cached: false, src: "" };
 let _mktBusy = null;                    /* 在途去重：连点「更新」只发一次请求 */
 
 /* ---------- v121：信息面 · 待核线索（S1 网页端闭环 + S2 本机直抓）----------
@@ -2700,7 +2700,8 @@ function marketStateBar() {
     liveLine = `<span class="mkt-live mkt-live-bad">日终层更新失败：${esc(s.err)}</span>`
       + (MARKET ? `<span class="mkt-live">下面仍是上次取到的数据，可以继续看</span>` : "");
   }
-  else if (age) liveLine = `<span class="mkt-live">${s.cached ? "本机缓存" : "本机更新"} ${esc(age)}</span>`;
+  else if (age) liveLine = `<span class="mkt-live">${s.cached ? "本机缓存"
+    : s.src === "native" ? "本机直抓" : "本机更新"} ${esc(age)}</span>`;
   else liveLine = `<span class="mkt-live">日终层还没取过数据</span>`;
   return `<div class="mkt-bar">
     <div class="mkt-bar-l">
@@ -4607,6 +4608,28 @@ function nativeAnysearchFetch(query) {
   });
 }
 
+/* ---------- v126：债市晴雨表本机直抓（mode:"market"）----------
+   复用 NativeNav.fetch 那条桥，Python 侧调的是打进 APK 的同一份
+   navsources/market_weather.py（与云端 cron 生成 market.json 同源同判据）。
+   「更新此刻」点下去拿到的是那一刻现抓的官方曲线 —— 不再等云端 cron。
+   超时 120 秒（market_weather 各端点自带 25s×3 重试，实测 5~30 秒）。 */
+function nativeMarketFetch() {
+  return new Promise(resolve => {
+    if (!nativeFetchAvailable()) {
+      resolve({ ok: false, error: "网页版没有本机抓取，债市实时直抓用不了" });
+      return;
+    }
+    const id = "mk" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: "债市实时抓取超时（120 秒）" }), 120000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      window.NativeNav.fetch(id, JSON.stringify({ mode: "market" }));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
+
 /** 用户点「🔍 检索」才走这里。绝不自动发起（铁律 #5）；读不到不清空上一轮结果。 */
 async function anysearchRun() {
   if (AY_ST.busy) return;
@@ -4747,6 +4770,9 @@ function marketCacheLoad() {
     MARKET_ST.at = Number(o.at) || 0;
     MARKET_ST.cached = true;
     MARKET_ST.phase = "idle";
+    /* v126：来源随缓存恢复 —— 「本机直抓」的数据在下次打开时仍是直抓来的，
+       不能因为页面重开就变成「云端产物」。旧缓存没有 src 就按云端算（向后兼容）。 */
+    MARKET_ST.src = String(o.src || "cloud");
     return true;
   } catch (e) { return false; }
 }
@@ -4756,7 +4782,7 @@ function marketCacheSave() {
   if (!MARKET) return;
   try {
     localStorage.setItem(LS_MARKET, JSON.stringify({
-      owner: SYNC.owner, repo: SYNC.repo, at: MARKET_ST.at, m: MARKET,
+      owner: SYNC.owner, repo: SYNC.repo, at: MARKET_ST.at, src: MARKET_ST.src || "cloud", m: MARKET,
     }));
   } catch (e) { }
 }
@@ -5100,7 +5126,10 @@ function macroFactsForBrief() {
 /** @param {{force?: boolean}} [opts] force=true 表示用户手动点的，日 K 绕过 15 分钟 TTL */
 async function marketRefreshAll(opts = {}) {
   const liveP = liveRefresh({ silent: true });
-  const dayP = syncCfgOk() ? marketRefresh({ silent: true }) : Promise.resolve(false);
+  /* v126：日终层在 App 内走本机直抓（mode:"market"）—— 没配数据同步的 App
+     也能点「更新此刻」拿到实时曲线；网页端仍守 syncCfgOk 闸。 */
+  const dayP = (nativeFetchAvailable() || syncCfgOk())
+    ? marketRefresh({ silent: true }) : Promise.resolve(false);
   /* v118：宏观一起更新。它慢（月度数据）但不该被这颗「更新此刻」漏掉 ——
      按钮上写的是「更新此刻」，用户的期待是「点一下把这一页的数都换成最新的」。 */
   const macroP = macroRefresh({ silent: true });
@@ -5110,13 +5139,20 @@ async function marketRefreshAll(opts = {}) {
   /* v120：线索一起刷。云端的「更新」点一下就该把这一页的数都换成最新的；
      off 通道内部直接返回，不占请求。 */
   const newsP = newsRefresh({ silent: true, force: !!opts.force });
-  const [liveOk] = await Promise.all([liveP, dayP, macroP, histP, newsP]);
+  const [liveOk, dayOk] = await Promise.all([liveP, dayP, macroP, histP, newsP]);
+  /* v126：债市直抓口径并入播报 —— 点「更新此刻」最关心的就是 33 格是不是新的。
+     本机直抓成功时明说「已实时抓取 · X 收盘」；云端产物不播（状态条有「本机更新」，
+     数据日期在卡片标题行）。两层播报合并成一句，不弹第二条把前一条顶掉。 */
+  const dayLive = dayOk && MARKET && MARKET_ST.src === "native"
+    ? ` · 债市已实时抓取（${MARKET.weather.asOf} 收盘）` : "";
   if (liveOk && LIVE) {
     const n = Object.keys(LIVE.quotes).length;
     const total = LV.LIVE_QUOTES.length;
-    toast(n === total
+    toast((n === total
       ? `此刻已更新 · ${n}/${total} 项 · ${LV.liveTimeText(LIVE)}`
-      : `此刻已更新 · ${n}/${total} 项（${LV.liveMissText(LIVE)}）`, 3400);
+      : `此刻已更新 · ${n}/${total} 项（${LV.liveMissText(LIVE)}）`) + dayLive, 3400);
+  } else if (dayLive) {
+    toast(`此刻这次没取到：${LIVE_ST.err}；${dayLive.replace(" · ", "")}`, 4600);
   } else if (LIVE) {
     toast(`此刻这次没取到：${LIVE_ST.err}；下面仍是 ${marketAgeText(LIVE_ST.at)}那次的数据`, 4600);
   } else {
@@ -5131,7 +5167,12 @@ async function marketRefreshAll(opts = {}) {
  */
 function marketRefresh(opts = {}) {
   if (_mktBusy) return _mktBusy;
-  if (!syncCfgOk()) {
+  /* v126：App 内先走本机直抓（mode:"market"）—— 点「更新此刻」就是现抓那一刻的
+     官方曲线，不再等云端 cron（每日 3 跑 + GitHub 转发，日终层常常落后 1 个交易
+     日的「云端时点」）。直抓不依赖数据同步配置：没配令牌的 App 也能拿到实时行情。
+     直抓失败降级走云端 sync 产物（两层时点照旧，如实标注来源）。 */
+  const inApp = nativeFetchAvailable();
+  if (!inApp && !syncCfgOk()) {
     MARKET_ST.phase = "err";
     MARKET_ST.err = SYNC.owner || SYNC.repo
       ? "同步未就绪（缺令牌，或本机 App 还是旧壳）"
@@ -5144,16 +5185,32 @@ function marketRefresh(opts = {}) {
   marketPaint();
   _mktBusy = (async () => {
     try {
-      const m = await fetchMarket();
-      if (!m) throw new Error("没读到快照（文件不存在，或结构/符号/禁用词校验未过）");
+      let m = null;
+      let src = "";
+      if (inApp) {
+        const r = await nativeMarketFetch();
+        if (r && r.ok && r.market) {
+          const chk = validateMarket(r.market);
+          if (chk.ok) { m = r.market; src = "native"; }
+          else console.warn(`本机直抓快照校验未过，降级云端：${chk.why}`);
+        }
+        /* 直抓没拿到且云端通道也不可用 → 把真实原因报出来，不吞成「没读到快照」 */
+        if (!m && !syncCfgOk()) throw new Error(String((r && r.error) || "本机直抓没拿到数据"));
+      }
+      if (!m) {
+        const cm = await fetchMarket();
+        if (!cm) throw new Error("没读到快照（文件不存在，或结构/符号/禁用词校验未过）");
+        m = cm;
+        src = "cloud";
+      }
       MARKET = m;
       MARKET_ST.phase = "ok";
       MARKET_ST.err = "";
       MARKET_ST.at = Date.now();
       MARKET_ST.cached = false;
+      MARKET_ST.src = src;
       marketCacheSave();
       marketPaint();
-      if (opts.reason === "manual") toast(`债市已更新 · ${m.weather.asOf}`, 2400);
       return true;
     } catch (e) {
       MARKET_ST.phase = "err";

@@ -331,10 +331,21 @@ export function marketPanelHtml(m, opts = {}) {
   /* v107：截止时间。原来标题里只挂 asOf，用户看不出「这份行情到几点为止」；
      现在按「该交易日现券收盘」补上时点，口径写在小字里。 */
   const cut = opts && opts.cut === false ? "" : marketCutoffText(m);
+  /* v126：标题行自带数据日期（MM-DD 收盘）。此前债市页走 cut=false 时这一屏
+     没有任何时间标注（时间在更上方的状态条里），截图一截就是「没有时点的行情」。
+     数据日期是行情本身的属性，与状态条「本机更新 X 前」（取数行为）是两回事，
+     不冲突。 */
+  const asOf = String((m.weather && m.weather.asOf) || "");
+  const asOfShort = /^\d{4}-\d{2}-\d{2}$/.test(asOf) ? `${asOf.slice(5)} 收盘` : "";
+  /* v126：抓取时刻（ISO 带时区 → MM-DD HH:MM）。cut=false 的债市页「取数行为」
+     由状态条讲；模型接入页没有状态条，就在 cut 行一并给出。 */
+  const cap = String((m.meta && m.meta.capturedAt) || "");
+  const capShort = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(cap)
+    ? `${cap.slice(5, 10)} ${cap.slice(11, 16)}` : "";
   return `<div class="mkt-wrap" style="margin-top:12px">
     <div class="card-t" style="margin-bottom:6px"><h2 style="font-size:14px">债市行情</h2>
-      <span class="hint">${badge} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}（33 格）</span></div>
-    ${cut ? `<div class="mkt-cut"><b>${esc(cut)}</b><span class="mkt-cut-x">日终估值 · 现券 ${esc(MARKET_CLOSE_HHMM)} 收盘</span></div>` : ""}
+      <span class="hint">${badge}${asOfShort ? ` · ${esc(asOfShort)}` : ""} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}（33 格）</span></div>
+    ${cut ? `<div class="mkt-cut"><b>${esc(cut)}</b><span class="mkt-cut-x">日终估值 · 现券 ${esc(MARKET_CLOSE_HHMM)} 收盘${capShort ? ` · 取于 ${esc(capShort)}` : ""}</span></div>` : ""}
     ${matrixHtml(groups.rate, MARKET_RATE_ISSUERS, MARKET_RATE_TENORS, "利率债（收益率曲线每日方向）")}
     ${matrixHtml(groups.credit, MARKET_CREDIT_ISSUERS, MARKET_CREDIT_TENORS, "信用债（中短票据曲线，AA+/AA 只发布至 1 年）")}
     ${spreadHtml(marketSpreads(m))}

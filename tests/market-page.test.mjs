@@ -50,16 +50,20 @@ const runHint = (m, st = ST_IDLE) => new Function("MARKET", "MARKET_ST", "market
   `${F.marketHintText.toString()}; return marketHintText();`)(m, st, stat, cutOk);
 /* 把 marketRefresh 整段切出来放进一个独立作用域跑：MARKET / _mktBusy 在作用域里声明，
    其余依赖全部注入 —— 这样成功 / 失败 / 在途去重三条路径都是真跑，不是读源码猜。 */
-function mkRefresh({ cfg = () => true, fetchIt = async () => ref, sync = { owner: "o", repo: "r" } } = {}) {
+function mkRefresh({ cfg = () => true, fetchIt = async () => ref, sync = { owner: "o", repo: "r" },
+  nativeAvail = () => false, nativeFetch = async () => ({ ok: false, error: "网页版没有本机抓取" }),
+  validate = () => ({ ok: true }) } = {}) {
   const calls = { paint: 0, save: 0, toast: [] };
   const st = ST();
   const factory = new Function(
     "syncCfgOk", "fetchMarket", "MARKET_ST", "SYNC", "marketPaint", "marketCacheSave", "toast",
+    "nativeFetchAvailable", "nativeMarketFetch", "validateMarket",
     `let MARKET = null; let _mktBusy = null;
      ${F.marketRefresh.toString()}
      return { r: marketRefresh, getM: () => MARKET, setM: v => { MARKET = v; } };`);
   const inst = factory(cfg, fetchIt, st, sync,
-    () => calls.paint++, () => calls.save++, m => calls.toast.push(m));
+    () => calls.paint++, () => calls.save++, m => calls.toast.push(m),
+    nativeAvail, nativeFetch, validate);
   return { ...inst, calls, st };
 }
 
@@ -374,13 +378,48 @@ test("marketRefresh 真跑：成功置 ok / 写缓存 / 重绘；失败留旧数
   assert.equal(r1, true);
   assert.equal(r2, true);
 
-  /* ④ 没配同步：不发请求，直接给可执行的下一步 */
+  /* ④ 没配同步：不发请求，直接给可执行的下一步
+     （v126：网页端仍守 syncCfgOk；App 内 native 可用则不受此限 —— 见 ⑤⑦） */
   let n2 = 0;
   const d = mkRefresh({ cfg: () => false, sync: { owner: "", repo: "" }, fetchIt: async () => { n2++; return ref; } });
   const noCfg = await d.r({ silent: true });
   assert.equal(noCfg, false);
   assert.equal(n2, 0, "没配同步还发了请求");
   assert.ok(d.st.err.includes("未配置数据同步"), `文案没指路：${d.st.err}`);
+
+  /* ⑤ v126 App 内直抓成功：不碰云端 fetchIt，来源标 native
+     （播报是 marketRefreshAll 的职责 —— 直抓口径由它并入「此刻已更新」一句） */
+  let nCloud = 0;
+  const e = mkRefresh({
+    nativeAvail: () => true,
+    nativeFetch: async () => ({ ok: true, market: ref }),
+    fetchIt: async () => { nCloud++; return ref; },
+  });
+  const nat = await e.r({ silent: true, reason: "manual" });
+  assert.equal(nat, true, "native 回包合格却报失败");
+  assert.equal(nCloud, 0, "App 内直抓成功还去拉了云端产物");
+  assert.equal(e.st.src, "native", "来源没标 native：状态条分不清直抓与云端");
+
+  /* ⑥ v126 native 回包校验不过：降级走云端（网页端 / 云端通道都能看行情） */
+  const f = mkRefresh({
+    nativeAvail: () => true,
+    nativeFetch: async () => ({ ok: true, market: { broken: true } }),
+    validate: m => m.broken ? { ok: false, why: "schema 不认识" } : { ok: true },
+  });
+  const fb = await f.r({ silent: true });
+  assert.equal(fb, true, "降级云端后该成功");
+  assert.equal(f.st.src, "cloud", "降级路径没标 cloud");
+  assert.equal(f.getM(), ref, "降级后没装云端快照");
+
+  /* ⑦ v126 双通道皆缺（没配同步 + native 失败）：报真实原因，不吞成通用文案 */
+  const g = mkRefresh({
+    cfg: () => false, sync: { owner: "", repo: "" },
+    nativeAvail: () => true,
+    nativeFetch: async () => ({ ok: false, error: "债市实时抓取异常：RuntimeError" }),
+  });
+  const gg = await g.r({ silent: true });
+  assert.equal(gg, false);
+  assert.ok(g.st.err.includes("债市实时抓取异常"), `没报真实原因：${g.st.err}`);
 });
 
 /* ---------- 7. 版本与清单一致（动态读版本，不硬编码 —— 版本钉子已收敛到

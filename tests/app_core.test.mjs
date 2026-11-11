@@ -2184,3 +2184,44 @@ test("v125 数字审计扩容：资金面定盘值与线索标题数字进白名
   assert.match(av, /titleNums\(f\.search\.items\)/, "检索标题数字同理");
 });
 /* 版本闭包不在这里钉：scripts/check-version.sh + handlers 的版本钉子总测是唯一权威（v97 纪律）。 */
+
+/* ---- v126 · 债市行情实时直抓 + 更新时间标注 ---- */
+test("v126 债市直抓接线：native 优先 / 云端降级 / src 随缓存", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  /* 桥入口：mode:"market" 载荷 + 120 秒兜底（market_weather 各端点自带超时重试） */
+  assert.match(src, /function nativeMarketFetch\(\)/, "缺 nativeMarketFetch：App 内没法实时抓债市");
+  assert.match(src, /window\.NativeNav\.fetch\(id, JSON\.stringify\(\{ mode: "market" \}\)\)/,
+    "nativeMarketFetch 没发 mode:\"market\"");
+  assert.match(src, /债市实时抓取超时（120 秒）/, "120 秒兜底定时器缺失");
+  /* marketRefresh：App 内先 native（不依赖数据同步配置），校验不过降级云端 */
+  const mr = src.slice(src.indexOf("function marketRefresh(opts = {})"),
+                       src.indexOf("/** 启动时：先装缓存"));
+  assert.match(mr, /const inApp = nativeFetchAvailable\(\)/, "marketRefresh 没判 App 内");
+  assert.match(mr, /if \(!inApp && !syncCfgOk\(\)\)/, "网页端仍必须守 syncCfgOk 闸");
+  assert.match(mr, /nativeMarketFetch\(\)/, "App 内分支没调 nativeMarketFetch");
+  assert.match(mr, /validateMarket\(r\.market\)/, "native 回包必须过整包校验（坏包不进页面）");
+  assert.match(mr, /src = "cloud"/, "云端降级要标 src=cloud");
+  assert.match(mr, /MARKET_ST\.src = src/, "来源没写状态：状态条分不清直抓与云端");
+  /* 直抓失败且云端也不可用 → 报真实原因，不吞成通用文案 */
+  assert.match(mr, /if \(!m && !syncCfgOk\(\)\) throw new Error/, "双通道皆缺时不报真实原因");
+  /* 缓存恢复：src 落盘（旧缓存按 cloud 算） */
+  assert.match(src, /MARKET_ST\.src = String\(o\.src \|\| "cloud"\)/, "缓存恢复没带 src");
+  assert.match(src, /src: MARKET_ST\.src \|\| "cloud"/, "缓存保存没带 src");
+  /* 状态条：直抓与更新文案分开（两层时点纪律） */
+  assert.match(src, /s\.src === "native" \? "本机直抓" : "本机更新"/, "状态条没按 src 区分来源");
+});
+
+test("v126 播报合并：更新此刻的 toast 带债市直抓口径；网页端闸门不放水", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const mra = src.slice(src.indexOf("async function marketRefreshAll(opts = {})"),
+                        src.indexOf("/** 拉一次最新快照。"));
+  assert.match(mra, /nativeFetchAvailable\(\) \|\| syncCfgOk\(\)/,
+    "「更新此刻」没放行 native：没配同步的 App 点按钮拿不到实时曲线");
+  assert.match(mra, /dayLive = dayOk && MARKET && MARKET_ST\.src === "native"/,
+    "播报没按 native 来源给债市口径");
+  assert.match(mra, /债市已实时抓取（/, "播报缺「债市已实时抓取」文案");
+  /* marketRefresh 本体不再播报（死代码 reason:"manual" 已删） */
+  const mr = src.slice(src.indexOf("function marketRefresh(opts = {})"),
+                       src.indexOf("/** 启动时：先装缓存"));
+  assert.ok(!mr.includes('reason === "manual"'), "marketRefresh 里的播报死代码没删干净");
+});

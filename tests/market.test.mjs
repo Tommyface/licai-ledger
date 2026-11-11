@@ -242,6 +242,26 @@ test("marketPanelHtml：verified=false 时显示「未核验」标注，不给�
   assert.ok(html.includes("未核验"));
   assert.ok(!html.includes("已核验"));
 });
+test("v126：标题行自带「MM-DD 收盘」；cut 行带「取于」抓取时刻", () => {
+  const s = mkSnapshot();
+  const html = marketPanelHtml(s);
+  /* 标题行：数据日期是行情本身的属性，cut=false 的债市页也要看得见
+     （badge 是嵌套 span，「已核验」与日期之间隔着 </span>，正则按后者锚定） */
+  assert.match(html, /<span class="mkt-ok">已核验<\/span> · \d{2}-\d{2} 收盘 · 红 \d+ \//);
+  /* cut 行（模型接入页）：抓取时刻一并给出，与「日终估值 · 现券收盘」同排 */
+  assert.match(html, /取于 11-08 17:15/);
+  /* cut=false（债市页）：标题行时点仍在，cut 行不出现（不与状态条重复） */
+  const html2 = marketPanelHtml(s, { cut: false });
+  assert.match(html2, /· \d{2}-\d{2} 收盘 · 红 \d+ \//);
+  assert.ok(!html2.includes("取于"), "cut=false 时不渲染 cut 行");
+  /* asOf / capturedAt 形态异常时降级为空，不渲染半截文本 */
+  const s3 = mkSnapshot();
+  s3.weather.asOf = "not-a-date";
+  s3.meta.capturedAt = "junk";
+  const html3 = marketPanelHtml(s3);
+  assert.ok(!html3.includes("收盘 · 红"), "非法 asOf 不渲染「收盘」");
+  assert.ok(!html3.includes("取于"), "非法 capturedAt 不渲染「取于」");
+});
 test("marketPanelHtml：格子内容全部过 esc（数据里混入 HTML 不许进 DOM）", () => {
   const s = mkSnapshot();
   s.weather.cells[0].basis.reason = "<script>alert(1)</script>";
