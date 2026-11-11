@@ -14,7 +14,9 @@ const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const sw = readFileSync(new URL("../sw.js", import.meta.url), "utf8");
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const nav = readFileSync(new URL("../../data24/android/app/src/main/python/navservice.py", import.meta.url), "utf8");
+/* ★ 只测本仓文件：公开仓 CI 只 checkout licai-ledger，没有私有仓 data24/。
+   私有仓 navservice.py / quota_probe.py 的接线由那边的 test_android_s2.py 守，
+   这里绝不读跨仓路径（v127 首推 CI 曾因此 ENOENT 挂过一次）。 */
 
 /* ---- 候选渠道码派生 ---- */
 test("quotaCandidateCodes：短码原样 + 补 0 到 17 位，登记编码不参与补 0", () => {
@@ -142,21 +144,11 @@ test("v127 版本钉子：APP_VER 与 CACHE 动态同版本 + SHELL 收 quota.js
   assert.ok(pkg.scripts.test.includes("tests/quota.test.mjs"), "新测试要登记进 npm test 硬编码清单");
 });
 
-test("v127 私有仓：mode 分派 + 函数体在 fetch_one 之后 + 零新增桥", () => {
-  assert.match(nav, /== "quota-probe"/);
-  assert.match(nav, /return _fetch_quota_probe\(req\)/);
-  assert.match(nav, /def _fetch_quota_probe\(req\):/);
-  assert.match(nav, /from navsources import quota_probe as qp/);
-  assert.match(nav, /qp\.validate\(probe\)/, "坏包绝不回页面");
-  assert.match(nav, /"ok": True, "probe": probe/);
-  /* 新函数体必须在 fetch_one 之后，否则污染 test_android_s2 切段 */
-  assert.ok(nav.indexOf("def _fetch_quota_probe(req):") > nav.indexOf("def fetch_one(payload):"));
-  const mk = nav.split("def _fetch_market(req):")[1].split("def fetch_one(payload):")[0];
-  assert.ok(!mk.includes("_fetch_quota_probe"), "market 切段不许混入探测函数");
-  /* 异常只报类型名，不展开 str(e)；不写盘 */
-  const seg = nav.split("def _fetch_quota_probe(req):")[1].split("秒讯登录")[0];
-  /* urlopen( 是联网不是写盘，用「前面不是字母」边界排除它 */
-  assert.ok(!/(?<![A-Za-z])open\(/.test(seg), "手机端只回包，写盘是云端的事");
-  assert.ok(!seg.includes("str(e)"), "异常对象可能带 URL/头，绝不展开异常对象回页面");
-  assert.match(seg, /type\(e\)\.__name__/);
+test("v127 本仓接线：mode:quota-probe 透传字符串在 app.js 里（私有仓由 s2 守）", () => {
+  /* 私有仓分派/脱敏/切段洁净由私有仓 test_android_s2.py 覆盖；
+     这里只钉「网页层发出去的 mode 字符串」这一个跨仓契约，不读私有仓文件。 */
+  assert.match(app, /mode: QUOTA_PROBE_MODE/, "网页层必须用 quota.js 导出的 mode 常量");
+  assert.match(app, /window\.NativeNav\.fetch\(id, JSON\.stringify\(\{ mode: QUOTA_PROBE_MODE, codes \}\)\)/,
+    "探测必须走通用 NativeNav.fetch 透传（零新增桥出口）");
+  assert.match(app, /if \(r\.ok !== true\)|r\.ok !== true/, "失败回包要拦住，不进结果区");
 });
