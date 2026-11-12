@@ -96,6 +96,10 @@ export const WEBANK_OK_CODE = "21400000";
 export const SALE_ON = "12";   /* 在售 / 可购买 */
 export const SALE_OFF = "13";  /* 已售罄 */
 
+/* v131 机构分流：微众代销 → 匿名货架；其他发行方 → 银行披露页轨（中国理财网信披）。
+   机构识别复用 orgs.js 的 detectOrg（与云端 fetch_nav.py 别名表同序同构）。 */
+import { detectOrg } from "./orgs.js";
+
 export const WEBANK_CODE_MAX = 100;      /* 单次 GET 携带代码上限（与 Java 侧一致） */
 export const MONITOR_TRADE_SEC = 15;     /* 交易时段 09:00-17:00 轮询间隔 */
 export const MONITOR_IDLE_SEC = 300;     /* 非交易时段降频（省电，不暂停） */
@@ -111,7 +115,9 @@ function toMin(hhmm) {
   return (+m[1] <= 23 && +m[2] <= 59) ? v : -1;
 }
 
-/** 配置归一化：watch 去重限量、阈值下限、时段/免打扰格式兜底。 */
+/** 配置归一化：watch 去重限量、阈值下限、时段/免打扰格式兜底。
+ *  v131：bankWatch（银行披露页轨）与 watch（微众货架轨）同场去重 —— 同一个码
+ *  不进两轨；元素形态 {code, org}，org 只是给 Java 选 Python 抓取器时的提示。 */
 export function normMonitorCfg(cfg) {
   const c = cfg && typeof cfg === "object" && !Array.isArray(cfg) ? cfg : {};
   const seen = new Set(), watch = [];
@@ -121,6 +127,21 @@ export function normMonitorCfg(cfg) {
       if (!s || !CODE_OK.test(s) || seen.has(s)) continue;
       seen.add(s); watch.push(s);
       if (watch.length >= MONITOR_WATCH_MAX) break;
+    }
+  }
+  const bankWatch = [];
+  if (Array.isArray(c.bankWatch)) {
+    for (const v of c.bankWatch) {
+      const o = (v && typeof v === "object" && !Array.isArray(v)) ? v : { code: v };
+      const s = String(o.code == null ? "" : o.code).trim().toUpperCase();
+      if (!s || !CODE_OK.test(s) || seen.has(s)) continue;
+      seen.add(s);
+      bankWatch.push({
+        code: s,
+        org: String(o.org == null ? "" : o.org).trim().toLowerCase().slice(0, 24),
+        name: String(o.name == null ? "" : o.name).trim().slice(0, 60),
+      });
+      if (bankWatch.length >= MONITOR_WATCH_MAX) break;
     }
   }
   let threshold = Math.round(Number(c.threshold));
@@ -133,7 +154,7 @@ export function normMonitorCfg(cfg) {
   let tradeTo = String(c.tradeTo == null ? "" : c.tradeTo).trim();
   if (toMin(tradeFrom) < 0) tradeFrom = "09:00";
   if (toMin(tradeTo) < 0) tradeTo = "17:00";
-  return { watch, threshold, quietHours, tradeFrom, tradeTo };
+  return { watch, bankWatch, threshold, quietHours, tradeFrom, tradeTo };
 }
 
 /** 免打扰判定，支持跨午夜（如 23:00-07:00）。 */
@@ -333,5 +354,118 @@ export function validateMonitorStatus(r) {
   if (!s || typeof s !== "object" || Array.isArray(s)) return { ok: false, why: "缺 status 对象" };
   if (typeof s.running !== "boolean") return { ok: false, why: "running 非布尔" };
   if (typeof s.watchCount !== "number" || !Number.isFinite(s.watchCount) || s.watchCount < 0) return { ok: false, why: "watchCount 非法" };
+  return { ok: true, why: "" };
+}
+
+/* ═══════════════ v131 机构分流（微众货架轨 / 银行披露页轨）═════════════════
+   用户口径：可监控产品 = 产品页添加的全部产品；微众银行代销的走微众匿名货架，
+   其他发行方的监控银行产品页面（中国理财网信披平台按登记编码披露，通用兜底）。
+
+   分流判定 monitorChannelOf（优先级从铁到宽）：
+     1. 货架快照实际命中该 prodCode → webank（最铁：匿名货架真返回了这只）
+     2. 机构栏/名称含「微众」→ webank
+     3. detectOrg 识别出发行方（与云端 fetch_nav.py 别名表同序同构）→ bank
+     4. 识别不出但有 prodCode → webank 尝试轨（查不到如实显示未命中，不骗人）
+     5. 都没有 → none（无法监控，缺码也缺机构）
+   注意 3 的边界：南银理财这类「微众代销」产品在快照未命中的轮次会先归 bank
+   轨展示，但 Java 货架批量查询仍带它的 prodCode，一旦命中下轮自动翻回 webank
+   ——分流是「展示与银行轨抓取口径」，不改变货架批量查询的入参全集。 */
+
+/** 产品在某轨使用的查询码：webank 轨 = prodCode（货架码）；bank 轨 = 登记编码
+ *  优先（Z 开头，理财网信披查询键），退回 code 字段。 */
+export function monitorChannelCode(p, channel) {
+  if (!p || typeof p !== "object") return "";
+  if (channel === "bank") {
+    return String(p.regCode == null ? "" : p.regCode).trim().toUpperCase()
+        || String(p.code == null ? "" : p.code).trim().toUpperCase();
+  }
+  return String(p.prodCode == null ? "" : p.prodCode).trim().toUpperCase();
+}
+
+export function monitorChannelOf(p, snapshot) {
+  if (!p || typeof p !== "object" || Array.isArray(p)) return "none";
+  const code = String(p.prodCode == null ? "" : p.prodCode).trim().toUpperCase();
+  if (code && shelfHit(snapshot, code)) return "webank";
+  const hay = [p.inst, p.manager, p.name].map(v => String(v == null ? "" : v)).join(" ");
+  if (hay.indexOf("微众") >= 0) return "webank";
+  if (detectOrg(p)) return "bank";
+  if (code) return "webank";
+  return "none";
+}
+
+function shelfHit(snapshot, code) {
+  if (!snapshot || snapshot.ok !== true || !Array.isArray(snapshot.products)) return false;
+  return snapshot.products.some(x => x && String(x.code == null ? "" : x.code).trim().toUpperCase() === code);
+}
+
+/** 监控池展示行（v131 取代网页层直接调 webankRows）：
+ *  全部产品逐只给行，channel 标轨；bank 轨取 bankSnap 的披露快照。 */
+export function monitorRows(pool, snapshot, watch, bankWatch, bankSnap) {
+  const list = Array.isArray(pool) ? pool : [];
+  const w = new Set((Array.isArray(watch) ? watch : []).map(x => String(x).toUpperCase()));
+  const bw = new Map();
+  for (const x of (Array.isArray(bankWatch) ? bankWatch : [])) {
+    const k = String((x && x.code) == null ? "" : x.code).trim().toUpperCase();
+    if (k) bw.set(k, x);
+  }
+  const bankByCode = {};
+  if (bankSnap && bankSnap.ok && Array.isArray(bankSnap.rows)) {
+    for (const r of bankSnap.rows) bankByCode[String(r.code || "").toUpperCase()] = r;
+  }
+  return list.map(p => {
+    const ch = monitorChannelOf(p, snapshot);
+    const code = monitorChannelCode(p, ch);
+    const hit = ch === "webank" ? (snapshot && snapshot.ok
+      ? (snapshot.products || []).find(x => x && x.code === code) : null) : null;
+    const brow = ch === "bank" ? bankByCode[code] : null;
+    return {
+      channel: ch,
+      code,
+      name: String((p && p.name) || code || "未命名产品"),
+      hasCode: !!code,
+      watched: ch === "webank" ? (!!code && w.has(code)) : (!!code && bw.has(code)),
+      hit: !!hit,
+      saleStatus: hit ? hit.saleStatus : "",
+      statusText: ch === "bank"
+        ? (brow ? bankRowText(brow) : "银行披露页 · 待抓取")
+        : (hit ? saleText(hit.saleStatus) : "App 内可查"),
+      quotaText: ch === "bank"
+        ? (brow && brow.nav != null ? String(brow.nav) : "—")
+        : (hit ? (hit.availQuota == null ? "不限额度" : fmtYuan(hit.availQuota) + " 元") : "—"),
+      err: brow ? String(brow.err || "") : "",
+    };
+  });
+}
+
+/** 银行披露页轨的状态行文案：盯的是「披露更新」（最新净值 + 日期）。 */
+export function bankRowText(row) {
+  if (!row || typeof row !== "object") return "银行披露页 · 待抓取";
+  if (row.err) return "披露页抓取未成：" + String(row.err).slice(0, 40);
+  const d = String(row.navDate || "");
+  const v = row.nav == null ? "" : String(row.nav);
+  return d || v ? `最新披露净值 ${v}（${d || "日期缺失"}）` : "银行披露页 · 暂无披露";
+}
+
+/** 银行披露页轨的通知文案（与 notifyBody 同构，口径换成披露更新）。 */
+export function bankNotifyBody(name, code, nav, navDate, iso) {
+  return `${name}（${code}）\n银行披露页已更新净值：${nav}（${navDate}）\n检查时间：${iso}\n` +
+    "披露口径来自中国理财网信披平台，请在发行银行 App 核对。";
+}
+
+/** 银行披露页轨回包整包校验（monitor-bank / monitor-refresh 的 bankRows）。
+ *  行：{code, name, nav, navDate, changed, err}；code 必有；nav/navDate 可缺
+ *  （抓取失败时 err 有值）。整包不合法一律拒绝，不让坏数据进页面。 */
+export function validateBankRows(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, why: "回包不是对象" };
+  if (r.ok !== true) return { ok: false, why: String(r.error || "monitor-bank 未成功（ok≠true）") };
+  if (!Array.isArray(r.rows)) return { ok: false, why: "缺 rows 数组" };
+  for (const row of r.rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return { ok: false, why: "rows 元素不是对象" };
+    const c = String(row.code == null ? "" : row.code).trim().toUpperCase();
+    if (!c || !CODE_OK.test(c)) return { ok: false, why: "rows 元素缺合法 code" };
+    if (row.nav != null && !Number.isFinite(Number(row.nav)) && row.err == null) {
+      return { ok: false, why: "code " + c + " 的 nav 非数值且无 err 说明" };
+    }
+  }
   return { ok: true, why: "" };
 }

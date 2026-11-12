@@ -2254,10 +2254,10 @@ test("v128 监控职责边界：网页层不设 JS 定时轮询、不直连微�
   /* 配置归一化 / 关注限量 / 展示格式化都收口在 quota.js 纯函数，不在 app.js 重算第二套判据 */
   assert.match(seg, /monitorCfgPersist\(cfg\)/);
   assert.match(seg, /MONITOR_WATCH_MAX/);
-  assert.match(seg, /webankRows\(pool, MONITOR_ST\.snapshot, cfg\.watch\)/,
-    "展示行用纯函数且以可监控产品池为主，别在渲染层重算格式化");
+  assert.match(seg, /monitorRows\(pool, MONITOR_ST\.snapshot, cfg\.watch, cfg\.bankWatch, MONITOR_ST\.bankRows\)/,
+    "展示行用纯函数且以产品页全部产品为主，按轨分流渲染，别在渲染层重算格式化");
   assert.match(seg, /function monitorPoolProducts\(\)/,
-    "可监控产品池要过滤已清仓产品（全部赎回后不再进监控候选）");
+    "可监控产品池 = 产品页添加的全部产品（v131 用户要求与产品页一致，不再因清仓排除）");
 });
 
 test("v128 网页版降级：无 native 时如实报不可后台常驻，且有超时兜底", () => {

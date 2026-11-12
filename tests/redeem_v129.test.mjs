@@ -149,10 +149,16 @@ test("接线：赎回表单锁 T 日、有全部赎回按钮、渲染走 settleL
     "专项回归要登记进 npm test 硬编码清单");
 });
 
-test("接线：阶段 1 自检已下线、监控池排除已清仓产品", () => {
+test("接线：阶段 1 自检已下线、监控池与产品页全量一致", () => {
   assert.ok(!/QUOTA_PROBE_MODE|quotaProbeRun|quotaPickSet|const QUOTA_ST/.test(app));
   assert.ok(!/id="quotaPick"|id="quotaResult"|id="quotaCodes"/.test(html));
   assert.match(app, /function monitorPoolProducts\(\)/);
-  assert.match(app, /hasAnyTrade\(p\) && position\(p\)\.shares <= 0/,
-    "已清仓判定：有过交易且份额归零；从未建仓的产品仍可监控");
+  /* v131：用户要求可监控产品与产品页添加的所有产品一致 —— 不再因清仓排除，
+     清仓产品保留在池子里（标注渠道后仍可盯额度/披露）。 */
+  assert.ok(!/hasAnyTrade\(p\) && position\(p\)\.shares <= 0/.test(
+    app.slice(app.indexOf("function monitorPoolProducts()"),
+              app.indexOf("function monitorPoolProducts()") + 200)),
+    "监控池不许再按清仓过滤（v131 与产品页全量一致）");
+  assert.match(app, /monitorRows\(pool, MONITOR_ST\.snapshot, cfg\.watch, cfg\.bankWatch, MONITOR_ST\.bankRows\)/,
+    "池子渲染走分流纯函数 monitorRows（webank 轨 + bank 轨）");
 });

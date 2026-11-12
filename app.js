@@ -30,6 +30,7 @@ import { navStatsPush, navStatsSummary, NAVSTATS_TMO_RE } from "./js/core/navsta
 import {
   MONITOR_WATCH_MAX, MONITOR_CFG_KEY,
   normMonitorCfg, parseWebank, webankRows, validateMonitorStatus,
+  monitorRows, monitorChannelOf, monitorChannelCode, bankNotifyBody, validateBankRows,
 } from "./js/core/quota.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
   computePosition, settleLedger } from "./js/domain/position.js";
@@ -125,7 +126,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v130";
+const APP_VER = "v131";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -4751,6 +4752,7 @@ function nativeMarketFetch() {
    ============================================================ */
 const MONITOR_ST = {
   cfg: null, snapshot: null, snapshotErr: "", status: null, statusErr: "", busy: false,
+  bankRows: null, bankRowsErr: "",     /* v131：银行披露页轨快照（monitor-bank 回包） */
 };
 let _monBooted = false;
 
@@ -4776,6 +4778,7 @@ function monitorCfgSave() {
   const th = $("monThreshold"), q = $("monQuiet");
   const next = monitorCfgPersist({
     watch: c.watch,
+    bankWatch: c.bankWatch,
     threshold: th ? th.value : c.threshold,
     quietHours: q ? q.value : c.quietHours,
     tradeFrom: c.tradeFrom, tradeTo: c.tradeTo,
@@ -4784,33 +4787,63 @@ function monitorCfgSave() {
   monitorPushCfgIfRunning(next);
   return next;
 }
-function monitorWatchSet(list) {
+/** 双轨勾选：channel="webank" 动 cfg.watch（货架码），channel="bank" 动
+ *  cfg.bankWatch（{code, org}，码 = 登记编码/产品码）。 */
+function monitorWatchSet(list, bankList) {
   const c = monitorCfgLoad();
-  const next = monitorCfgPersist({ ...c, watch: list });
+  const next = monitorCfgPersist({
+    ...c,
+    watch: Array.isArray(list) ? list : c.watch,
+    bankWatch: Array.isArray(bankList) ? bankList : c.bankWatch,
+  });
   renderMonitor();
   monitorPushCfgIfRunning(next);
 }
-function monitorWatchOne(code) {
+function monitorWatchOne(code, ch) {
   const c = monitorCfgLoad(), key = String(code || "").trim().toUpperCase();
   if (!key) return;
+  if (ch === "bank") {
+    const hit = c.bankWatch.find(x => x.code === key);
+    const nextBank = hit ? c.bankWatch.filter(x => x.code !== key)
+      : c.bankWatch.concat([{ code: key, org: monitorBankOrgOf(key) }]).slice(0, MONITOR_WATCH_MAX);
+    monitorWatchSet(c.watch, nextBank);
+    return;
+  }
   monitorWatchSet(c.watch.includes(key) ? c.watch.filter(x => x !== key)
-    : c.watch.concat([key]).slice(0, MONITOR_WATCH_MAX));
+    : c.watch.concat([key]).slice(0, MONITOR_WATCH_MAX), c.bankWatch);
 }
-/** 可监控产品池：排除已清仓（有过交易且份额归零），保留从未建仓的产品。 */
+/** 从台账产品反推银行轨产品的发行机构代码（给 Java 选 Python 抓取器当提示）。 */
+function monitorBankOrgOf(code) {
+  const key = String(code || "").trim().toUpperCase();
+  const p = (DATA.products || []).find(x =>
+    String(x.regCode || "").trim().toUpperCase() === key ||
+    String(x.code || "").trim().toUpperCase() === key ||
+    String(x.prodCode || "").trim().toUpperCase() === key);
+  return p ? detectOrg(p) : "";
+}
+/* v131：可监控产品池 = 产品页全部产品（用户要求与产品页添加的所有产品一致；
+   不再因清仓排除 —— 清仓产品标注「已清仓」后仍可盯额度/披露，等再开售）。 */
 function monitorPoolProducts() {
-  return (DATA.products || []).filter(p =>
-    !(hasAnyTrade(p) && position(p).shares <= 0));
+  return (DATA.products || []).slice();
 }
-/** 全选 = 可监控产品里有 prodCode 的全部（微众货架代码就是 prodCode）。 */
+/** 全选 = 全部可监控产品按轨入列：微众轨收 prodCode，银行轨收 {code, org}。 */
 function monitorWatchAll() {
-  const codes = monitorPoolProducts()
-    .map(p => String((p && p.prodCode) || "").trim().toUpperCase())
-    .filter(c => c && /^[A-Za-z0-9._-]{1,48}$/.test(c));
-  const uniq = [...new Set(codes)].slice(0, MONITOR_WATCH_MAX);
-  if (!uniq.length) { toast("台账里还没有带产品代码的产品", 3200); return; }
-  monitorWatchSet(uniq);
+  const cfgW = [], cfgB = [];
+  for (const p of monitorPoolProducts()) {
+    const ch = monitorChannelOf(p, MONITOR_ST.snapshot);
+    const code = monitorChannelCode(p, ch);
+    if (!code || !/^[A-Za-z0-9._-]{1,48}$/.test(code)) continue;
+    if (ch === "bank") cfgB.push({ code, org: detectOrg(p) });
+    else cfgW.push(code);
+  }
+  const uniqW = [...new Set(cfgW)].slice(0, MONITOR_WATCH_MAX);
+  const seen = new Set(uniqW);
+  const uniqB = cfgB.filter(x => !seen.has(x.code)).slice(0, MONITOR_WATCH_MAX);
+  if (!uniqW.length && !uniqB.length) { toast("台账里还没有可监控的产品", 3200); return; }
+  monitorWatchSet(uniqW, uniqB);
+  toast(`已全选：微众货架 ${uniqW.length} 只 · 银行披露页 ${uniqB.length} 只`, 3200);
 }
-function monitorWatchNone() { monitorWatchSet([]); }
+function monitorWatchNone() { monitorWatchSet([], []); }
 
 /** 通用 native 控制面（沿用 v126/v127 的 _navDone 回调表，零新增桥出口）。 */
 function nativeMonitor(mode, cfg) {
@@ -4830,8 +4863,9 @@ function nativeMonitor(mode, cfg) {
   });
 }
 
-/** 服务状态 + 最近一次微众快照（都由 monitor-status 回包带回）。
-    ★ 网页层绝不直连微众（无 CORS）；快照用 parseWebank 独立整包校验，坏包不进页面。 */
+/** 服务状态 + 最近一次微众快照 + 银行披露轨快照（都由 monitor-status 回包带回）。
+    ★ 网页层绝不直连微众（无 CORS）；快照用 parseWebank 独立整包校验，坏包不进页面。
+    ★ v131：bankRows（银行披露轨）同样整包校验（validateBankRows），坏包不进页面。 */
 async function monitorStatusFetch() {
   const r = await nativeMonitor("monitor-status");
   const chk = validateMonitorStatus(r);
@@ -4850,17 +4884,57 @@ async function monitorStatusFetch() {
   } else {
     MONITOR_ST.snapshot = null; MONITOR_ST.snapshotErr = "";
   }
+  const rawB = r.bankRows;
+  if (rawB != null && rawB !== "") {
+    if (typeof rawB === "object") { putBankRows(rawB); return; }
+    try { putBankRows(JSON.parse(rawB)); }
+    catch (e) { MONITOR_ST.bankRows = null; MONITOR_ST.bankRowsErr = "银行轨回包不是合法 JSON"; }
+  } else {
+    MONITOR_ST.bankRows = null; MONITOR_ST.bankRowsErr = "";
+  }
+}
+function putBankRows(obj) {
+  const chk = validateBankRows(obj);
+  if (chk.ok) { MONITOR_ST.bankRows = obj; MONITOR_ST.bankRowsErr = ""; }
+  else { MONITOR_ST.bankRows = null; MONITOR_ST.bankRowsErr = chk.why; }
 }
 async function monitorRefresh() {
   if (MONITOR_ST.busy) return;
-  MONITOR_ST.busy = true;
-  await monitorStatusFetch();
+  MONITOR_ST.busy = true; renderMonitor();
+  /* v131：refresh 带配置下发——Java 侧现场抓一轮货架快照 +（bankWatch 非空时）
+     跑一次银行披露轨，回包直接带最新 snapshot + bankRows；失败再退回只读状态。
+     ★ 回包里的 status 一样要过整包校验（v130 探针 M4 的教训：坏包不许进页面）。 */
+  const cfg = monitorCfgLoad();
+  const r = await nativeMonitor("monitor-refresh", cfg);
+  if (r && r.ok === true) {
+    const chk = validateMonitorStatus(r);
+    if (chk.ok) {
+      MONITOR_ST.status = r.status || MONITOR_ST.status;
+      MONITOR_ST.statusErr = "";
+    } else {
+      MONITOR_ST.status = null;
+      MONITOR_ST.statusErr = chk.why;
+    }
+    const raw = r.snapshot;
+    if (raw != null && raw !== "") {
+      const snap = parseWebank(raw);
+      if (snap.ok) { MONITOR_ST.snapshot = snap; MONITOR_ST.snapshotErr = ""; }
+      else { MONITOR_ST.snapshotErr = snap.why; }
+    }
+    const rawB = r.bankRows;
+    if (rawB != null && rawB !== "") {
+      if (typeof rawB === "object") putBankRows(rawB);
+      else { try { putBankRows(JSON.parse(rawB)); } catch (e) {} }
+    }
+  } else {
+    await monitorStatusFetch();
+  }
   MONITOR_ST.busy = false;
   renderMonitor();
 }
 async function monitorStart() {
   const cfg = monitorCfgLoad();
-  if (!cfg.watch.length) { toast("先在「关注的产品」里勾选至少一只", 3600); return; }
+  if (!cfg.watch.length && !cfg.bankWatch.length) { toast("先在「关注的产品」里勾选至少一只", 3600); return; }
   if (MONITOR_ST.busy) return;
   MONITOR_ST.busy = true; renderMonitor();
   const r = await nativeMonitor("monitor-start", cfg);
@@ -4886,26 +4960,44 @@ async function monitorStop() {
 /** 我的产品池展示：以台账产品为主，叠加服务回传的微众快照状态。 */
 function monitorPoolHtml() {
   const cfg = monitorCfgLoad();
-  /* v129：已清仓产品（有过交易且份额归零）不再进监控池 —— 诚享7天29号
-     昨天全部赎回后还留在候选里，就是清仓状态没串到监控。从未建仓的产品
-     保留：用户可能就是想先盯额度再决定买，那不算清仓。 */
+  /* v131：可监控产品 = 产品页添加的全部产品（用户要求与产品页一致，不再因
+     清仓排除）；每只按机构分流标注数据源——微众代销走匿名货架（额度/状态），
+     其他发行方走银行披露页（中国理财网信披，盯净值披露更新）。 */
   const pool = monitorPoolProducts();
-  const rows = webankRows(pool, MONITOR_ST.snapshot, cfg.watch);
-  if (!rows.length) return `<div class="note">台账里没有可监控的产品（已清仓的不计入），先去「产品」页添加。</div>`;
+  const rows = monitorRows(pool, MONITOR_ST.snapshot, cfg.watch, cfg.bankWatch, MONITOR_ST.bankRows);
+  if (!rows.length) return `<div class="note">台账里还没有产品，先去「产品」页添加。</div>`;
   const snapInfo = MONITOR_ST.snapshot
-    ? `快照已更新（${MONITOR_ST.snapshot.products.length} 只命中）`
+    ? `货架快照已更新（${MONITOR_ST.snapshot.products.length} 只命中）`
     : (MONITOR_ST.snapshotErr
-        ? "快照校验未过：" + esc(MONITOR_ST.snapshotErr)
+        ? "货架快照校验未过：" + esc(MONITOR_ST.snapshotErr)
         : "销售状态由 App 内前台服务抓取（网页版不直连微众）");
-  const head = `<div class="muted" style="font-size:12px;margin-bottom:8px">我的产品 ${rows.length} 只 · ${esc(snapInfo)}</div>`;
-  return head + rows.map(r =>
-    `<label style="display:flex;align-items:center;gap:9px;padding:8px 2px;border-top:1px solid var(--line);font-size:12.5px;${r.hasCode ? "cursor:pointer" : "opacity:.6"}">` +
-    `<input type="checkbox" ${r.watched ? "checked" : ""} ${r.hasCode ? `onclick="monitorWatchOne('${esc(r.code)}')"` : "disabled"}
+  const bankInfo = cfg.bankWatch.length
+    ? (MONITOR_ST.bankRows
+        ? ` · 银行披露轨 ${MONITOR_ST.bankRows.rows.length} 只`
+        : (MONITOR_ST.bankRowsErr ? " · 银行轨：" + esc(MONITOR_ST.bankRowsErr)
+           : " · 银行披露轨由服务按披露节奏抓取"))
+    : "";
+  const nBank = rows.filter(r => r.channel === "bank").length;
+  const nWeb = rows.filter(r => r.channel === "webank").length;
+  const head = `<div class="muted" style="font-size:12px;margin-bottom:8px">我的产品 ${rows.length} 只（微众货架 ${nWeb} · 银行披露页 ${nBank}）· ${esc(snapInfo)}${esc(bankInfo)}</div>`;
+  return head + rows.map(r => {
+    const isBank = r.channel === "bank";
+    const chip = isBank
+      ? `<span class="wr" style="font-size:10px;padding:1px 5px;border-radius:5px;background:#eef2fb;color:#3956a8;margin-left:4px">披露页</span>`
+      : `<span class="wr" style="font-size:10px;padding:1px 5px;border-radius:5px;background:#fdf3e7;color:#a86a12;margin-left:4px">微众货架</span>`;
+    const right = isBank
+      ? `<div class="muted" style="font-size:11px">最新披露净值</div>`
+      : `<div class="muted" style="font-size:11px">参考额度</div>`;
+    const sub = r.hasCode
+      ? `${esc(r.code)}${chip} · ${esc(r.statusText)}`
+      : `缺产品代码与登记编码，无法监控`;
+    return `<label style="display:flex;align-items:center;gap:9px;padding:8px 2px;border-top:1px solid var(--line);font-size:12.5px;${r.hasCode ? "cursor:pointer" : "opacity:.6"}">` +
+      `<input type="checkbox" ${r.watched ? "checked" : ""} ${r.hasCode ? `onclick="monitorWatchOne('${esc(r.code)}','${isBank ? "bank" : "webank"}')"` : "disabled"}
        style="width:17px;height:17px;flex:none" />` +
-    `<span style="flex:1;min-width:0"><b style="font-weight:600">${esc(r.name)}</b>` +
-    `<div class="muted" style="font-size:11px">${r.hasCode ? esc(r.code) : "缺产品代码，无法监控"} · ${esc(r.statusText)}</div></span>` +
-    `<span style="flex:none;text-align:right"><b>${esc(r.quotaText)}</b>` +
-    `<div class="muted" style="font-size:11px">参考额度</div></span></label>`).join("");
+      `<span style="flex:1;min-width:0"><b style="font-weight:600">${esc(r.name)}</b>` +
+      `<div class="muted" style="font-size:11px">${sub}</div></span>` +
+      `<span style="flex:none;text-align:right"><b>${esc(r.quotaText)}</b>${right}</span></label>`;
+  }).join("");
 }
 function monitorStatusHtml() {
   const s = MONITOR_ST.status;

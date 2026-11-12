@@ -425,23 +425,30 @@ test("validateMonitorStatus：合法包放行，坏包整包拒收", () => {
 test("v128 接线：app.js 正式监控主干（快照校验 / status 校验 / 启停透传 / v129 自检下线）", () => {
   assert.match(app, /MONITOR_WATCH_MAX, MONITOR_CFG_KEY,/);
   assert.match(app, /normMonitorCfg, parseWebank, webankRows, validateMonitorStatus,/);
+  assert.match(app, /monitorRows, monitorChannelOf, monitorChannelCode, bankNotifyBody,/,
+    "v131 分流纯函数（微众货架轨 / 银行披露页轨）从 quota.js 引入");
   assert.match(app, /const raw = r\.snapshot;/, "快照只能来自服务 status 回包，绝不直连微众");
   assert.match(app, /const snap = parseWebank\(raw\)/, "快照必须过整包校验才进页面");
   assert.match(app, /if \(snap\.ok\) \{ MONITOR_ST\.snapshot = snap/, "坏快照不进页面");
+  assert.match(app, /putBankRows\(rawB\)|putBankRows\(JSON\.parse\(rawB\)\)/,
+    "银行披露轨回包也要落状态（v131）");
   assert.ok(!/fetch\(WEBANK_QUOTA_URL|fetch\(.*webank.*no_auth/.test(app),
     "网页层绝不直连微众（无 CORS），抓数归 Java 前台服务");
   assert.match(app, /nativeMonitor\("monitor-status"\)/);
+  assert.match(app, /nativeMonitor\("monitor-refresh", cfg\)/,
+    "v131：刷新带配置下发，Java 现场跑银行披露轨");
   assert.match(app, /validateMonitorStatus\(r\)/, "服务状态回包必须过整包校验");
+  assert.match(app, /validateBankRows\(/, "银行轨回包必须过整包校验（v131）");
   assert.match(app, /nativeMonitor\("monitor-start", cfg\)/);
   assert.match(app, /nativeMonitor\("monitor-stop"\)/);
   assert.match(app, /window\.NativeNav\.fetch\(id, JSON\.stringify\(cfg \? \{ mode, cfg \} : \{ mode \}\)\)/,
     "控制面必须走通用 NativeNav.fetch 透传（零新增桥出口）");
   assert.match(app, /网页版没有后台服务，实时监控与通知只在 App 内可用/, "网页端不假装能后台常驻");
-  assert.match(app, /if \(!cfg\.watch\.length\) \{ toast\("先在「关注的产品」里勾选至少一只/,
-    "没关注产品不许启动空跑的服务");
-  assert.match(app, /webankRows\(pool, MONITOR_ST\.snapshot, cfg\.watch\)/,
-    "关注清单来自我的可监控产品池，不是第三方池");
-  assert.match(app, /function monitorPoolProducts\(\)/, "已清仓产品不进监控池");
+  assert.match(app, /if \(!cfg\.watch\.length && !cfg\.bankWatch\.length\) \{ toast\("先在「关注的产品」里勾选至少一只/,
+    "两轨都没关注产品不许启动空跑的服务");
+  assert.match(app, /monitorRows\(pool, MONITOR_ST\.snapshot, cfg\.watch, cfg\.bankWatch, MONITOR_ST\.bankRows\)/,
+    "关注清单来自产品页全部产品按轨分流，不是第三方池");
+  assert.match(app, /function monitorPoolProducts\(\)/, "监控池 = 产品页全部产品（v131）");
   assert.match(app, /monitorStart, monitorStop, monitorRefresh, monitorCfgSave,/);
   assert.match(app, /monitorWatchOne, monitorWatchAll, monitorWatchNone,/);
   assert.match(app, /if \(MONITOR_ST\.status && MONITOR_ST\.status\.running\) nativeMonitor\("monitor-start", cfg\)/,
@@ -459,7 +466,9 @@ test("v128 独立页：四段式正式监控 UI + 微众/免责口径 + 第 5 ta
   assert.match(html, /GET \?param=&lt;URL 编码 JSON&gt;/, "服务卡片纠正 21400044 是方法用错");
   assert.match(html, /不是端点判死/);
   assert.match(html, /上次回包成功/, "手机出口可达性移到服务状态行的说明里");
-  assert.match(html, /已全部赎回（清仓）的产品不计入/, "监控池要排除已清仓产品");
+  assert.match(html, /与<b>产品页添加的所有产品一致<\/b>/, "监控池与产品页全量一致（v131）");
+  assert.match(html, /微众银行代销/, "微众代销走匿名货架的分流说明");
+  assert.match(html, /其他发行方/, "其他发行方走银行披露页的分流说明");
   for (const id of ["monStateHint", "monStatus", "monThreshold", "monQuiet",
                     "monWatchCount", "monPool", "monLog"]) {
     assert.ok(html.includes(`id="${id}"`), `缺 ${id} 容器`);
