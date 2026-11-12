@@ -2229,8 +2229,11 @@ test("v126 播报合并：更新此刻的 toast 带债市直抓口径；网页�
 /* ---- v128 · 额度监控（微众货架 + 我的产品池）：网页层只做配置/展示，抓数/常驻/通知归 Java 前台服务 ---- */
 test("v128 监控职责边界：网页层不设 JS 定时轮询、不直连微众，后台常驻/通知归 Java 前台服务", () => {
   const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
-  const seg = src.slice(src.indexOf("const MONITOR_ST ="), src.indexOf("const QUOTA_ST"));
-  assert.ok(seg.length > 3000, "监控主干段落定位失败（MONITOR_ST / QUOTA_ST 被改动）");
+  /* v129：阶段 1 探测（QUOTA_ST）已下线，切片终点改用 renderMonitor() 这个稳定锚点 */
+  const seg = src.slice(src.indexOf("const MONITOR_ST ="), src.indexOf("function renderMonitor() {"));
+  assert.ok(seg.length > 3000, "监控主干段落定位失败（MONITOR_ST / renderMonitor 被改动）");
+  assert.ok(!/const QUOTA_ST|quotaProbeRun\b|QUOTA_PROBE_MODE/.test(src),
+    "阶段 1 连通性自检入口已下线，不该再出现在网页层");
   /* 最容易改回去的坑：有人给网页层加 setInterval 做「实时监控」。WebView
      切后台会被系统冻结，那是假监控；真正的常驻必须是 Java 前台服务。 */
   assert.ok(!/setInterval\s*\(/.test(seg),
@@ -2250,8 +2253,10 @@ test("v128 监控职责边界：网页层不设 JS 定时轮询、不直连微�
   /* 配置归一化 / 关注限量 / 展示格式化都收口在 quota.js 纯函数，不在 app.js 重算第二套判据 */
   assert.match(seg, /monitorCfgPersist\(cfg\)/);
   assert.match(seg, /MONITOR_WATCH_MAX/);
-  assert.match(seg, /webankRows\(DATA\.products, MONITOR_ST\.snapshot, cfg\.watch\)/,
-    "展示行用纯函数且以台账产品为主，别在渲染层重算格式化");
+  assert.match(seg, /webankRows\(pool, MONITOR_ST\.snapshot, cfg\.watch\)/,
+    "展示行用纯函数且以可监控产品池为主，别在渲染层重算格式化");
+  assert.match(seg, /function monitorPoolProducts\(\)/,
+    "可监控产品池要过滤已清仓产品（全部赎回后不再进监控候选）");
 });
 
 test("v128 网页版降级：无 native 时如实报不可后台常驻，且有超时兜底", () => {

@@ -1044,6 +1044,7 @@ html:not(.inApp) .app-only{display:none}
         <button class="btn" style="flex:1" onclick="monitorStop()">停止</button>
       </div>
       <button class="btn full" style="margin-top:8px" onclick="monitorRefresh()">刷新额度与状态</button>
+      <div class="foot" style="text-align:left;padding-top:9px">正式监控走微众匿名货架接口 3（<b>GET ?param=&lt;URL 编码 JSON&gt;</b>，成功码 <b>21400000</b>），由 App 内前台服务直抓；早期探测包用 POST 探出的 21400044 是「方法用错」，<b>不是端点判死</b>。手机网络出口是否可达，看上面的「最近检查 / 上次回包成功」即可，无需单独自检。</div>
     </div>
     <div class="card">
       <div class="card-t"><h2>② 告警条件</h2></div>
@@ -1060,7 +1061,7 @@ html:not(.inApp) .app-only{display:none}
     </div>
     <div class="card">
       <div class="card-t"><h2>③ 关注的产品</h2><span class="hint" id="monWatchCount">0 只</span></div>
-      <div class="muted" style="font-size:12px;margin-bottom:8px">从<b>我的台账产品</b>里勾选要监控的；没有产品代码的会标「无法监控」。</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">从<b>我的台账产品</b>里勾选要监控的；没有产品代码的会标「无法监控」。<b>已全部赎回（清仓）的产品不计入</b>，从未建仓的产品仍可先盯额度。</div>
       <div style="display:flex;gap:8px;margin-bottom:9px">
         <button class="btn" style="flex:1" onclick="monitorWatchAll()">全选</button>
         <button class="btn" style="flex:1" onclick="monitorWatchNone()">清空</button>
@@ -1071,16 +1072,8 @@ html:not(.inApp) .app-only{display:none}
       <div class="card-t"><h2>④ 最近告警</h2></div>
       <div id="monLog"></div>
     </div>
-    <div class="card">
-      <details>
-        <summary class="muted" style="font-size:12.5px;cursor:pointer">附 · 数据源连通性自检（阶段 1 探测，保留）</summary>
-        <div class="note b" style="margin-top:9px">正式监控走微众匿名货架接口 3（<b>GET ?param=&lt;URL 编码 JSON&gt;</b>，成功码 21400000），已实测匿名可通。早期探测包用 POST 探出的 21400044 是「方法用错」，<b>不是端点判死</b>。下面的自检用于真机复核手机网络出口可达性。</div>
-        <select id="quotaPick" onchange="quotaPickSet(this.value)" style="width:100%;padding:9px 10px;margin-top:9px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;color:var(--ink);background:#fff"></select>
-        <div id="quotaCodes" class="muted" style="margin-top:9px;font-size:12px;line-height:1.6"></div>
-        <button class="btn full" style="margin-top:9px" onclick="quotaProbeRun()">开始连通性自检（仅 App 内）</button>
-        <div id="quotaResult" style="margin-top:9px"></div>
-      </details>
-    </div>
+    <!-- v129 · 阶段 1「数据源连通性自检」已移除：它探的是 POST + 裸数组（恒 21400044），
+         与正式接口 3 不是一回事，结果只会让人误判监控源不通。出口可达性看①服务状态。 -->
   </div>
 
 </div>

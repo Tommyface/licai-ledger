@@ -120,6 +120,9 @@ export function monthList(products, nowY, nowM) {
  * @param {ReadonlyArray<Trade>} trades
  * @param {number} y @param {number} m
  * @param {string} td 「今天」YYYY-MM-DD（当月报告要按今天截断，不能报出未来的数）
+ * @param {Record<string, {nav:number,shares:number,proceeds:number,costOut:number,realized:number,full:boolean}>} [settleMap]
+ *   赎回结算表（position.settleLedger）。传入时到账金额/已实现一律以它为准，
+ *   净值披露后自动回冲；不传则回落交易对象上的静态字段（供单测与旧数据兼容）。
  * @returns {{
  *   y: number, m: number, first: string, last: string, end: string, days: number, isCurrent: boolean,
  *   profit: number, daily: [string, number][], cum: [string, number][],
@@ -131,7 +134,7 @@ export function monthList(products, nowY, nowM) {
  *   holdN: number, best: {name: string, profit: number} | null
  * }}
  */
-export function monthReport(products, trades, y, m, td) {
+export function monthReport(products, trades, y, m, td, settleMap) {
   const b = monthBounds(y, m);
   const cur = td.slice(0, 7) === `${y}-${pad2(m)}`;
   /* 当月只算到今天：否则「月资产变动」会拿月末（未来）市值去比，数字凭空多一截 */
@@ -188,20 +191,24 @@ export function monthReport(products, trades, y, m, td) {
   /** @type {[string, number][]} */
   const cum = daily.map(([d, v]) => { run += v; return [d, run]; });
 
-  /* 现金流：一律按确认日归月（份额哪天到账、钱哪天进出就算哪天），
-     在途（确认日 > end）不计 —— 与 sharesOn 的口径一致。 */
+  /* 现金流：买入按确认日、赎回按到账日归月（钱哪天进出算哪天），
+     在途（日期 > end）不计 —— 与 sharesOn 的口径一致。
+     v129：赎回到账金额/已实现优先取 settleLedger 的动态结算值，
+     这样 T 日净值 T+1 披露后月报会跟着回冲，不会留着录入瞬间的静态错值。 */
   let buyN = 0, buyAmt = 0, sellN = 0, sellShares = 0, sellAmt = 0, realized = 0;
   for (const t of trades) {
-    const cd = t.confirmDate || t.tradeDate || "";
+    const cd = t.type === "sell"
+      ? (t.arrivalDate || t.confirmDate || t.tradeDate || "")
+      : (t.confirmDate || t.tradeDate || "");
     if (!cd || cd < b.first || cd > end) continue;
     if (t.type === "buy") { buyN++; buyAmt += Number(t.amount) || 0; }
     else {
       const sh = Number(t.shares) || 0;
       const nav = Number(t.confirmNav) || 0;
+      const s = settleMap && t.id ? settleMap[String(t.id)] : null;
       sellN++; sellShares += sh;
-      /* 到账金额优先用用户填的 amount（银行短信上那个数），没填才按份额×确认净值折算 */
-      sellAmt += Number(t.amount) || sh * nav;
-      realized += Number(t.realized) || 0;
+      sellAmt += s ? s.proceeds : (Number(t.amount) || sh * nav);
+      realized += s ? s.realized : (Number(t.realized) || 0);
     }
   }
   const netInflow = buyAmt - sellAmt;

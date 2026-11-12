@@ -109,19 +109,15 @@ test("probeRows：命中/未命中口径、ret_code、耗时都进文本；raw �
 });
 
 /* ---- v127 / v128 接线与版本钉子 ---- */
-test("接线：APP_VER 动态格式、import quota.js、go 分派、全局导出", () => {
+test("接线：APP_VER 动态格式、import quota.js、go 分派、全局导出（v129 自检已下线）", () => {
   assert.match(app, /const APP_VER = "v\d+";/);
   assert.match(app, /from "\.\/js\/core\/quota\.js"/);
   assert.match(app, /if \(pid === "pg-monitor"\) renderMonitor\(\);/);
-  assert.match(app, /quotaProbeRun, quotaPickSet,/, "两个内联 onclick 入口要挂到 window");
   assert.ok(!app.slice(app.indexOf("Object.assign(window, {")).includes("renderMonitor,"),
     "renderMonitor 只由 go() 内部调用，不该进 window 导出清单（会被判多余）");
-  assert.match(app, /JSON\.stringify\(\{ mode: QUOTA_PROBE_MODE, codes \}\)/,
-    "探测必须走通用 NativeNav.fetch 透传");
-  assert.match(app, /const chk = validateProbe\(r\);/, "native 回包必须过整包校验");
-  assert.match(app, /if \(!nativeFetchAvailable\(\)\) \{ toast\("额度连通性自检只在 App 内可用/,
-    "网页端要给 toast，不假装成功");
-  assert.match(app, /QUOTA_ST\.phase = "busy"/);
+  assert.match(app, /tradeFullRedeem,/, "「全部赎回」内联入口要挂到 window");
+  assert.ok(!/QUOTA_PROBE_MODE|quotaProbeRun|quotaPickSet|const QUOTA_ST/.test(app),
+    "阶段 1 自检入口（POST 裸数组探测）已从网页层移除");
 });
 
 test("独立页：pg-monitor 容器 + tabbar 第 5 tab + 首页下方入口", () => {
@@ -129,9 +125,8 @@ test("独立页：pg-monitor 容器 + tabbar 第 5 tab + 首页下方入口", ()
   assert.match(html, /data-p="pg-monitor" onclick="go\('pg-monitor'\)"/,
     "tabbar 必须有对应 tab，否则 go() 联动高亮会让导航全灭");
   assert.match(html, /onclick="go\('pg-monitor'\)"/);
-  assert.match(html, /id="quotaPick"/);
-  assert.match(html, /id="quotaResult"/);
-  assert.match(html, /id="quotaCodes"/);
+  assert.ok(!/id="quotaPick"|id="quotaResult"|id="quotaCodes"|quotaProbeRun\(\)/.test(html),
+    "阶段 1 自检挂点与入口已移除");
   const entrySeg = html.slice(html.indexOf("额度实时监控"), html.indexOf("额度实时监控") + 400);
   assert.match(entrySeg, /go\('pg-monitor'\)/);
   assert.ok(!entrySeg.includes("openSheet("));
@@ -145,11 +140,13 @@ test("版本钉子：APP_VER 与 CACHE 动态同版本 + SHELL 收 quota.js；�
   assert.ok(pkg.scripts.test.includes("tests/quota.test.mjs"), "新测试要登记进 npm test 硬编码清单");
 });
 
-test("本仓接线：mode:quota-probe 透传字符串在 app.js 里（私有仓由 s2 守）", () => {
-  assert.match(app, /mode: QUOTA_PROBE_MODE/, "网页层必须用 quota.js 导出的 mode 常量");
-  assert.match(app, /window\.NativeNav\.fetch\(id, JSON\.stringify\(\{ mode: QUOTA_PROBE_MODE, codes \}\)\)/,
-    "探测必须走通用 NativeNav.fetch 透传（零新增桥出口）");
-  assert.match(app, /if \(r\.ok !== true\)|r\.ok !== true/, "失败回包要拦住，不进结果区");
+test("v129：阶段 1 探测透传已从网页层下线（quota.js 纯函数仍由单测覆盖）", () => {
+  assert.ok(!/mode: QUOTA_PROBE_MODE|JSON\.stringify\(\{ mode: QUOTA_PROBE_MODE/.test(app),
+    "网页层不再发 POST 裸数组探测请求");
+  assert.ok(!/探测完成 ·|开始连通性自检/.test(app), "探测结果区文案已移除");
+  /* 正式监控仍走通用桥，零新增桥出口 */
+  assert.match(app, /window\.NativeNav\.fetch\(id, JSON\.stringify\(cfg \? \{ mode, cfg \} : \{ mode \}\)\)/);
+  assert.match(app, /上次回包成功（ret_code 21400000/, "出口可达性改由服务状态行反映");
 });
 
 /* ============================================================
@@ -422,7 +419,7 @@ test("validateMonitorStatus：合法包放行，坏包整包拒收", () => {
   }
 });
 
-test("v128 接线：app.js 正式监控主干（快照校验 / status 校验 / 启停透传 / 探测保留）", () => {
+test("v128 接线：app.js 正式监控主干（快照校验 / status 校验 / 启停透传 / v129 自检下线）", () => {
   assert.match(app, /MONITOR_WATCH_MAX, MONITOR_CFG_KEY,/);
   assert.match(app, /normMonitorCfg, parseWebank, webankRows, validateMonitorStatus,/);
   assert.match(app, /const raw = r\.snapshot;/, "快照只能来自服务 status 回包，绝不直连微众");
@@ -439,25 +436,27 @@ test("v128 接线：app.js 正式监控主干（快照校验 / status 校验 / �
   assert.match(app, /网页版没有后台服务，实时监控与通知只在 App 内可用/, "网页端不假装能后台常驻");
   assert.match(app, /if \(!cfg\.watch\.length\) \{ toast\("先在「关注的产品」里勾选至少一只/,
     "没关注产品不许启动空跑的服务");
-  assert.match(app, /webankRows\(DATA\.products, MONITOR_ST\.snapshot, cfg\.watch\)/,
-    "关注清单来自我的台账产品，不是第三方池");
+  assert.match(app, /webankRows\(pool, MONITOR_ST\.snapshot, cfg\.watch\)/,
+    "关注清单来自我的可监控产品池，不是第三方池");
+  assert.match(app, /function monitorPoolProducts\(\)/, "已清仓产品不进监控池");
   assert.match(app, /monitorStart, monitorStop, monitorRefresh, monitorCfgSave,/);
   assert.match(app, /monitorWatchOne, monitorWatchAll, monitorWatchNone,/);
   assert.match(app, /if \(MONITOR_ST\.status && MONITOR_ST\.status\.running\) nativeMonitor\("monitor-start", cfg\)/,
     "服务在跑时改配置要静默下发，不重启服务");
-  /* v127 探测能力保留在折叠区 */
-  assert.match(app, /window\.NativeNav\.fetch\(id, JSON\.stringify\(\{ mode: QUOTA_PROBE_MODE, codes \}\)\)/);
-  const rm = app.slice(app.indexOf("function renderMonitor() {"), app.indexOf("function renderMonitorProbe()"));
-  assert.match(rm, /renderMonitorProbe\(\);/);
+  /* v129：阶段 1 连通性自检（POST 裸数组）整块下线，页面只渲染正式监控 */
+  const rm = app.match(/function renderMonitor\(\) \{[\s\S]*?\n\}/)[0];
   assert.match(rm, /renderMonitorMain\(\);/);
+  assert.ok(!/renderMonitorProbe|quotaProbe/.test(rm), "自检渲染不该再挂在主干上");
 });
 
-test("v128 独立页：四段式正式监控 UI + 微众/免责口径 + 折叠区 + 第 5 tab", () => {
+test("v128 独立页：四段式正式监控 UI + 微众/免责口径 + 第 5 tab（v129 自检下线）", () => {
   assert.match(html, /<div class="page" id="pg-monitor">/);
   assert.match(html, /微众 · 我的产品池/);
   assert.match(html, /台账里自己添加的产品/, "关注对象是我的台账产品");
-  assert.match(html, /GET \?param=&lt;URL 编码 JSON&gt;/, "折叠区纠正 21400044 是方法用错");
+  assert.match(html, /GET \?param=&lt;URL 编码 JSON&gt;/, "服务卡片纠正 21400044 是方法用错");
   assert.match(html, /不是端点判死/);
+  assert.match(html, /上次回包成功/, "手机出口可达性移到服务状态行的说明里");
+  assert.match(html, /已全部赎回（清仓）的产品不计入/, "监控池要排除已清仓产品");
   for (const id of ["monStateHint", "monStatus", "monThreshold", "monQuiet",
                     "monWatchCount", "monPool", "monLog"]) {
     assert.ok(html.includes(`id="${id}"`), `缺 ${id} 容器`);
@@ -471,9 +470,8 @@ test("v128 独立页：四段式正式监控 UI + 微众/免责口径 + 折叠�
   assert.match(html, /不等于<\/b>登录微众 App 后个人实际可买额度/, "免责：匿名货架参考值≠个人可买额度");
   assert.match(html, /数据源为微众银行公开匿名接口/, "数据源口径");
   assert.match(html, /每 15 秒查一次/, "后台常驻归 Java 前台服务");
-  assert.match(html, /<details>/, "探测区收进折叠");
-  assert.match(html, /id="quotaPick"/);
-  assert.match(html, /id="quotaResult"/);
+  assert.ok(!/<details>|id="quotaPick"|id="quotaResult"|quotaProbeRun\(\)/.test(html),
+    "阶段 1 自检折叠区已移除，不再暴露误导性的 21400044 探测结果");
   assert.match(html, /data-p="pg-monitor" onclick="go\('pg-monitor'\)"/, "第 5 tab 联动高亮不落空");
 });
 

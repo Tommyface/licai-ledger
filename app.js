@@ -20,18 +20,19 @@ import { navSeries, navAt, latestNav, navHit, inQuietWindow, filterNavNotify, ne
 /* v106 第 0 期：逐源耗时统计（纯函数，单测在 tests/navstats.test.mjs）。
    只做记录，不参与任何抓取决策 —— 阈值要等这份实测分布出来再定。 */
 import { navStatsPush, navStatsSummary, NAVSTATS_TMO_RE } from "./js/core/navstats.js";
-/* v128：额度监控纯函数 —— 阶段 1 探测包（折叠区保留）+ 正式监控（微众匿名货架
-   接口3 整包校验 / 我的产品池展示行 / 双轨边沿判定 / 图三通知文案 / 状态校验）。
+/* v128 起：额度监控纯函数 —— 正式监控（微众匿名货架接口3 整包校验 /
+   我的产品池展示行 / 双轨边沿判定 / 图三通知文案 / 状态校验）。
+   v129：阶段 1 探测包（POST 裸数组、恒返 21400044）从网页层下线，
+   出口可达性改由服务状态行反映；quota.js 的探测纯函数保留但网页不再 import。
    抓数/判定/通知归 Java 前台服务，网页层零直连；微众 URL、状态码、文案模板等
    与 Java 同口径的常量都收口在 quota.js，网页层只 import 用得到的。
    单测在 tests/quota.test.mjs。 */
 import {
-  QUOTA_PROBE_MODE, quotaCandidateCodes, validateProbe, probeRows,
   MONITOR_WATCH_MAX, MONITOR_CFG_KEY,
   normMonitorCfg, parseWebank, webankRows, validateMonitorStatus,
 } from "./js/core/quota.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
-  computePosition } from "./js/domain/position.js";
+  computePosition, settleLedger } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
 import { configureCalendar, suggestTradeDates, tradeDaysBetween,
   isTradeDay, prevTradeDay } from "./js/domain/calendar.js";
@@ -124,7 +125,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v128";
+const APP_VER = "v129";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -627,7 +628,10 @@ function portfolio() {
   const totalAsset = rows.reduce((s, r) => s + r.pos.market, 0);
   const totalCost = rows.reduce((s, r) => s + r.pos.cost, 0);
   const totalPending = pendingRows.reduce((s, r) => s + r.pos.pendingAmount, 0);
-  const totalRealized = DATA.trades.filter(t => t.type === "sell").reduce((s, t) => s + (Number(t.realized) || 0), 0);
+  /* v129：累计已实现必须与持仓计算同源（computePosition 按 T 日结算净值现算），
+     不能再累加交易对象上写死的 t.realized —— 那个值在 T 日净值披露后不会回冲，
+     正是「赎回 295.84 / 银行实到 283.79」对不上的原因。 */
+  const totalRealized = all.reduce((s, r) => s + r.pos.realized, 0);
   return { rows, pendingRows, closedRows, totalAsset, totalCost, totalPending, totalRealized };
 }
 
@@ -743,7 +747,7 @@ function renderHome() {
   setStat("statReal", pf.totalRealized, true);
   /* 口径透明化：把「这笔钱是怎么算出来的」写在数字旁边，避免误读成官方数字 */
   const sellsN = DATA.trades.filter(t => t.type === "sell").length;
-  if ($("statRealCap")) $("statRealCap").textContent = `赎回结算 · 均价法扣减成本 · 已核算 ${sellsN} 笔赎回`;
+  if ($("statRealCap")) $("statRealCap").textContent = `按申请日净值结算 · 均价法扣减成本 · 已核算 ${sellsN} 笔赎回`;
   $("statCnt").textContent = pf.rows.length; $("statCnt").className = "v";
   if ($("appVer")) $("appVer").textContent = `版本 ${APP_VER}`;
   renderCal(); renderDetail();
@@ -1069,23 +1073,39 @@ function renderDetailBody() {
    ============================================================ */
 function renderTrade() {
   const ts = [...DATA.trades].sort((a, b) => (b.tradeDate || "").localeCompare(a.tradeDate || ""));
+  /* v129：赎回金额/已实现/结算净值一律取 settleLedger 的动态结算值。
+     交易对象上的 amount/realized 只是落盘快照，T 日净值披露后不会自己变，
+     直接拿来显示就会停在「70,295.80 / +295.84」与银行到账对不上。 */
+  const settles = settleLedger(DATA.products, DATA.trades, today());
+  const settled = (t, key, fallback) => {
+    const s = settles[String(t.id)];
+    return s ? s[key] : fallback;
+  };
   if (!ts.length) { $("tradeList").innerHTML = `<div class="empty">暂无交易记录</div>`; }
   else {
     $("tradeList").innerHTML = ts.map(t => {
       const p = DATA.products.find(x => x.id === t.prodId);
       const isBuy = t.type === "buy";
+      const amt = isBuy ? (Number(t.amount) || 0) : settled(t, "proceeds", Number(t.amount) || 0);
+      const rz = isBuy ? 0 : settled(t, "realized", Number(t.realized) || 0);
+      const nav = isBuy ? (Number(t.confirmNav) || 0) : settled(t, "nav", Number(t.confirmNav) || 0);
+      const navDate = isBuy ? (t.confirmNavDate || t.confirmDate || t.tradeDate || "-")
+                            : (t.settleDate || t.tradeDate || "-");
+      const arrival = t.arrivalDate || t.confirmDate || t.tradeDate || "";
+      const inTransit = !isBuy && !!arrival && arrival > today();
       return `<div class="sumline" style="align-items:flex-start">
         <div style="flex:1">
           <div style="font-weight:650;font-size:12.5px">${esc(p ? prodLabel(p) : "已删除产品")}
             <span class="wr" style="font-size:10.5px;padding:2px 6px;border-radius:5px;background:${isBuy ? '#e9f7f1' : '#fdeff0'};color:${isBuy ? '#0d7a52' : '#c02a34'};margin-left:4px">${isBuy ? "买入" : "赎回"}</span>
           </div>
           <div style="font-size:11px;color:var(--ink2);margin-top:3px">
-            ${t.tradeDate} · 确认 ${t.confirmNavDate || "-"} · 净值 ${Number(t.confirmNav || 0).toFixed(4)} · ${shown((Number(t.shares) || 0).toFixed(2))}份
+            ${t.tradeDate} · ${isBuy ? "确认" : "结算"} ${navDate} · 净值 ${nav.toFixed(4)} · ${shown((Number(t.shares) || 0).toFixed(2))}份
+            ${!isBuy && arrival ? `<br>到账 ${esc(arrival)} · ${inTransit ? "在途" : "已到账"} · 按 T 日净值结算` : ""}
           </div>
         </div>
         <div style="text-align:right">
-          <div style="font-weight:700;font-size:13px">${isBuy ? "-" : "+"}${shown(money(t.amount))}</div>
-          ${t.realized ? `<div style="font-size:11px" class="${tone(t.realized)}">实现 ${shown(signMoney(t.realized))}</div>` : ""}
+          <div style="font-weight:700;font-size:13px">${isBuy ? "-" : "+"}${shown(money(amt))}</div>
+          ${rz ? `<div style="font-size:11px" class="${tone(rz)}">实现 ${shown(signMoney(rz))}</div>` : ""}
           <button class="mini" style="margin-top:4px;padding:2px 8px;font-size:10.5px" onclick="delTrade('${t.id}')">删除</button>
         </div>
       </div>`;
@@ -1095,12 +1115,13 @@ function renderTrade() {
   const sells = DATA.trades.filter(t => t.type === "sell");
   if (!sells.length) $("realList").innerHTML = `<div class="empty">暂无赎回结算</div>`;
   else {
-    const tot = sells.reduce((s, t) => s + (Number(t.realized) || 0), 0);
+    const tot = sells.reduce((s, t) => s + settled(t, "realized", Number(t.realized) || 0), 0);
     $("realList").innerHTML = sells.map(t => {
       const p = DATA.products.find(x => x.id === t.prodId);
-      return `<div class="sumline"><span class="k">${esc(p ? prodLabel(p) : "-")} <span class="muted" style="font-size:11px">${t.tradeDate}</span></span>
-        <b class="${tone(t.realized)}">${shown(signMoney(t.realized))}</b></div>`;
-    }).join("") + `<div class="sumline"><span class="k">合计已实现 <span class="muted" style="font-size:10.5px">均价法扣减成本 · 已核算 ${sells.length} 笔赎回</span></span><b class="${tone(tot)}">${shown(signMoney(tot))}</b></div>`;
+      const rz = settled(t, "realized", Number(t.realized) || 0);
+      return `<div class="sumline"><span class="k">${esc(p ? prodLabel(p) : "-")} <span class="muted" style="font-size:11px">${t.settleDate || t.tradeDate}</span></span>
+        <b class="${tone(rz)}">${shown(signMoney(rz))}</b></div>`;
+    }).join("") + `<div class="sumline"><span class="k">合计已实现 <span class="muted" style="font-size:10.5px">按申请日净值结算 · 均价法扣减成本 · 已核算 ${sells.length} 笔赎回</span></span><b class="${tone(tot)}">${shown(signMoney(tot))}</b></div>`;
   }
 }
 
@@ -1468,10 +1489,11 @@ function renderTradeForm() {
     <div class="field"><label>交易日期</label>
       <div class="actin"><input type="date" id="tDate" value="${t}" onchange="onTradeDateChange()"><button class="mini" onclick="document.getElementById('tDate').value=''">清空</button></div>
     </div>
-    <div class="field"><label>交易确认日期</label><div class="actin"><input type="date" id="tConfirm" value="${sug.confirmDate}"></div><div id="tCalTip" class="tip"></div></div>
+    <div class="field"><label id="tConfirmLab">交易确认日期</label><div class="actin"><input type="date" id="tConfirm" value="${sug.confirmDate}"></div><div id="tCalTip" class="tip"></div></div>
     <div id="tTypeBox"></div>
     <div class="field"><label>确认净值日期</label><input type="date" id="tNavDate" value="${defNavDate}" onchange="autoFillNav()"></div>
     <div class="field"><label>确认净值</label><input type="number" step="0.0001" id="tNav" value="${defNav}" placeholder="留空则自动取该日净值" oninput="calcShares()"></div>
+    <div id="tSettleTip" class="tip"></div>
     <div id="tShareBox"></div>
     <div class="row-btn" style="margin-top:14px">
       <button class="btn gh" style="flex:1" onclick="closeSheet()">取消</button>
@@ -1492,6 +1514,8 @@ function onTradeDateChange() {
   if ($("tNavDate")) $("tNavDate").value = hit ? hit[0] : sug.navDate;
   if ($("tNav")) $("tNav").value = hit ? Number(hit[1]).toFixed(4) : "";
   renderCalTip(sug);
+  /* 赎回：净值日期始终锁申请日，不跟随「受理日向前取最近」的买入口径 */
+  if ($("tType") && $("tType").value === "sell") syncSettleNav();
   calcShares();
 }
 /* 推算说明：把「为什么是这个确认日」讲清楚，避免用户误以为系统乱改 */
@@ -1505,21 +1529,63 @@ function renderCalTip(sug) {
   el.textContent = `按交易日历推算：${sug.applyDate} 受理 → 确认日 ${sug.confirmDate}`
     + (why.length ? `（${why.join("；")}）` : "") + "，可手动修改。";
 }
+/* v129 · 赎回结算净值对齐申请日（T 日）。
+   净值型产品 T 日申请、按 T 日净值确认、T+1 到账；T 日净值通常 T+1 才披露，
+   所以未披露时先按最近披露值暂存，官方披露后由 settleNav() 自动回冲。
+   ⚠️ 这里必须用 navAt 精确命中 T 日；navHit 会向前取最近，正是旧版把
+   11-10 的 1.0156 当成 11-11 结算净值、多算 12.01 元的原因。 */
+function syncSettleNav() {
+  const p = DATA.products.find(x => x.id === UI.activePick);
+  const td = ($("tDate") && $("tDate").value) || today();
+  const exact = p ? navAt(p, td) : undefined;
+  const hasExact = exact !== undefined && exact !== null && exact !== "";
+  const fallback = p ? navHit(p, td) : null;
+  const v = hasExact ? Number(exact) : (fallback ? Number(fallback[1]) : 0);
+  if ($("tNavDate")) $("tNavDate").value = td;
+  if ($("tNav")) $("tNav").value = v ? Number(v).toFixed(4) : "";
+  const tip = $("tSettleTip");
+  if (tip) tip.textContent = hasExact
+    ? `按申请日 ${td} 已披露净值结算；T 日收益已含在净值里，不再另计当日盈亏。`
+    : `申请日 ${td} 净值尚未披露，暂按最近披露净值记账；官方披露后自动按 T 日净值回冲，无需改单。`;
+}
+function tradeFullRedeem() {
+  const p = DATA.products.find(x => x.id === UI.activePick);
+  if (!p) return toast("请先选择产品");
+  const pos = position(p);
+  if (pos.shares <= 0) return toast("当前没有可赎回份额");
+  /* 填完整精度，不用 toFixed(2)：69,217.84 份被截成 69,217.80 会留下
+     0.04 份尾差，产品永远留在「持仓中」并继续按净值计盈亏。 */
+  if ($("tShares")) $("tShares").value = String(pos.shares);
+  calcShares();
+  toast("已填入全部持仓份额，保存后按申请日净值结算", 2400);
+}
 function renderTradeForm2() {
   const type = $("tType").value;
   const p = DATA.products.find(x => x.id === UI.activePick);
   const pos = p ? position(p) : { shares: 0 };
+  const lab = $("tConfirmLab");
+  if (lab) lab.textContent = type === "sell" ? "资金到账日（T+1）" : "交易确认日期";
+  const tip = $("tSettleTip");
   if (type === "buy") {
     $("tTypeBox").innerHTML = `<div class="field"><label>买入金额（元）</label><input type="number" step="0.01" id="tAmount" placeholder="请输入交易金额" oninput="calcShares()"></div>`;
     $("tShareBox").innerHTML = `<div class="field"><label>份额（自动计算）</label><input id="tShare" value="自动计算" readonly style="background:#fafbfe;color:var(--ink2)"></div>`;
+    if (tip) tip.textContent = "";
+    if ($("tNavDate")) $("tNavDate").disabled = false;
   } else {
-    $("tTypeBox").innerHTML = `<div class="field"><label>赎回份额</label><input type="number" step="0.01" id="tShares" placeholder="当前可赎回 ${pos.shares.toFixed(2)} 份" oninput="calcShares()"><div class="tip">可赎回 ${pos.shares.toFixed(2)} 份</div></div>`;
+    $("tTypeBox").innerHTML = `<div class="field"><label>赎回份额</label>
+      <div class="actin"><input type="number" step="0.0001" id="tShares" placeholder="当前可赎回 ${pos.shares.toFixed(2)} 份" oninput="calcShares()">
+      <button class="mini" onclick="tradeFullRedeem()">全部赎回</button></div>
+      <div class="tip">可赎回 ${pos.shares.toFixed(2)} 份 · 点「全部赎回」自动填完整份额，避免尾差残留</div></div>`;
     $("tShareBox").innerHTML = `<div class="field"><label>预计到账（元）</label><input id="tAmountShow" value="自动计算" readonly style="background:#fafbfe;color:var(--ink2)"></div>`;
+    /* 赎回的净值日期由申请日锁定，不让用户改到 T-1 去（旧版就错在这里）。 */
+    if ($("tNavDate")) $("tNavDate").disabled = true;
+    syncSettleNav();
   }
   calcShares();
 }
 function autoFillNav() {
   const p = DATA.products.find(x => x.id === UI.activePick); if (!p) return;
+  if ($("tType") && $("tType").value === "sell") { syncSettleNav(); calcShares(); return; }
   const d = $("tNavDate").value;
   const hit = navHit(p, d);
   if (hit) $("tNav").value = Number(hit[1]).toFixed(4);
@@ -1567,12 +1633,26 @@ function saveTrade() {
     if (amt <= 0) return toast("请输入买入金额");
     t.amount = amt; t.shares = Number((amt / nav).toFixed(4));
   } else {
-    const sh = Number($("tShares").value) || 0;
+    /* v129 赎回：T 日申请 → 按 T 日净值结算 → T+1 到账。
+       ① settleDate 锁申请日，净值取该日已披露值（上面 existing 已强制覆盖 nav）；
+          未披露时 nav 是暂存的最近净值，等披露后 settleNav() 自动回冲。
+       ② 尾差按全额赎回取完整份额，避免「持仓中 1 / 持有金额 0.04」。
+       ③ amount/realized 只是落盘快照；页面展示与累计一律走 settleLedger 动态值。 */
     const pos = position(p);
-    if (sh <= 0) return toast("请输入赎回份额");
-    if (sh > pos.shares + 1e-6) return toast("赎回份额超过持仓 " + pos.shares.toFixed(2));
-    t.shares = sh; t.amount = Number((sh * nav).toFixed(2));
+    const shRaw = Number($("tShares").value) || 0;
+    if (shRaw <= 0) return toast("请输入赎回份额");
+    if (shRaw > pos.shares + 1e-6) return toast("赎回份额超过持仓 " + pos.shares.toFixed(2));
+    const eps = Math.max(0.1, pos.shares * 1e-6);
+    const full = pos.shares - shRaw <= eps;
+    const sh = full ? pos.shares : shRaw;
     const avg = pos.shares > 0 ? pos.cost / pos.shares : 0;
+    t.settleDate = tradeDate;
+    t.arrivalDate = confirmDate;
+    t.confirmNavDate = tradeDate;
+    t.confirmNav = nav;
+    t.fullRedeem = full;
+    t.shares = sh;
+    t.amount = Number((sh * nav).toFixed(2));
     t.realized = Number((sh * nav - avg * sh).toFixed(2));
   }
   DATA.trades.push(t);
@@ -3684,7 +3764,8 @@ function repLatest() {
   const list = monthList(DATA.products, now.getFullYear(), now.getMonth() + 1);
   let cur = null;
   for (const ym of list) {
-    const r = monthReport(DATA.products, DATA.trades, Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), td);
+    const r = monthReport(DATA.products, DATA.trades, Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), td,
+      settleLedger(DATA.products, DATA.trades, td));
     if (!cur) cur = r;
     if (r.profit) return r;
   }
@@ -3741,7 +3822,8 @@ function renderMonthly() {
   const nowY = now.getFullYear(), nowM = now.getMonth() + 1;
   const td = today();
   const y = UI.repY || nowY, m = UI.repM || nowM;
-  const r = monthReport(DATA.products, DATA.trades, y, m, td);
+  const r = monthReport(DATA.products, DATA.trades, y, m, td,
+    settleLedger(DATA.products, DATA.trades, td));
   const list = monthList(DATA.products, nowY, nowM);
   const ym = `${y}-${m < 10 ? "0" + m : m}`;
 
@@ -4703,9 +4785,14 @@ function monitorWatchOne(code) {
   monitorWatchSet(c.watch.includes(key) ? c.watch.filter(x => x !== key)
     : c.watch.concat([key]).slice(0, MONITOR_WATCH_MAX));
 }
-/** 全选 = 我的台账产品里有 prodCode 的全部（微众货架代码就是 prodCode）。 */
+/** 可监控产品池：排除已清仓（有过交易且份额归零），保留从未建仓的产品。 */
+function monitorPoolProducts() {
+  return (DATA.products || []).filter(p =>
+    !(hasAnyTrade(p) && position(p).shares <= 0));
+}
+/** 全选 = 可监控产品里有 prodCode 的全部（微众货架代码就是 prodCode）。 */
 function monitorWatchAll() {
-  const codes = (DATA.products || [])
+  const codes = monitorPoolProducts()
     .map(p => String((p && p.prodCode) || "").trim().toUpperCase())
     .filter(c => c && /^[A-Za-z0-9._-]{1,48}$/.test(c));
   const uniq = [...new Set(codes)].slice(0, MONITOR_WATCH_MAX);
@@ -4788,8 +4875,12 @@ async function monitorStop() {
 /** 我的产品池展示：以台账产品为主，叠加服务回传的微众快照状态。 */
 function monitorPoolHtml() {
   const cfg = monitorCfgLoad();
-  const rows = webankRows(DATA.products, MONITOR_ST.snapshot, cfg.watch);
-  if (!rows.length) return `<div class="note">台账里还没有产品，先去「产品」页添加。</div>`;
+  /* v129：已清仓产品（有过交易且份额归零）不再进监控池 —— 诚享7天29号
+     昨天全部赎回后还留在候选里，就是清仓状态没串到监控。从未建仓的产品
+     保留：用户可能就是想先盯额度再决定买，那不算清仓。 */
+  const pool = monitorPoolProducts();
+  const rows = webankRows(pool, MONITOR_ST.snapshot, cfg.watch);
+  if (!rows.length) return `<div class="note">台账里没有可监控的产品（已清仓的不计入），先去「产品」页添加。</div>`;
   const snapInfo = MONITOR_ST.snapshot
     ? `快照已更新（${MONITOR_ST.snapshot.products.length} 只命中）`
     : (MONITOR_ST.snapshotErr
@@ -4810,9 +4901,13 @@ function monitorStatusHtml() {
   if (!s) return `<div class="note">${MONITOR_ST.statusErr
     ? esc(MONITOR_ST.statusErr) : "读取状态中…"}<br>网页版可查看我的产品清单，后台常驻与系统通知只在 App 内可用。</div>`;
   const last = s.lastAt ? esc(new Date(s.lastAt).toLocaleTimeString("zh-CN")) : "—";
+  /* v129：真机出口可达性不再靠单独打一次探测请求，直接由服务轮询结果反映。 */
+  const okHint = s.lastOk === false
+    ? " · 上次抓取失败（下轮自动重试）"
+    : (s.lastOk === true ? " · 上次回包成功（ret_code 21400000 · 手机出口可达）" : "");
   return `<div class="note ${s.running ? "b" : ""}">${s.running ? "● 监控运行中" : "○ 未启动"} · 关注 ${Number(s.watchCount) || 0} 只` +
     ` · 轮询 ${Number(s.intervalSec) || 15} 秒 · 最近检查 ${last}` +
-    `${s.lastOk === false ? " · 上次抓取失败（下轮自动重试）" : ""}${MONITOR_ST.busy ? " · 处理中…" : ""}</div>`;
+    `${okHint}${MONITOR_ST.busy ? " · 处理中…" : ""}</div>`;
 }
 function monitorLogHtml() {
   const s = MONITOR_ST.status;
@@ -4838,104 +4933,15 @@ function renderMonitorMain() {
   if (!_monBooted) { _monBooted = true; monitorRefresh(); }
 }
 
-const QUOTA_ST = { phase: "idle", at: 0, err: "", pickId: "", rows: [], codes: [] };
-
-function nativeQuotaProbe(codes) {
-  return new Promise(resolve => {
-    if (!nativeFetchAvailable()) {
-      resolve({ ok: false, error: "网页版没有本机抓取，额度连通性自检只能在 App 内做" });
-      return;
-    }
-    const id = "qp" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-    let settled = false;
-    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
-    const timer = setTimeout(() => finish({ ok: false, error: "额度探测超时（60 秒）" }), 60000);
-    _navDone[id] = r => { clearTimeout(timer); finish(r); };
-    try {
-      window.NativeNav.fetch(id, JSON.stringify({ mode: QUOTA_PROBE_MODE, codes }));
-    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
-  });
-}
-
-/** 下拉选产品：只换 pickId 和候选码预览，绝不发请求（探测要用户明确点一次）。 */
-function quotaPickSet(id) {
-  QUOTA_ST.pickId = String(id || "");
-  renderMonitor();
-}
-
-/** 从台账产品派生候选渠道码（纯函数收口在 quota.js，这里只负责取字段）。 */
-function quotaCodesFor(pickId) {
-  const p = DATA.products.find(x => String(x.id || "") === String(pickId || ""))
-         || DATA.products[0];
-  if (!p) return { p: null, codes: [] };
-  return { p, codes: quotaCandidateCodes({
-    quotaCode: p.quotaCode || "", prodCode: p.prodCode || "",
-    regCode: regCodeOf(p) || "", code: p.code || "",
-  }) };
-}
-
-async function quotaProbeRun() {
-  if (QUOTA_ST.phase === "busy") return;
-  if (!nativeFetchAvailable()) { toast("额度连通性自检只在 App 内可用（网页版没有本机抓取）", 4200); return; }
-  const { codes } = quotaCodesFor(QUOTA_ST.pickId);
-  if (!codes.length) { toast("先添加一只带产品代码的产品", 3600); return; }
-  QUOTA_ST.phase = "busy"; QUOTA_ST.err = ""; QUOTA_ST.rows = [];
-  renderMonitor();
-  try {
-    const r = await nativeQuotaProbe(codes);
-    if (!r || r.ok !== true) throw new Error((r && r.error) || "本机探测没返回结果");
-    const chk = validateProbe(r);
-    if (!chk.ok) throw new Error("探测回包整包校验未过：" + chk.why);
-    QUOTA_ST.rows = probeRows(r);
-    QUOTA_ST.codes = (r.probe && r.probe.codes) || codes;
-    QUOTA_ST.phase = "done";
-  } catch (e) {
-    QUOTA_ST.phase = "err";
-    QUOTA_ST.err = String((e && e.message) || e);
-    QUOTA_ST.rows = [];
-  }
-  QUOTA_ST.at = Date.now();
-  renderMonitor();
-}
-
+/* v129 · 阶段 1「数据源连通性自检」下线。
+   它探的是 POST + 裸数组三种形状，返回恒为 21400044；正式监控走接口 3
+   GET ?param=<URL 编码 {"product_codes":[...]}>、成功码 21400000，两者不是一回事。
+   留着它只会让正式页永远显示「未命中产品数据」，被误读成监控源不通。
+   真机出口可达性改由①服务状态的「最近检查 / 上次抓取失败」直接反映 ——
+   MonitorService 本就每 15 秒轮询一次，无需再单独打一次错误请求。
+   quota.js 的纯函数与 App 内 native 探测能力保留，网页层不再暴露入口。 */
 function renderMonitor() {
-  renderMonitorProbe();
   renderMonitorMain();
-}
-function renderMonitorProbe() {
-  const box = $("quotaResult"), pick = $("quotaPick"), codeBox = $("quotaCodes");
-  if (!box || !pick) return;                 /* 老壳没有这一页，静默跳过 */
-  const list = DATA.products || [];
-  const cur = QUOTA_ST.pickId || (list[0] && list[0].id) || "";
-  pick.innerHTML = list.length
-    ? list.map(p => `<option value="${esc(p.id)}"${String(p.id) === String(cur) ? " selected" : ""}>${esc(p.name || p.code || p.id)}</option>`).join("")
-    : `<option value="">（台账里还没有产品）</option>`;
-  const { codes } = quotaCodesFor(cur);
-  QUOTA_ST.pickId = cur;
-  if (codeBox) codeBox.textContent = codes.length
-    ? `候选渠道码（${codes.length}）：${codes.join(" · ")}`
-    : "这只产品没有可用的产品代码 / 登记编码，先在「产品」里补上。";
-  const st = QUOTA_ST.phase;
-  if (st === "busy") {
-    box.innerHTML = `<div class="note b">正在用手机网络探测……（最多 60 秒，期间别切走页面）</div>`;
-    return;
-  }
-  if (st === "err") {
-    box.innerHTML = `<div class="note b">探测没完成：${esc(QUOTA_ST.err)}<br>还是旧壳的话先更新 App；手机网络不通也会照实报，不会假装成功。</div>`;
-    return;
-  }
-  if (st === "done") {
-    const head = `<div class="note b">探测完成 · ${esc(new Date(QUOTA_ST.at).toLocaleTimeString("zh-CN"))} · 共 ${QUOTA_ST.rows.length} 路。把这一屏截图发回，就能定下主用数据源和产品代码映射。</div>`;
-    const rows = QUOTA_ST.rows.map(r =>
-      `<div style="margin-top:9px;padding:9px 10px;border:1px solid var(--line);border-radius:10px">` +
-      `<b style="font-size:12.5px">${esc(r.label)}</b>` +
-      `<div style="font-size:12px;margin-top:3px">${esc(r.text)}</div>` +
-      (r.raw ? `<pre style="white-space:pre-wrap;word-break:break-all;font-size:11px;color:var(--ink3);margin:6px 0 0">${esc(r.raw)}</pre>` : "") +
-      `</div>`).join("");
-    box.innerHTML = head + rows;
-    return;
-  }
-  box.innerHTML = `<div class="note b">尚未自检。点上面按钮，用手机网络直抓一次，看出口通不通。<br>只回报 HTTP 状态 / 返回码 / 命中数 / 耗时，不落任何账号凭据。</div>`;
 }
 
 /** 用户点「🔍 检索」才走这里。绝不自动发起（铁律 #5）；读不到不清空上一轮结果。 */
@@ -8407,8 +8413,7 @@ Object.assign(window, {
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
   exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmPresetXf, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
-  queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
-  quotaProbeRun, quotaPickSet,
+  queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc, tradeFullRedeem,
   monitorStart, monitorStop, monitorRefresh, monitorCfgSave,
   monitorWatchOne, monitorWatchAll, monitorWatchNone,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
