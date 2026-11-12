@@ -342,9 +342,13 @@ export function marketPanelHtml(m, opts = {}) {
   const cap = String((m.meta && m.meta.capturedAt) || "");
   const capShort = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(cap)
     ? `${cap.slice(5, 10)} ${cap.slice(11, 16)}` : "";
+  /* v130：债市页（cut=false）标题行加「查于」时刻 —— 用户点「更新此刻」后，
+     数据日期可能仍是上一交易日（中债当日批次约 17:00 才发布），
+     「查于」能证明这次点击真的现抓了，时点取自 meta.capturedAt（整包校验必填）。 */
+  const checkedAt = (opts && opts.checkedAtText) ? ` · 查于 ${esc(String(opts.checkedAtText))}` : "";
   return `<div class="mkt-wrap" style="margin-top:12px">
     <div class="card-t" style="margin-bottom:6px"><h2 style="font-size:14px">债市行情</h2>
-      <span class="hint">${badge}${asOfShort ? ` · ${esc(asOfShort)}` : ""} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}（33 格）</span></div>
+      <span class="hint">${badge}${asOfShort ? ` · ${esc(asOfShort)}` : ""}${checkedAt} · 红 ${st.up} / 绿 ${st.down} / 白 ${st.flat} / 蓝 ${st.none}（33 格）</span></div>
     ${cut ? `<div class="mkt-cut"><b>${esc(cut)}</b><span class="mkt-cut-x">日终估值 · 现券 ${esc(MARKET_CLOSE_HHMM)} 收盘${capShort ? ` · 取于 ${esc(capShort)}` : ""}</span></div>` : ""}
     ${matrixHtml(groups.rate, MARKET_RATE_ISSUERS, MARKET_RATE_TENORS, "利率债（收益率曲线每日方向）")}
     ${matrixHtml(groups.credit, MARKET_CREDIT_ISSUERS, MARKET_CREDIT_TENORS, "信用债（中短票据曲线，AA+/AA 只发布至 1 年）")}

@@ -33,7 +33,8 @@ function grabFns(names) {
   parts.push(`return {${names.join(",")}};`);
   return new Function(parts.join("\n"))();
 }
-const F = grabFns(["marketHintText", "marketStateBar", "marketHeroHtml", "marketRefresh"]);
+const F = grabFns(["marketHintText", "marketStateBar", "marketHeroHtml", "marketRefresh",
+  "marketPendingText", "marketCheckedAtText"]);
 const stat = m => {
   const st = { up: 0, down: 0, flat: 0, none: 0 };
   for (const c of (m?.weather?.cells || [])) if (st[c.dir] !== undefined) st[c.dir] += 1;
@@ -78,11 +79,16 @@ const LIVE_ST_IDLE = { phase: "idle", at: 0, err: "", miss: [], lastTry: 0 };
 /* v119：状态条的「正在摸排」还要看日 K 那条线（HIST / HIST_ST）——
    只在没有旧数据时才算，否则 15 分钟才拉一次的东西会让按钮一直转。 */
 const HIST_ST_IDLE = { phase: "idle", at: 0, err: "", lastTry: 0 };
+/* v130：marketPendingText / pad / isTradeDay 直接展开进 runBar 作用域 ——
+   不能传 F.marketPendingText 函数对象：它的闭包定在 grabFns 作用域，
+   里面的 pad/isTradeDay 自由变量会在那个作用域解析（ReferenceError）。 */
+const padOk = n => String(n).padStart(2, "0");
 const runBar = (m, st, lst = LIVE_ST_IDLE, hist = null, hst = HIST_ST_IDLE) => new Function(
   "MARKET", "MARKET_ST", "esc", "marketCutoffText", "marketAgeText", "marketStaleText", "LIVE_ST",
-  "HIST", "HIST_ST",
-  `${F.marketStateBar.toString()}; return marketStateBar();`)(
-  m, st, s => String(s), cutOk, ageOk, () => "", lst, hist, hst);
+  "HIST", "HIST_ST", "pad", "isTradeDay",
+  `${F.marketPendingText.toString()}
+   ${F.marketStateBar.toString()}; return marketStateBar();`)(
+  m, st, s => String(s), cutOk, ageOk, () => "", lst, hist, hst, padOk, () => true);
 /* v118：宏观块的三个自由变量（MACRO / MACRO_ST / MC）也要注入 ——
    marketHeroHtml 里加了一段宏观渲染。MC 用替身，宏观自己的解析在 macro.test.mjs 真跑。 */
 const MC_OK = { macroBlockHtml: () => "<MACRO>" };
@@ -93,11 +99,11 @@ const liveToday = () => "2026-11-09";
 const NEWS_OK = () => "<NEWS>";
 const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_ST_IDLE, mc = MC_OK, nh = NEWS_OK) => new Function(
   "MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
-  "LV", "LIVE", "LIVE_ST", "isTradeDay", "marketAgeText",
+  "LV", "LIVE", "LIVE_ST", "isTradeDay", "marketAgeText", "marketCheckedAtText",
   "MACRO", "MACRO_ST", "MC", "today", "histView", "HIST_ST", "newsHeroHtml",
   `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(
   m, st, panelOk, aiOk, s => String(s), barOk, LV_OK, null, lst, () => true, ageOk,
-  macro, mst, mc, liveToday, () => null, HIST_ST_IDLE, nh);
+  F.marketCheckedAtText, macro, mst, mc, liveToday, () => null, HIST_ST_IDLE, nh);
 const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */
@@ -105,7 +111,11 @@ test("首页原交易中心快捷入口已换成债市晴雨表，底部交易 t
   const home = html.slice(html.indexOf('id="pg-home"'), html.indexOf('id="pg-trade"'));
   assert.ok(home.includes("<b>债市晴雨表</b>"), "首页找不到债市晴雨表入口");
   assert.ok(/onclick="openMarket\(\)"/.test(home), "整行没接 openMarket()");
-  assert.ok(home.includes('id="marketHint"'), "缺动态副标题挂点 marketHint");
+  /* v130：首页入口不显示小字（用户需求 4）—— marketHint / monthlyHint 挂点移除，
+     renderHome 侧的写入保留容错（if ($(...)) 判空），元素不在就跳过。 */
+  assert.ok(!home.includes('id="marketHint"'), "首页还留着 marketHint 小字（v130 应移除）");
+  assert.ok(!home.includes('id="monthlyHint"'), "首页还留着 monthlyHint 小字（v130 应移除）");
+  assert.ok(home.includes('entry slim'), "首页入口行没挂 slim 紧凑样式");
   assert.ok(!home.includes("<b>交易中心</b>"), "首页还留着交易中心快捷入口");
   assert.ok(!home.includes('onclick="go(\'pg-trade\')"'), "首页还留着旧跳转");
   /* 右侧「查看」按钮也走 openMarket，不残留 openTrade */
@@ -286,8 +296,10 @@ test("marketHeroHtml：状态条排在最前；降级分支也带状态条（没
   const b = src.indexOf("marketStateBar()");
   const p = src.indexOf("marketPanelHtml(MARKET");
   assert.ok(b > 0 && p > b, "状态条必须排在行情面板之前");
-  /* 截止时间只在状态条出现一次；面板里那行在债市页要关掉（同一屏两遍会让人以为看错了） */
-  assert.ok(src.includes("{ cut: false }"), "债市页面板没关掉重复的截止时间行");
+  /* 截止时间只在状态条出现一次；面板里那行在债市页要关掉（同一屏两遍会让人以为看错了）。
+     v130：面板标题行改为挂「查于 meta.capturedAt」时刻（数据日期可能仍是上一交易日）。 */
+  assert.ok(src.includes("{ cut: false, checkedAtText: marketCheckedAtText(MARKET) }"),
+    "债市页面板没关掉重复的截止时间行、也没接「查于」时刻");
   assert.ok(/const bar = marketStateBar\(\);/.test(src), "状态条没被两个分支共用");
   const none = runHero(null);
   assert.ok(none.includes("<BAR>"), "没数据时状态条被吞了，用户点不到「更新」");

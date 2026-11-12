@@ -21,10 +21,12 @@ const html = read("index.html");
 const newsSrc = read("js/core/news.js");
 const aySrc = read("js/core/anysearch.js");
 
-/* inline handler 里出现的「函数名(」——忽略 event/document 这类内建 */
+/* inline handler 里出现的「函数名(」——忽略 event/document 这类内建。
+   v130：折叠卡 summary 里的按钮写成 onclick="event.stopPropagation();fn()"，
+   允许这个前缀（抓分号后的真函数名），其余行为不变。 */
 function inlineNames(src) {
   const out = new Set();
-  const re = /(?:^|[^\w$])on[a-z]+="([A-Za-z_$][A-Za-z0-9_$]*)\(/g;
+  const re = /(?:^|[^\w$])on[a-z]+="(?:event\.stopPropagation\(\);)?([A-Za-z_$][A-Za-z0-9_$]*)\(/g;
   let m;
   while ((m = re.exec(src))) {
     if (m[1] === "if" || m[1] === "document") continue;

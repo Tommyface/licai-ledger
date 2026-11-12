@@ -100,6 +100,12 @@ html:not(.inApp) .app-only{display:none}
 .card-t{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
 .card-t h2{font-size:15px;margin:0;font-weight:650}
 .card-t .hint{font-size:11px;color:var(--ink3)}
+/* v130：可折叠卡片（交易页三卡 / 设置页提醒区）。summary 复用 card-t 布局，
+   去掉浏览器默认三角 marker；折叠态 summary 下边距归零让标题行更贴合。 */
+details.card > summary{list-style:none;cursor:pointer;-webkit-tap-highlight-color:transparent}
+details.card > summary::-webkit-details-marker{display:none}
+details.card > summary::marker{content:""}
+details.card:not([open]) > summary{margin-bottom:0}
 .tabs{display:flex;gap:6px;background:var(--track);padding:3px;border-radius:11px}
 .tabs button{
   border:0;background:transparent;padding:6px 12px;border-radius:9px;font-size:12.5px;
@@ -124,6 +130,10 @@ html:not(.inApp) .app-only{display:none}
 .entry .tx b{display:block;font-size:13px;font-weight:650}
 .entry .tx span{font-size:11px;color:var(--ink2)}
 .entry .go{background:var(--brand);color:#fff;border:0;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:650;font-family:inherit;cursor:pointer}
+/* v130：首页三行入口瘦身 —— 不显示小字、缩减宽度（用户需求 4）。 */
+.entry.slim{margin-top:9px;padding:8px 11px;gap:9px}
+.entry.slim .ic{width:28px;height:28px;border-radius:8px;font-size:13.5px}
+.entry.slim .go{padding:6px 12px;font-size:11.5px}
 /* ---------- 资产月报（v55，v56 起收益构成改按产品）：报告弹层里新加的三块视图 ----------
    横向条形（收益构成）、环形（资产构成）、两行式小结（交易小结）。
    收益构成一条两行：名字 + 金额在上、条在下。产品名是用户自己填的，长起来没有边界，
@@ -799,31 +809,29 @@ html:not(.inApp) .app-only{display:none}
         </div>
         <button class="mini" id="btnHide" onclick="toggleHide()">隐藏</button>
       </div>
-      <div class="entry" onclick="openMonthly()">
+      <!-- v130：入口行瘦身（用户需求：不显示小字、缩减宽度）——去掉副标题说明，
+           行高收紧；功能与动态提示照旧在各自弹层里。 -->
+      <div class="entry slim" onclick="openMonthly()">
         <div class="ic">报</div>
-        <div class="tx"><b>资产月报</b><span id="monthlyHint">按月看收益、构成与资产变动</span></div>
+        <div class="tx"><b>资产月报</b></div>
         <button class="go" onclick="event.stopPropagation();openMonthly()">查看</button>
       </div>
       <!-- v104：首页原「交易中心」快捷入口换成「债市晴雨表」。交易记录/新增交易
            仍从底部「交易」tab 进（pg-trade 内 + 新增交易按钮不变），功能不丢。 -->
-      <div class="entry" onclick="openMarket()">
+      <div class="entry slim" onclick="openMarket()">
         <div class="ic">晴</div>
-        <div class="tx"><b>债市晴雨表</b><span id="marketHint">债市行情 · 代入台账问模型</span></div>
+        <div class="tx"><b>债市晴雨表</b></div>
         <button class="go" onclick="event.stopPropagation();openMarket()">查看</button>
       </div>
       <!-- v63：体检的台账页入口。放整行而不是产品名后面挂个小链接 ——
            它是「组合级」的动作（选一只来查），跟资产月报、交易中心是同一层。 -->
-      <div class="entry" onclick="openAnaIndex()">
+      <div class="entry slim" onclick="openAnaIndex()">
         <div class="ic">检</div>
-        <div class="tx"><b>持仓体检</b><span>逐只核对净值、披露与费率口径</span></div>
+        <div class="tx"><b>持仓体检</b></div>
         <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
       </div>
-      <!-- v127：额度监控独立页入口（放在主页面入口区下方，与月报/晴雨表/体检同一层） -->
-      <div class="entry" onclick="go('pg-monitor')">
-        <div class="ic">额</div>
-        <div class="tx"><b>额度实时监控</b><span>阶段 2-A · 关注产品到量推通知</span></div>
-        <button class="go" onclick="event.stopPropagation();go('pg-monitor')">查看</button>
-      </div>
+      <!-- v130：首页监控入口整行移除（用户反馈首页臃肿；底部 tabbar 第 5 个
+           tab「监控」就是它的常驻入口，功能不丢）。 -->
     </div>
 
     <!-- 今日收益 -->
@@ -898,30 +906,33 @@ html:not(.inApp) .app-only{display:none}
        卡片 id（prodList / navList）与 renderProd() 的写入目标保持不变，
        迁移只动 HTML 位置，不动数据逻辑 —— 所有 renderProd() 调用点照旧生效。 -->
   <div class="page" id="pg-trade">
-    <div class="card">
-      <div class="card-t"><h2>我的产品</h2>
+    <!-- v130：用户需求 1 —— 「我的产品 / 净值数据 / 交易记录」三张卡改为可折叠。
+         details 默认展开（open）；summary 内的按钮是交互元素，点击不触发折叠，
+         再各自 stopPropagation 双保险；第四张「已实现收益」保持常显（结算一眼可对账）。 -->
+    <details class="card" open>
+      <summary class="card-t"><h2>我的产品</h2>
         <div style="display:flex;gap:6px;align-items:center">
-          <button class="mini" onclick="openLinkAdd()">粘贴添加</button>
-          <button class="btn pri" style="padding:8px 14px;font-size:12.5px" onclick="openProd()">+ 添加产品</button>
+          <button class="mini" onclick="event.stopPropagation();openLinkAdd()">粘贴添加</button>
+          <button class="btn pri" style="padding:8px 14px;font-size:12.5px" onclick="event.stopPropagation();openProd()">+ 添加产品</button>
         </div>
-      </div>
+      </summary>
       <div id="prodList"></div>
       <!-- v63：交易中心的体检入口，跟台账页那行是同一个落点（openAnaIndex）。
            放在「我的产品」这张卡里：体检判的就是产品列表 + 净值 + 披露三处数据齐不齐。 -->
       <div class="entry" onclick="openAnaIndex()">
         <div class="ic">检</div>
-        <div class="tx"><b>持仓体检</b><span>净值、披露、费率口径逐项核对，缺什么当场说</span></div>
+        <div class="tx"><b>持仓体检</b></div>
         <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
       </div>
-    </div>
-    <div class="card">
-      <div class="card-t"><h2>净值数据</h2><span class="hint">点产品名查看/补录净值</span></div>
+    </details>
+    <details class="card" open>
+      <summary class="card-t"><h2>净值数据</h2><span class="hint">点产品名查看/补录净值</span></summary>
       <div id="navList"></div>
-    </div>
-    <div class="card">
-      <div class="card-t"><h2>交易记录</h2><button class="btn pri" style="padding:8px 14px;font-size:12.5px" onclick="openTrade()">+ 新增交易</button></div>
+    </details>
+    <details class="card" open>
+      <summary class="card-t"><h2>交易记录</h2><button class="btn pri" style="padding:8px 14px;font-size:12.5px" onclick="event.stopPropagation();openTrade()">+ 新增交易</button></summary>
       <div id="tradeList"></div>
-    </div>
+    </details>
     <div class="card">
       <div class="card-t"><h2>已实现收益（赎回结算）</h2></div>
       <div id="realList"></div>
@@ -997,12 +1008,15 @@ html:not(.inApp) .app-only{display:none}
       <summary><h2>模型接入（可选）</h2></summary>
       <div id="llmBox"></div>
     </details>
-    <div class="card">
-      <div class="card-t"><h2>新净值提醒</h2></div>
+    <!-- v130：用户需求 2 —— 「新净值提醒」收进可折叠区块（与上两节同一套 set-collapse
+         手势）；App 内点「开启通知」不再弹「此环境不支持通知」，改走原生系统通知
+         （mode:"notify-*" 由 NavBridge 在 Java 层拦截，与 monitor-* 同一套口径）。 -->
+    <details class="card set-collapse" open>
+      <summary><h2>新净值提醒</h2></summary>
       <div id="notifyBox"></div>
       <button class="btn gh full" style="margin-top:10px" id="btnNotify" onclick="toggleNotify()">开启通知</button>
       <div class="foot" style="text-align:left;padding-top:9px" id="notifyTip"></div>
-    </div>
+    </details>
     <div class="card">
       <div class="card-t"><h2>备份与恢复</h2></div>
       <div class="row-btn">

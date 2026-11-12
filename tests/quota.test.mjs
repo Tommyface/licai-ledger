@@ -120,16 +120,19 @@ test("接线：APP_VER 动态格式、import quota.js、go 分派、全局导出
     "阶段 1 自检入口（POST 裸数组探测）已从网页层移除");
 });
 
-test("独立页：pg-monitor 容器 + tabbar 第 5 tab + 首页下方入口", () => {
+test("独立页：pg-monitor 容器 + tabbar 第 5 tab + 首页入口已移除（v130）", () => {
   assert.match(html, /<div class="page" id="pg-monitor">/, "独立页容器要在");
   assert.match(html, /data-p="pg-monitor" onclick="go\('pg-monitor'\)"/,
     "tabbar 必须有对应 tab，否则 go() 联动高亮会让导航全灭");
   assert.match(html, /onclick="go\('pg-monitor'\)"/);
   assert.ok(!/id="quotaPick"|id="quotaResult"|id="quotaCodes"|quotaProbeRun\(\)/.test(html),
     "阶段 1 自检挂点与入口已移除");
-  const entrySeg = html.slice(html.indexOf("额度实时监控"), html.indexOf("额度实时监控") + 400);
-  assert.match(entrySeg, /go\('pg-monitor'\)/);
-  assert.ok(!entrySeg.includes("openSheet("));
+  /* v130：首页不再放「额度实时监控」入口（用户反馈首页臃肿；底部第 5 tab 是常驻入口）。
+     首页段里既不许有入口卡片，pg-monitor 的独立页标题行照旧存在。 */
+  const home = html.slice(html.indexOf('id="pg-home"'), html.indexOf('id="pg-trade"'));
+  assert.ok(!home.includes('go(\'pg-monitor\')') && !home.includes("额度实时监控"),
+    "首页还留着监控入口（v130 应移除，走底部 tab）");
+  assert.match(html, /<h2>额度实时监控<\/h2>/, "独立页自身的标题行不能丢");
 });
 
 test("版本钉子：APP_VER 与 CACHE 动态同版本 + SHELL 收 quota.js；清单已登记", () => {

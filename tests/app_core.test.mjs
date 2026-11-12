@@ -700,7 +700,8 @@ test("月报：入口在内联 onclick 里调用，函数就必须挂到 window"
   assert.ok(bridge.slice(0, 2000).includes("openMonthly"), "openMonthly 没进 window 桥：首页入口点不动");
   assert.ok(bridge.slice(0, 2000).includes("setRepMonth"), "setRepMonth 没进 window 桥：月份芯片点不动");
   assert.ok(/onclick="openMonthly\(\)"/.test(HTML55), "首页没有资产月报入口");
-  assert.ok(/id="monthlyHint"/.test(HTML55), "入口没有提示行元素：renderHome 无处写月份与收益");
+  /* v130：首页入口不显示小字 —— monthlyHint 挂点移除，renderHome 的写入保留容错。 */
+  assert.ok(!/id="monthlyHint"/.test(HTML55), "首页还留着 monthlyHint 小字（v130 应移除）");
   assert.ok(/\$\("monthlyHint"\)/.test(fnBody("renderHome")),
     "renderHome 不刷新入口提示：改完数据那行字还停在旧月份");
 });

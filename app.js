@@ -125,7 +125,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v129";
+const APP_VER = "v130";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2783,6 +2783,7 @@ function marketStateBar() {
     || (HIST_ST.phase === "loading" && !HIST);
   const cut = MARKET ? marketCutoffText(MARKET) : "";
   const stale = MARKET ? marketStaleText(MARKET) : "";
+  const pend = !stale && MARKET ? marketPendingText(MARKET) : "";
   const age = marketAgeText(s.at);
   let liveLine;
   if (run) liveLine = `<span class="mkt-live">正在摸排：此刻层（东财）+ 日终层（私有仓）…</span>`;
@@ -2798,7 +2799,8 @@ function marketStateBar() {
   return `<div class="mkt-bar">
     <div class="mkt-bar-l">
       <b>${cut ? `日终 ${esc(cut)}<span class="mkt-cut-x" style="margin-left:7px;font-weight:400">现券收盘</span>` : "日终 · 暂无快照"}</b>
-      ${stale ? `<span class="mkt-stale">${esc(stale)}</span>` : ""}
+      ${stale ? `<span class="mkt-stale">${esc(stale)}</span>`
+        : pend ? `<span class="mkt-stale">${esc(pend)}</span>` : ""}
       ${liveLine}
     </div>
     <button class="mkt-upd" ${run ? "disabled" : ""} onclick="marketRefreshAll({force:true})">${run ? "摸排中…" : "↻ 更新此刻"}</button>
@@ -2807,6 +2809,15 @@ function marketStateBar() {
 /** 债市页上部：状态条 + 此刻层 + 日终矩阵 + 复制快照。
     v116：此刻层在最上（点按钮就是为它），日终层在下；两层各自带时点与口径说明。
     日终层没数据时给降级说明，此刻层照常显示 —— 一层缺了不许把另一层也挡住。 */
+/** v130：债市页标题行的「查于」时刻 —— 取整包校验必填的 meta.capturedAt（MM-DD HH:MM）。
+    点「更新」后数据日期可能仍是上一交易日（中债当日批次约 17:00 发布），
+    「查于」能证明这次点击真的现抓了。 */
+function marketCheckedAtText(m) {
+  const cap = String((m && m.meta && m.meta.capturedAt) || "");
+  return /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(cap)
+    ? `${cap.slice(5, 10)} ${cap.slice(11, 16)}` : "";
+}
+
 function marketHeroHtml() {
   const bar = marketStateBar();
   const phase = LV.livePhaseOf(new Date(), isTradeDay);
@@ -2823,7 +2834,7 @@ function marketHeroHtml() {
       : (HIST_ST.phase === "ok" && HIST_ST.err) ? HIST_ST.err : "",
   });
   const daily = MARKET
-    ? marketPanelHtml(MARKET, { cut: false })
+    ? marketPanelHtml(MARKET, { cut: false, checkedAtText: marketCheckedAtText(MARKET) })
       + (marketAiTextSafe(MARKET)
         ? `<div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照文本（aiText）</button></div>`
         : "")
@@ -5122,6 +5133,19 @@ function marketStaleText(m) {
   return `行情落后 ${n} 个交易日（云端每日 3 次更新，最近一次若在收盘前，当日曲线要等下一轮）`;
 }
 
+/** v130：交易日 17:00 前的「当日批次还没发」提示 —— 这不是落后，是数据源尚未出当日。
+    周末/节假日（今天不是交易日）不提示：上一交易日批次就是最新；
+    17:00 之后还没有当日数据则走 marketStaleText 的「落后 N 个交易日」。 */
+function marketPendingText(m, now = new Date()) {
+  const asOf = m && m.weather && m.weather.asOf;
+  if (!asOf) return "";
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  if (asOf >= today || !isTradeDay(today)) return "";
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (mins >= 17 * 60) return "";
+  return `今日（${today.slice(5)}）批次预计约 17:00 发布 —— 现在点「更新」拿到的就是最新已发布批次（${asOf.slice(5)} 收盘）`;
+}
+
 /** 只重画「会变的那两块」：债市页的行情区 + 首页副标题。
     不整页 renderMarketSheet —— 那会把用户正在输、还没发的对话框内容冲掉。 */
 function marketPaint() {
@@ -7088,7 +7112,27 @@ function isStandalone() {
       || navigator.standalone === true;
   } catch (e) { return false; }
 }
-function canNotify() { return NOTIFY.on && notifyPermission() === "granted"; }
+function canNotify() {
+  /* v130：App 内没有 Web Notification API，但通知由原生层承担（mode:"notify-*"）——
+     只要用户开了开关就算「能通知」，权限检查在 Java 侧做（未授如实回错）。 */
+  return NOTIFY.on && (notifyPermission() === "granted" || nativeFetchAvailable());
+}
+
+/* v130：App 内原生通知的通用桥调用（复用 NativeNav.fetch，mode:"notify-*" 在
+   NavBridge 的 Java 层拦截 —— 与 monitor-* 同一套「零新增 @JavascriptInterface」口径。
+   notify-test = 开关确认通知；notify-push = 新净值/抓取失败提醒（title/body 透传）。 */
+function nativeNotifyCall(payload) {
+  return new Promise(resolve => {
+    const id = "np" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: "通知请求超时（15 秒）" }), 15000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      window.NativeNav.fetch(id, JSON.stringify(payload));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
 
 /* 发系统通知。
    优先走 SW 的 showNotification —— iOS(16.4+) 只认这条路径，
@@ -7097,6 +7141,13 @@ function canNotify() { return NOTIFY.on && notifyPermission() === "granted"; }
 async function pushNotify(title, body) {
   if (!canNotify()) return false;
   const opts = { body: body, icon: "./icon-192.png", badge: "./icon-192.png", tag: "licai-nav", lang: "zh-CN" };
+  /* v130：App 内走原生系统通知（WebView 没有 Web Notification API） */
+  if (nativeFetchAvailable()) {
+    try {
+      const r = await nativeNotifyCall({ mode: "notify-push", title: String(title || ""), body: String(body || "") });
+      return !!(r && r.ok === true);
+    } catch (e) { return false; }
+  }
   try {
     const reg = (navigator.serviceWorker && navigator.serviceWorker.getRegistration)
       ? await navigator.serviceWorker.getRegistration() : null;
@@ -7110,6 +7161,20 @@ async function toggleNotify() {
   if (NOTIFY.on) {
     NOTIFY.on = false; saveNotify(); renderNotify();
     toast("已关闭新净值提醒"); return;
+  }
+  /* v130：App 内 —— 走原生系统通知，不再弹浏览器话术误导。
+     notify-test 让 Java 侧发一条确认通知；权限未授时 Java 如实回错，
+     网页把「去系统设置允许」的路径讲清楚。 */
+  if (nativeFetchAvailable()) {
+    const r = await nativeNotifyCall({ mode: "notify-test" });
+    if (!r || r.ok !== true) {
+      toast("通知没开成：" + ((r && r.error) || "原生层没回应") +
+        "。请到系统设置 → 应用 → 理财台账 → 通知里允许后再试", 4800);
+      renderNotify(); return;
+    }
+    NOTIFY.on = true; saveNotify(); renderNotify();
+    toast("已开启提醒（App 内走系统通知）", 3200);
+    return;
   }
   if (!notifySupported()) {
     toast("此环境不支持通知。iPhone 请先「分享 → 添加到主屏幕」，再从桌面图标打开", 4600);
@@ -7132,8 +7197,28 @@ function renderNotify() {
   const box = $("notifyBox"); if (!box) return;
   const btn = $("btnNotify"), tip = $("notifyTip");
   const supported = notifySupported(), perm = notifyPermission();
+  const inApp = nativeFetchAvailable();
   if (btn) btn.textContent = NOTIFY.on ? "关闭通知" : "开启通知";
   let html = "", t = "";
+  /* v130：App 内分支 —— 通知由原生系统承担，如实讲清「页面退后台比对暂停」的边界。 */
+  if (inApp) {
+    if (NOTIFY.on) {
+      const mutedNote = (Number(NOTIFY.muted) || 0) > 0
+        ? `<div class="note" style="margin-top:6px">夜间免打扰已静默 <b>${NOTIFY.muted}</b> 条提醒（窗口过后不补发 —— 云端没新数据就不会再触发）。<span class="more" onclick="clearNotifyMuted()">清除记录</span></div>` : "";
+      html = `<div class="note g">已开启（App 系统通知）。抓到<b>新净值</b>、或云端<b>抓取失败</b>时会发通知；同一条净值只提醒一次。</div>
+      <div class="note" style="margin-top:6px">
+        <label><input type="checkbox" id="nqQuiet" ${NOTIFY.quietOn ? "checked" : ""} onchange="setNotifyQuiet(this.checked)"> 夜间免打扰（${String(NOTIFY.quietStart).padStart(2, "0")}:00–${String(NOTIFY.quietEnd).padStart(2, "0")}:00 不发系统通知）</label>
+        <label style="display:block;margin-top:4px"><input type="checkbox" id="nqThresh" ${NOTIFY.threshOn ? "checked" : ""} onchange="setNotifyThresh(this.checked)"> 日变动超过 <input type="number" id="nqThreshVal" value="${NOTIFY.thresh}" step="0.1" min="0" style="width:56px" onchange="setNotifyThreshVal(this.value)"> % 才提醒</label>
+      </div>${mutedNote}`;
+    } else {
+      html = `<div class="note">开启后由 App 发<b>系统通知</b>（不是浏览器通知）：抓到<b>新净值</b>、或云端<b>抓取失败</b>时提醒。<br>
+            同一条净值只提醒一次；默认夜间（00:00–07:00）免打扰，可在开启后调整。</div>`;
+    }
+    t = "App 内边界：页面退到后台会被系统冻结，定时比对随之暂停（开着台账页面时有效）；需要后台常驻的提醒请用「额度实时监控」的前台服务。";
+    box.innerHTML = html;
+    if (tip) tip.innerHTML = t;
+    return;
+  }
   if (!supported) {
     html = `<div class="note">当前环境不支持系统通知（可能是 <code>file://</code> 打开、或 App 内嵌浏览器）。<br>
             抓取异常仍会在首页顶部显示<b>告警条</b>。</div>`;
