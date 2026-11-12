@@ -20,9 +20,16 @@ import { navSeries, navAt, latestNav, navHit, inQuietWindow, filterNavNotify, ne
 /* v106 第 0 期：逐源耗时统计（纯函数，单测在 tests/navstats.test.mjs）。
    只做记录，不参与任何抓取决策 —— 阈值要等这份实测分布出来再定。 */
 import { navStatsPush, navStatsSummary, NAVSTATS_TMO_RE } from "./js/core/navstats.js";
-/* v127：额度监控（阶段 1 探测包）纯函数 —— 候选渠道码派生 / 探测回包整包校验 /
-   结果行格式化。单测在 tests/quota.test.mjs。正式额度监控（后台常驻 + 通知）是阶段 3。 */
-import { QUOTA_PROBE_MODE, quotaCandidateCodes, validateProbe, probeRows } from "./js/core/quota.js";
+/* v128：额度监控纯函数 —— 阶段 1 探测包（折叠区保留）+ 正式监控（微众匿名货架
+   接口3 整包校验 / 我的产品池展示行 / 双轨边沿判定 / 图三通知文案 / 状态校验）。
+   抓数/判定/通知归 Java 前台服务，网页层零直连；微众 URL、状态码、文案模板等
+   与 Java 同口径的常量都收口在 quota.js，网页层只 import 用得到的。
+   单测在 tests/quota.test.mjs。 */
+import {
+  QUOTA_PROBE_MODE, quotaCandidateCodes, validateProbe, probeRows,
+  MONITOR_WATCH_MAX, MONITOR_CFG_KEY,
+  normMonitorCfg, parseWebank, webankRows, validateMonitorStatus,
+} from "./js/core/quota.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
   computePosition } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
@@ -117,7 +124,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v127";
+const APP_VER = "v128";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -4635,12 +4642,202 @@ function nativeMarketFetch() {
   });
 }
 
-/* ---------- v127：额度监控（阶段 1 · 连通性探测）----------
-   复用 NativeNav.fetch 那条桥，Python 侧调打进 APK 的 navsources/quota_probe.py。
-   本阶段只回答一个问题：手机网络（运营商出口）到底能不能通微众匿名货架 /
-   建行产品页？云端/CI 出口实测恒 21400044，这一步只能真机做。
-   ★ 不是正式监控：不做后台常驻、不推通知、不显示额度（阶段 2/3 才做）。
-   ★ 网页版没有本机抓取：按钮给 toast，不假装成功。零新增桥出口。 */
+/* ============================================================
+   v128 正式监控 · 微众匿名货架 + 我的产品池（本轮重构）
+   ------------------------------------------------------------
+   职责边界（本轮最要紧的一条）：
+    · 数据源 = 微众匿名货架接口 3（GET ?param=<URL 编码 JSON>）。该接口无 CORS 头，
+      网页层直读必被浏览器拦 —— 所以抓数 / 判定 / 系统通知全部归 Java 前台服务
+      （手机网络直抓，切后台、锁屏照跑）；WebView 里的 JS setInterval 是假监控。
+    · 监控对象 = 「我的产品池」(台账 DATA.products)，取 prodCode 作货架代码，
+      由用户勾选子集（cfg.watch）。绝不臆造台账 → 渠道码映射。
+    · 网页层 = 我的产品清单 / 勾选配置 / 启停 / 展示服务回传的最新快照。
+    · 控制面走通用 NativeNav.fetch 的 mode:"monitor-*"，零新增桥出口。
+   ★ 免责：额度是匿名货架参考值，≠ 登录微众 App 后个人实际可买额度；
+     sale_status 只把 12(在售)/13(已售罄) 两张截图实证的码做语义映射，其余保留原值。
+   ============================================================ */
+const MONITOR_ST = {
+  cfg: null, snapshot: null, snapshotErr: "", status: null, statusErr: "", busy: false,
+};
+let _monBooted = false;
+
+function monitorCfgLoad() {
+  if (MONITOR_ST.cfg) return MONITOR_ST.cfg;
+  try {
+    const raw = localStorage.getItem(MONITOR_CFG_KEY);
+    MONITOR_ST.cfg = normMonitorCfg(raw ? JSON.parse(raw) : {});
+  } catch (e) { MONITOR_ST.cfg = normMonitorCfg({}); }
+  return MONITOR_ST.cfg;
+}
+function monitorCfgPersist(cfg) {
+  MONITOR_ST.cfg = normMonitorCfg(cfg);
+  try { localStorage.setItem(MONITOR_CFG_KEY, JSON.stringify(MONITOR_ST.cfg)); } catch (e) {}
+  return MONITOR_ST.cfg;
+}
+/** 服务在跑时把新配置静默下发一次（Java 侧覆盖式，不重启服务）。 */
+function monitorPushCfgIfRunning(cfg) {
+  if (MONITOR_ST.status && MONITOR_ST.status.running) nativeMonitor("monitor-start", cfg);
+}
+function monitorCfgSave() {
+  const c = monitorCfgLoad();
+  const th = $("monThreshold"), q = $("monQuiet");
+  const next = monitorCfgPersist({
+    watch: c.watch,
+    threshold: th ? th.value : c.threshold,
+    quietHours: q ? q.value : c.quietHours,
+    tradeFrom: c.tradeFrom, tradeTo: c.tradeTo,
+  });
+  renderMonitor();
+  monitorPushCfgIfRunning(next);
+  return next;
+}
+function monitorWatchSet(list) {
+  const c = monitorCfgLoad();
+  const next = monitorCfgPersist({ ...c, watch: list });
+  renderMonitor();
+  monitorPushCfgIfRunning(next);
+}
+function monitorWatchOne(code) {
+  const c = monitorCfgLoad(), key = String(code || "").trim().toUpperCase();
+  if (!key) return;
+  monitorWatchSet(c.watch.includes(key) ? c.watch.filter(x => x !== key)
+    : c.watch.concat([key]).slice(0, MONITOR_WATCH_MAX));
+}
+/** 全选 = 我的台账产品里有 prodCode 的全部（微众货架代码就是 prodCode）。 */
+function monitorWatchAll() {
+  const codes = (DATA.products || [])
+    .map(p => String((p && p.prodCode) || "").trim().toUpperCase())
+    .filter(c => c && /^[A-Za-z0-9._-]{1,48}$/.test(c));
+  const uniq = [...new Set(codes)].slice(0, MONITOR_WATCH_MAX);
+  if (!uniq.length) { toast("台账里还没有带产品代码的产品", 3200); return; }
+  monitorWatchSet(uniq);
+}
+function monitorWatchNone() { monitorWatchSet([]); }
+
+/** 通用 native 控制面（沿用 v126/v127 的 _navDone 回调表，零新增桥出口）。 */
+function nativeMonitor(mode, cfg) {
+  return new Promise(resolve => {
+    if (!nativeFetchAvailable()) {
+      resolve({ ok: false, error: "网页版没有后台服务，实时监控与通知只在 App 内可用" });
+      return;
+    }
+    const id = "mn" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    let settled = false;
+    const finish = r => { if (settled) return; settled = true; delete _navDone[id]; resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: "服务响应超时（20 秒）" }), 20000);
+    _navDone[id] = r => { clearTimeout(timer); finish(r); };
+    try {
+      window.NativeNav.fetch(id, JSON.stringify(cfg ? { mode, cfg } : { mode }));
+    } catch (e) { clearTimeout(timer); finish({ ok: false, error: String(e) }); }
+  });
+}
+
+/** 服务状态 + 最近一次微众快照（都由 monitor-status 回包带回）。
+    ★ 网页层绝不直连微众（无 CORS）；快照用 parseWebank 独立整包校验，坏包不进页面。 */
+async function monitorStatusFetch() {
+  const r = await nativeMonitor("monitor-status");
+  const chk = validateMonitorStatus(r);
+  if (!chk.ok) {
+    MONITOR_ST.status = null;
+    MONITOR_ST.snapshot = null;
+    MONITOR_ST.statusErr = (r && r.ok === false && r.error) ? String(r.error) : chk.why;
+    return;
+  }
+  MONITOR_ST.status = r.status; MONITOR_ST.statusErr = "";
+  const raw = r.snapshot;
+  if (raw != null && raw !== "") {
+    const snap = parseWebank(raw);
+    if (snap.ok) { MONITOR_ST.snapshot = snap; MONITOR_ST.snapshotErr = ""; }
+    else { MONITOR_ST.snapshot = null; MONITOR_ST.snapshotErr = snap.why; }
+  } else {
+    MONITOR_ST.snapshot = null; MONITOR_ST.snapshotErr = "";
+  }
+}
+async function monitorRefresh() {
+  if (MONITOR_ST.busy) return;
+  MONITOR_ST.busy = true;
+  await monitorStatusFetch();
+  MONITOR_ST.busy = false;
+  renderMonitor();
+}
+async function monitorStart() {
+  const cfg = monitorCfgLoad();
+  if (!cfg.watch.length) { toast("先在「关注的产品」里勾选至少一只", 3600); return; }
+  if (MONITOR_ST.busy) return;
+  MONITOR_ST.busy = true; renderMonitor();
+  const r = await nativeMonitor("monitor-start", cfg);
+  const chk = validateMonitorStatus(r);
+  if (!chk.ok) {
+    toast((r && r.ok === false && r.error) ? String(r.error) : "开启失败：" + chk.why, 4200);
+  } else {
+    MONITOR_ST.status = r.status; MONITOR_ST.statusErr = "";
+    toast("监控已开启；切后台、锁屏也会继续查并推通知", 3600);
+  }
+  MONITOR_ST.busy = false; renderMonitor();
+}
+async function monitorStop() {
+  if (MONITOR_ST.busy) return;
+  MONITOR_ST.busy = true; renderMonitor();
+  const r = await nativeMonitor("monitor-stop");
+  const chk = validateMonitorStatus(r);
+  if (!chk.ok) toast((r && r.ok === false && r.error) ? String(r.error) : "停止失败", 3600);
+  else { MONITOR_ST.status = r.status; MONITOR_ST.statusErr = ""; toast("监控已停止", 2600); }
+  MONITOR_ST.busy = false; renderMonitor();
+}
+
+/** 我的产品池展示：以台账产品为主，叠加服务回传的微众快照状态。 */
+function monitorPoolHtml() {
+  const cfg = monitorCfgLoad();
+  const rows = webankRows(DATA.products, MONITOR_ST.snapshot, cfg.watch);
+  if (!rows.length) return `<div class="note">台账里还没有产品，先去「产品」页添加。</div>`;
+  const snapInfo = MONITOR_ST.snapshot
+    ? `快照已更新（${MONITOR_ST.snapshot.products.length} 只命中）`
+    : (MONITOR_ST.snapshotErr
+        ? "快照校验未过：" + esc(MONITOR_ST.snapshotErr)
+        : "销售状态由 App 内前台服务抓取（网页版不直连微众）");
+  const head = `<div class="muted" style="font-size:12px;margin-bottom:8px">我的产品 ${rows.length} 只 · ${esc(snapInfo)}</div>`;
+  return head + rows.map(r =>
+    `<label style="display:flex;align-items:center;gap:9px;padding:8px 2px;border-top:1px solid var(--line);font-size:12.5px;${r.hasCode ? "cursor:pointer" : "opacity:.6"}">` +
+    `<input type="checkbox" ${r.watched ? "checked" : ""} ${r.hasCode ? `onclick="monitorWatchOne('${esc(r.code)}')"` : "disabled"}
+       style="width:17px;height:17px;flex:none" />` +
+    `<span style="flex:1;min-width:0"><b style="font-weight:600">${esc(r.name)}</b>` +
+    `<div class="muted" style="font-size:11px">${r.hasCode ? esc(r.code) : "缺产品代码，无法监控"} · ${esc(r.statusText)}</div></span>` +
+    `<span style="flex:none;text-align:right"><b>${esc(r.quotaText)}</b>` +
+    `<div class="muted" style="font-size:11px">参考额度</div></span></label>`).join("");
+}
+function monitorStatusHtml() {
+  const s = MONITOR_ST.status;
+  if (!s) return `<div class="note">${MONITOR_ST.statusErr
+    ? esc(MONITOR_ST.statusErr) : "读取状态中…"}<br>网页版可查看我的产品清单，后台常驻与系统通知只在 App 内可用。</div>`;
+  const last = s.lastAt ? esc(new Date(s.lastAt).toLocaleTimeString("zh-CN")) : "—";
+  return `<div class="note ${s.running ? "b" : ""}">${s.running ? "● 监控运行中" : "○ 未启动"} · 关注 ${Number(s.watchCount) || 0} 只` +
+    ` · 轮询 ${Number(s.intervalSec) || 15} 秒 · 最近检查 ${last}` +
+    `${s.lastOk === false ? " · 上次抓取失败（下轮自动重试）" : ""}${MONITOR_ST.busy ? " · 处理中…" : ""}</div>`;
+}
+function monitorLogHtml() {
+  const s = MONITOR_ST.status;
+  const list = (s && Array.isArray(s.recent)) ? s.recent : [];
+  if (!list.length) return `<div class="muted" style="font-size:12px">还没有告警。开启监控后，关注的产品开售或参考额度到量会记在这里并推一条系统通知。</div>`;
+  return list.slice(0, 20).map(a =>
+    `<div style="padding:8px 2px;border-top:1px solid var(--line);font-size:12.5px">` +
+    `<b>${esc(a.kind || "告警")}</b> ${esc(a.name || a.code || "")}` +
+    `<div>${esc(a.text || "")}</div>` +
+    `<div class="muted" style="font-size:11px">${esc(a.time || "")}</div></div>`).join("");
+}
+function renderMonitorMain() {
+  const cfg = monitorCfgLoad();
+  const th = $("monThreshold"), q = $("monQuiet");
+  if (th && document.activeElement !== th) th.value = String(cfg.threshold);
+  if (q && document.activeElement !== q) q.value = cfg.quietHours;
+  const wc = $("monWatchCount"); if (wc) wc.textContent = cfg.watch.length + " 只";
+  const pb = $("monPool"); if (pb) pb.innerHTML = monitorPoolHtml();
+  const sb = $("monStatus"); if (sb) sb.innerHTML = monitorStatusHtml();
+  const hint = $("monStateHint");
+  if (hint) hint.textContent = MONITOR_ST.status && MONITOR_ST.status.running ? "运行中" : "未启动";
+  const lg = $("monLog"); if (lg) lg.innerHTML = monitorLogHtml();
+  if (!_monBooted) { _monBooted = true; monitorRefresh(); }
+}
+
 const QUOTA_ST = { phase: "idle", at: 0, err: "", pickId: "", rows: [], codes: [] };
 
 function nativeQuotaProbe(codes) {
@@ -4702,6 +4899,10 @@ async function quotaProbeRun() {
 }
 
 function renderMonitor() {
+  renderMonitorProbe();
+  renderMonitorMain();
+}
+function renderMonitorProbe() {
   const box = $("quotaResult"), pick = $("quotaPick"), codeBox = $("quotaCodes");
   if (!box || !pick) return;                 /* 老壳没有这一页，静默跳过 */
   const list = DATA.products || [];
@@ -8208,6 +8409,8 @@ Object.assign(window, {
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc,
   quotaProbeRun, quotaPickSet,
+  monitorStart, monitorStop, monitorRefresh, monitorCfgSave,
+  monitorWatchOne, monitorWatchAll, monitorWatchNone,
   saveProduct, saveSyncCfg, saveTrade, setBdInst, setBdSort, setDetInst, setDetSort, setDetTab, setGroup, setProdOv, setRepMonth, setSwitchTarget,
   setProdRange, setRange, setNotifyQuiet, setNotifyThresh, setNotifyThreshVal, clearNotifyMuted, syncPull, syncPush, toggleBdCols, toggleHide, toggleNotify, triggerFetch
 });

@@ -2225,3 +2225,41 @@ test("v126 播报合并：更新此刻的 toast 带债市直抓口径；网页�
                        src.indexOf("/** 启动时：先装缓存"));
   assert.ok(!mr.includes('reason === "manual"'), "marketRefresh 里的播报死代码没删干净");
 });
+
+/* ---- v128 · 额度监控（微众货架 + 我的产品池）：网页层只做配置/展示，抓数/常驻/通知归 Java 前台服务 ---- */
+test("v128 监控职责边界：网页层不设 JS 定时轮询、不直连微众，后台常驻/通知归 Java 前台服务", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const seg = src.slice(src.indexOf("const MONITOR_ST ="), src.indexOf("const QUOTA_ST"));
+  assert.ok(seg.length > 3000, "监控主干段落定位失败（MONITOR_ST / QUOTA_ST 被改动）");
+  /* 最容易改回去的坑：有人给网页层加 setInterval 做「实时监控」。WebView
+     切后台会被系统冻结，那是假监控；真正的常驻必须是 Java 前台服务。 */
+  assert.ok(!/setInterval\s*\(/.test(seg),
+    "网页层不许用 setInterval 假监控（后台常驻归 Java 前台服务）");
+  assert.match(seg, /const MONITOR_ST = \{/, "缺监控状态收敛对象");
+  assert.match(seg, /if \(!_monBooted\) \{ _monBooted = true; monitorRefresh\(\); \}/,
+    "只在首次进入页面时刷一次，不循环");
+  /* ★ 微众接口无 CORS，网页层直连必被拦：快照只能来自 native status 回包 */
+  assert.ok(!/fetch\(WEBANK_QUOTA_URL|fetch\(\s*WEBANK/.test(seg),
+    "网页层绝不直连微众（无 CORS），抓数归 Java 前台服务");
+  assert.match(seg, /const raw = r\.snapshot;/, "快照来自服务 status 回包");
+  assert.match(seg, /const snap = parseWebank\(raw\)/, "快照必须过整包校验");
+  /* 控制面走通用 NativeNav.fetch 的 mode:monitor-*，零新增桥出口 */
+  assert.match(seg, /function nativeMonitor\(mode, cfg\)/);
+  assert.match(seg, /window\.NativeNav\.fetch\(id, JSON\.stringify\(cfg \? \{ mode, cfg \} : \{ mode \}\)\)/);
+  assert.match(seg, /validateMonitorStatus\(r\)/);
+  /* 配置归一化 / 关注限量 / 展示格式化都收口在 quota.js 纯函数，不在 app.js 重算第二套判据 */
+  assert.match(seg, /monitorCfgPersist\(cfg\)/);
+  assert.match(seg, /MONITOR_WATCH_MAX/);
+  assert.match(seg, /webankRows\(DATA\.products, MONITOR_ST\.snapshot, cfg\.watch\)/,
+    "展示行用纯函数且以台账产品为主，别在渲染层重算格式化");
+});
+
+test("v128 网页版降级：无 native 时如实报不可后台常驻，且有超时兜底", () => {
+  const src = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const nm = src.slice(src.indexOf("function nativeMonitor(mode, cfg)"),
+                       src.indexOf("async function monitorStatusFetch"));
+  assert.match(nm, /if \(!nativeFetchAvailable\(\)\)/);
+  assert.match(nm, /网页版没有后台服务，实时监控与通知只在 App 内可用/, "不假装能后台常驻");
+  assert.match(nm, /服务响应超时（20 秒）/, "前台服务没回包时不能让按钮永远转圈");
+  assert.match(nm, /delete _navDone\[id\]/, "回调表要清理，避免累积");
+});

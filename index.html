@@ -821,7 +821,7 @@ html:not(.inApp) .app-only{display:none}
       <!-- v127：额度监控独立页入口（放在主页面入口区下方，与月报/晴雨表/体检同一层） -->
       <div class="entry" onclick="go('pg-monitor')">
         <div class="ic">额</div>
-        <div class="tx"><b>额度实时监控</b><span>阶段 1 · 手机网络连通性自检</span></div>
+        <div class="tx"><b>额度实时监控</b><span>阶段 2-A · 关注产品到量推通知</span></div>
         <button class="go" onclick="event.stopPropagation();go('pg-monitor')">查看</button>
       </div>
     </div>
@@ -1027,26 +1027,59 @@ html:not(.inApp) .app-only{display:none}
     </div>
   </div>
 
-  <!-- v127 · 额度监控（阶段 1 连通性探测）独立页：与 pg-home/pg-trade/pg-prod/pg-set 平级 -->
+  <!-- v128 · 额度监控正式页：微众匿名货架 + 我的产品池。
+       抓数/判定/通知归 Java 前台服务（微众接口无 CORS，网页层零直连）；
+       这里只做配置、我的产品清单、服务状态与日志。阶段 1 探测收进折叠区。 -->
   <div class="page" id="pg-monitor">
     <div class="card">
-      <div class="card-t"><h2>额度实时监控</h2><span class="hint">阶段 1 · 连通性自检</span></div>
-      <div class="note b">这一步只验证「手机网络出口能不能查到额度」，还不是正式监控：不做后台常驻、不推通知、不显示额度。装好包点一次自检，把结果截图发回，就能定下主用数据源和产品代码映射。</div>
+      <div class="card-t"><h2>额度实时监控</h2><span class="hint">微众 · 我的产品池</span></div>
+      <div class="note b">监控您<b>台账里自己添加的产品</b>（取产品代码作微众匿名货架代码）。勾选关注、设好阈值后点「开启监控」，App 内前台服务会直连微众公开接口，按交易时段每 15 秒查一次销售状态与参考额度；产品<b>开售</b>或<b>参考额度到量</b>就推一条系统通知，切到后台、锁屏也继续跑。网页版可查看我的产品清单，但<b>后台常驻与通知只在 App 内可用</b>。</div>
+      <div class="foot" style="text-align:left;padding-top:9px">额度是<b>匿名货架参考值</b>，<b>不等于</b>登录微众 App 后个人实际可买额度；销售状态仅对「在售/已售罄」两态做展示，其余原值如实标注。数据源为微众银行公开匿名接口，可能变更或停服，请以微众 App 核对为准。</div>
     </div>
     <div class="card">
-      <div class="card-t"><h2>① 选一只台账产品</h2></div>
-      <select id="quotaPick" onchange="quotaPickSet(this.value)" style="width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;color:var(--ink);background:#fff"></select>
-      <div id="quotaCodes" class="muted" style="margin-top:9px;font-size:12px;line-height:1.6"></div>
-      <button class="btn pri full" style="margin-top:11px" onclick="quotaProbeRun()">开始连通性自检（仅 App 内）</button>
-    </div>
-    <div class="card">
-      <div class="card-t"><h2>② 探测结果</h2></div>
-      <div id="quotaResult"></div>
-    </div>
-    <div class="card">
-      <div class="foot" style="text-align:left;padding-top:10px">
-        额度为匿名货架参考值，不等于登录银行 App 后个人实际可买额度。探测只回报 HTTP 状态、返回码与命中数，不落任何账号凭据；原始片段只截前 200 字且仅来自公开匿名接口。
+      <div class="card-t"><h2>① 服务</h2><span class="hint" id="monStateHint">未启动</span></div>
+      <div id="monStatus" class="note">读取服务状态中…</div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn pri" style="flex:1" onclick="monitorStart()">开启监控</button>
+        <button class="btn" style="flex:1" onclick="monitorStop()">停止</button>
       </div>
+      <button class="btn full" style="margin-top:8px" onclick="monitorRefresh()">刷新额度与状态</button>
+    </div>
+    <div class="card">
+      <div class="card-t"><h2>② 告警条件</h2></div>
+      <div class="muted" style="font-size:12px;line-height:1.7">关注的产品里，销售状态从其他值<b>跃迁到「在售·可购买」</b>（开售），或参考额度从低于阈值<b>跨到 ≥ 阈值</b>（额度到量），就推一条通知；同一产品每轮最多一条、边沿触发不重复推。交易时段 09:00–17:00 每 15 秒查一次，其余时间降频到 5 分钟。首次开启只记基线，不补推历史。</div>
+      <div style="margin-top:10px;font-size:13px">参考额度阈值（元）
+        <input id="monThreshold" type="number" min="1000" step="1000" onchange="monitorCfgSave()"
+               style="width:100%;padding:9px 10px;margin-top:5px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;color:var(--ink);background:#fff" />
+      </div>
+      <div style="margin-top:9px;font-size:13px">免打扰（如 00:00-01:00，支持跨午夜）
+        <input id="monQuiet" type="text" maxlength="11" placeholder="00:00-01:00" onchange="monitorCfgSave()"
+               style="width:100%;padding:9px 10px;margin-top:5px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;color:var(--ink);background:#fff" />
+      </div>
+      <div class="muted" style="margin-top:8px;font-size:12px">免打扰时段内照常记录、不推通知，避免结束后重复推历史。</div>
+    </div>
+    <div class="card">
+      <div class="card-t"><h2>③ 关注的产品</h2><span class="hint" id="monWatchCount">0 只</span></div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">从<b>我的台账产品</b>里勾选要监控的；没有产品代码的会标「无法监控」。</div>
+      <div style="display:flex;gap:8px;margin-bottom:9px">
+        <button class="btn" style="flex:1" onclick="monitorWatchAll()">全选</button>
+        <button class="btn" style="flex:1" onclick="monitorWatchNone()">清空</button>
+      </div>
+      <div id="monPool"></div>
+    </div>
+    <div class="card">
+      <div class="card-t"><h2>④ 最近告警</h2></div>
+      <div id="monLog"></div>
+    </div>
+    <div class="card">
+      <details>
+        <summary class="muted" style="font-size:12.5px;cursor:pointer">附 · 数据源连通性自检（阶段 1 探测，保留）</summary>
+        <div class="note b" style="margin-top:9px">正式监控走微众匿名货架接口 3（<b>GET ?param=&lt;URL 编码 JSON&gt;</b>，成功码 21400000），已实测匿名可通。早期探测包用 POST 探出的 21400044 是「方法用错」，<b>不是端点判死</b>。下面的自检用于真机复核手机网络出口可达性。</div>
+        <select id="quotaPick" onchange="quotaPickSet(this.value)" style="width:100%;padding:9px 10px;margin-top:9px;border:1px solid var(--line);border-radius:9px;font-family:inherit;font-size:13px;color:var(--ink);background:#fff"></select>
+        <div id="quotaCodes" class="muted" style="margin-top:9px;font-size:12px;line-height:1.6"></div>
+        <button class="btn full" style="margin-top:9px" onclick="quotaProbeRun()">开始连通性自检（仅 App 内）</button>
+        <div id="quotaResult" style="margin-top:9px"></div>
+      </details>
     </div>
   </div>
 
