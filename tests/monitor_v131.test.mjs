@@ -3,7 +3,7 @@
    微众匿名货架，其他发行方的监控银行产品页面（中国理财网信披平台按登记编码）。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import {
   monitorChannelOf, monitorChannelCode, monitorRows, normMonitorCfg,
   validateBankRows, bankRowText, bankNotifyBody,
@@ -125,8 +125,13 @@ test("v131 版本钉：APP_VER / CACHE 同步 v131", () => {
 
 /* 私有仓契约（文件在 ../data24 不在网页仓，这里用源码级断言钉住网页层可见的行为）：
    Python 抓取入口 monitor_bank 与 Java runBankOnce 的契约由私有仓
-   tests/test_android_s2.py 的 v131 断言覆盖（跨仓 verify-web.sh 在 CI 跑）。 */
+   tests/test_android_s2.py 的 v131 断言覆盖（跨仓 verify-web.sh 在 CI 跑）。
+   ★ 双仓同检出时才跑：公开仓 CI 只 checkout licai-ledger，没有私有仓
+     data24/ ——守卫先例见 app_core.test.mjs「licai-ledger 单独检出时无此文件」。 */
 test("v131 私有仓三件套本地存在且契约锚点齐", () => {
+  if (!existsSync(new URL("../../data24/navsources/monitor_bank.py", import.meta.url))) {
+    return;                                      // licai-ledger 单独检出时无私有仓
+  }
   const mb = readFileSync(new URL("../../data24/navsources/monitor_bank.py", import.meta.url), "utf8");
   assert.match(mb, /def monitor_bank\(payload\)/);
   assert.match(mb, /fetch_chinawealth/, "抓取复用 chinawealth 会话签名，不写第二套");
