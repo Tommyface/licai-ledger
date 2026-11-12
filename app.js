@@ -126,7 +126,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v131";
+const APP_VER = "v132";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -4985,11 +4985,13 @@ function monitorPoolHtml() {
     const chip = isBank
       ? `<span class="wr" style="font-size:10px;padding:1px 5px;border-radius:5px;background:#eef2fb;color:#3956a8;margin-left:4px">披露页</span>`
       : `<span class="wr" style="font-size:10px;padding:1px 5px;border-radius:5px;background:#fdf3e7;color:#a86a12;margin-left:4px">微众货架</span>`;
-    const right = isBank
-      ? `<div class="muted" style="font-size:11px">最新披露净值</div>`
-      : `<div class="muted" style="font-size:11px">参考额度</div>`;
+    const qchip = r.quotaSource
+      ? `<span class="wr" style="font-size:10px;padding:1px 5px;border-radius:5px;background:#eaf6ee;color:#26733f;margin-left:4px">建行清单</span>`
+      : "";
+    const right = `<div class="muted" style="font-size:11px">${esc(r.quotaLabel || (isBank ? "最新披露净值" : "参考额度"))}</div>`;
     const sub = r.hasCode
-      ? `${esc(r.code)}${chip} · ${esc(r.statusText)}`
+      ? `${esc(r.code)}${chip}${qchip} · ${esc(r.statusText)}`
+        + (r.quotaFrom ? ` · 额度清单 ${esc(r.quotaFrom)}` : "")
       : `缺产品代码与登记编码，无法监控`;
     return `<label style="display:flex;align-items:center;gap:9px;padding:8px 2px;border-top:1px solid var(--line);font-size:12.5px;${r.hasCode ? "cursor:pointer" : "opacity:.6"}">` +
       `<input type="checkbox" ${r.watched ? "checked" : ""} ${r.hasCode ? `onclick="monitorWatchOne('${esc(r.code)}','${isBank ? "bank" : "webank"}')"` : "disabled"}

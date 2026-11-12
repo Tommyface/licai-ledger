@@ -398,8 +398,24 @@ function shelfHit(snapshot, code) {
   return snapshot.products.some(x => x && String(x.code == null ? "" : x.code).trim().toUpperCase() === code);
 }
 
+/** 建行「参考剩余额度」文案（v132）。与建行产品页 setSplLmtDQ11 同判据、
+ *  SplLmt 单位为元：>1000万 →「大于1000万」；>1万 →「X万元」；<0 →「不限额度」；
+ *  否则「X元」。口径只此一份：Python 回包只给原始 quota 数值，不在 Java/Python
+ *  写第二份格式化；与微众轨 fmtYuan 的「X 元」并列但互不相同（数据源不同）。 */
+export function ccbQuotaText(q) {
+  const n = Number(q);
+  if (q == null || String(q).trim() === "" || !Number.isFinite(n)) return "—";
+  if (n < 0) return "不限额度";
+  const yuan = Math.trunc(n);
+  if (yuan > 1e7) return "大于1000万";
+  if (yuan > 1e4) return String(Math.trunc(yuan / 1e4)) + "万元";
+  return String(yuan) + "元";
+}
+
 /** 监控池展示行（v131 取代网页层直接调 webankRows）：
- *  全部产品逐只给行，channel 标轨；bank 轨取 bankSnap 的披露快照。 */
+ *  全部产品逐只给行，channel 标轨；bank 轨取 bankSnap 的披露快照。
+ *  v132：建行系命中额度时，右侧改显「参考剩余额度」（quotaLabel / quotaSource），
+ *  未命中则维持原「最新披露净值」口径，绝不把缺失额度伪装成 0。 */
 export function monitorRows(pool, snapshot, watch, bankWatch, bankSnap) {
   const list = Array.isArray(pool) ? pool : [];
   const w = new Set((Array.isArray(watch) ? watch : []).map(x => String(x).toUpperCase()));
@@ -418,6 +434,8 @@ export function monitorRows(pool, snapshot, watch, bankWatch, bankSnap) {
     const hit = ch === "webank" ? (snapshot && snapshot.ok
       ? (snapshot.products || []).find(x => x && x.code === code) : null) : null;
     const brow = ch === "bank" ? bankByCode[code] : null;
+    const q = brow ? brow.quota : undefined;
+    const hasQuota = q != null && String(q).trim() !== "" && Number.isFinite(Number(q));
     return {
       channel: ch,
       code,
@@ -430,8 +448,13 @@ export function monitorRows(pool, snapshot, watch, bankWatch, bankSnap) {
         ? (brow ? bankRowText(brow) : "银行披露页 · 待抓取")
         : (hit ? saleText(hit.saleStatus) : "App 内可查"),
       quotaText: ch === "bank"
-        ? (brow && brow.nav != null ? String(brow.nav) : "—")
+        ? (hasQuota ? ccbQuotaText(q) : (brow && brow.nav != null ? String(brow.nav) : "—"))
         : (hit ? (hit.availQuota == null ? "不限额度" : fmtYuan(hit.availQuota) + " 元") : "—"),
+      /* v132：右侧小标签与额度溯源（建行在售清单命中的产品代码）。 */
+      quotaLabel: ch === "bank"
+        ? (hasQuota ? "参考剩余额度·建行清单" : "最新披露净值") : "参考额度",
+      quotaSource: hasQuota ? String(brow.quotaSource || "ccb") : "",
+      quotaFrom: hasQuota ? String(brow.quotaFrom || "") : "",
       err: brow ? String(brow.err || "") : "",
     };
   });
@@ -452,9 +475,23 @@ export function bankNotifyBody(name, code, nav, navDate, iso) {
     "披露口径来自中国理财网信披平台，请在发行银行 App 核对。";
 }
 
+/** 参考剩余额度变化通知正文（与 MonitorCtl.bankQuotaNotifyBody 同口径）。
+ *  用精确千分位元值（增减都如实给出旧→新），负数标「不限额度」；
+ *  展示角标的分档文案另由 ccbQuotaText 负责，两者用途不同不冲突。 */
+export function bankQuotaNotifyBody(name, code, oldQ, newQ, iso) {
+  const fmt = q => (q == null || !Number.isFinite(Number(q))) ? "—"
+    : (Number(q) < 0 ? "不限额度" : fmtYuan(q) + " 元");
+  return `${name}（${code}）\n参考剩余额度变化：${fmt(oldQ)} → ${fmt(newQ)}\n检查时间：${iso}\n` +
+    "建行在售清单参考值（NLCQ11），非实时可购额度；请在建行 App 核对。";
+}
+
 /** 银行披露页轨回包整包校验（monitor-bank / monitor-refresh 的 bankRows）。
  *  行：{code, name, nav, navDate, changed, err}；code 必有；nav/navDate 可缺
- *  （抓取失败时 err 有值）。整包不合法一律拒绝，不让坏数据进页面。 */
+ *  （抓取失败时 err 有值）。v132 追加 quota：只许有限数值或 null（额度缺失
+ *  不伪装成 0），quotaSource 命中时必须是 ccb，溯源字段必须是字符串。
+ *  v132「额度变化通知」追加 quotaChanged（布尔）/ quotaPrev（数值或 null）：
+ *  quotaChanged=true 时旧/新额度必须都是有限数值且不相等，防止坏包发空通知。
+ *  整包不合法一律拒绝，不让坏数据进页面。 */
 export function validateBankRows(r) {
   if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, why: "回包不是对象" };
   if (r.ok !== true) return { ok: false, why: String(r.error || "monitor-bank 未成功（ok≠true）") };
@@ -465,6 +502,29 @@ export function validateBankRows(r) {
     if (!c || !CODE_OK.test(c)) return { ok: false, why: "rows 元素缺合法 code" };
     if (row.nav != null && !Number.isFinite(Number(row.nav)) && row.err == null) {
       return { ok: false, why: "code " + c + " 的 nav 非数值且无 err 说明" };
+    }
+    if (row.quota != null && !Number.isFinite(Number(row.quota))) {
+      return { ok: false, why: "code " + c + " 的 quota 非数值" };
+    }
+    if (row.quotaSource != null && row.quotaSource !== "ccb") {
+      return { ok: false, why: "code " + c + " 的 quotaSource 不是 ccb" };
+    }
+    for (const k of ["quotaFrom", "quotaErr", "saleCond"]) {
+      if (row[k] != null && typeof row[k] !== "string") {
+        return { ok: false, why: "code " + c + " 的 " + k + " 不是字符串" };
+      }
+    }
+    if (row.quotaChanged != null && typeof row.quotaChanged !== "boolean") {
+      return { ok: false, why: "code " + c + " 的 quotaChanged 不是布尔" };
+    }
+    if (row.quotaChanged === true) {
+      const qp = Number(row.quotaPrev), qn = Number(row.quota);
+      if (!Number.isFinite(qp) || !Number.isFinite(qn)) {
+        return { ok: false, why: "code " + c + " 额度变化缺旧/新额度" };
+      }
+      if (qp === qn) return { ok: false, why: "code " + c + " 额度变化但旧新值相同" };
+    } else if (row.quotaPrev != null && !Number.isFinite(Number(row.quotaPrev))) {
+      return { ok: false, why: "code " + c + " 的 quotaPrev 非数值" };
     }
   }
   return { ok: true, why: "" };
