@@ -132,7 +132,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v134";
+const APP_VER = "v135";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -463,7 +463,7 @@ function applyTombs(d) {
    false = 保留「保留方」的原有值（与云端「已有净值不覆盖」同口径） */
 const MIGRATE_PREFER_PRECISE_NAV = true;
 
-const MERGE_FIELDS = ["name", "inst", "code", "prodCode", "riskLevel", "manager", "orgName", "estDate", "benchmark", "benchRule", "lastNavSync"];
+const MERGE_FIELDS = ["name", "inst", "code", "prodCode", "bocPid", "riskLevel", "manager", "orgName", "estDate", "benchmark", "benchRule", "lastNavSync"];
 
 function navCount(p) { return Object.keys((p && p.navHistory) || {}).length; }
 function hasTrade(p) { return DATA.trades.some(t => t.prodId === p.id); }
@@ -1786,6 +1786,10 @@ function prodForm(pid) {
       <input id="pProd" placeholder="如 YJ01251204A" value="${esc(p && p.prodCode || "")}" oninput="onProdCodeInput()">
       <div id="pProdTip" class="tip"></div>
     </div>
+    <div class="field"><label>中行手机银行代码 <span class="muted">（bocPid，可留空；中行 App 产品才有）</span></label>
+      <input id="pBocPid" placeholder="如 WFZDJQRKA" value="${esc(p && p.bocPid || "")}">
+      <div class="tip">中行手机银行 App 产品页「分享」链接里 productId= 后面那串。填了以后：净值走中行 BMPS 游客通道补现值，额度监控（监控页）盯「剩余额度」，0 = 已售罄。中银理财官网代码不要填在这里（那是「产品代码」栏的事）。</div>
+    </div>
     <div class="field"><label>资产净值（规模，单位：元） <span class="muted">（可留空）</span></label>
       <input id="pAsset" inputmode="decimal" placeholder="如 2962513986.74" value="${esc(assetFormValue(p))}">
       <div class="tip">${esc(assetFormTip(p))}</div>
@@ -1944,6 +1948,10 @@ function saveProduct(pid) {
     name,
     inst: ($("pInst") && $("pInst").value || "").trim()
   };
+  /* v135：中行手机银行代码（可选渠道码，与建行 ccbCode 同语义）。
+     元素存在才写：留空 = 明确清掉（用户主动解除中行通道），不是"没这字段"。 */
+  const bocEl = $("pBocPid");
+  if (bocEl) patch.bocPid = (bocEl.value || "").trim().toUpperCase();
   /* v94：基准/确认规则。表单里填了 ⇒ 手工值（benchSrc 标「手工」，抓取端只填空白
      所以永远不会再覆盖）；留空 ⇒ 原样抹掉这一栏 = 交回抓取补齐（与登记编码栏同一语义）。 */
   const benchEl = $("pBench"), benchRuleEl = $("pBenchRule");
@@ -3292,9 +3300,11 @@ function prodLabel(p) {
 /* 同代码去重 */
 function findDupProduct(r) {
   const c = String(r.code || "").toUpperCase(), pc = String(r.prodCode || "").toUpperCase();
+  const bp = String((r && r.bocPid) || "").toUpperCase();   /* v135 中行手机银行代码同场查重 */
   return DATA.products.find(p =>
     (c && regCodeOf(p).toUpperCase() === c) ||
-    (pc && String(p.prodCode || "").toUpperCase() === pc)) || null;
+    (pc && String(p.prodCode || "").toUpperCase() === pc) ||
+    (bp && String(p.bocPid || "").toUpperCase() === bp)) || null;
 }
 
 function openLinkAdd() {
@@ -3341,14 +3351,16 @@ function parseProductLines(text) {
     if (!line) return;
     const r = parseProductInput(line);
     if (!r.ok) { rows.push({ ln: i + 1, raw: line, r, status: "bad", key: "", note: r.msg }); return; }
-    const key = (r.prodCode || r.code || "").toUpperCase();
+    /* v135：中行链接行只有 bocPid（prodCode 故意留空），key 带 BOC: 前缀防
+       与其它键空间撞车，批内同 bocPid 也要标 dup。 */
+    const key = r.bocPid ? "BOC:" + r.bocPid : (r.prodCode || r.code || "").toUpperCase();
     const dup = findDupProduct(r);
     const twin = key && seen.get(key);
     if (key && !seen.has(key)) seen.set(key, i + 1);
     rows.push({
       ln: i + 1, raw: line, r,
       status: (dup || twin) ? "dup" : "add",
-      key: r.prodCode || r.code,
+      key: r.bocPid ? "BOC:" + r.bocPid : (r.prodCode || r.code),
       inst: ORG_NAME[r.org] || "",
       note: dup ? `已存在「${prodLabel(dup)}」`
         : twin ? `与本批第 ${twin} 行同码，只加一次`
@@ -3476,6 +3488,7 @@ function saveFromLink() {
     DATA.products.push({
       id: uid(), navHistory: {}, createdAt: Date.now(),
       code: x.r.code || "", prodCode: x.r.prodCode || "",
+      bocPid: x.r.bocPid || "",                       /* v135 中行手机银行代码 */
       name: rows.length === 1 ? name : "",           /* 多行粘贴不套用同一个名称 */
       inst, fromLink: true,
     });

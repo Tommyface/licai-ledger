@@ -27,16 +27,24 @@ export const LINK_REG_KEYS = ["prodregcode", "regcode", "registercode", "zcode",
 export const LINK_PROD_KEYS = ["prodcode", "productcode", "projectcode", "productid",
   "sharecode", "salescode", "fundcode", "cpbm", "code"];
 
+/* v135 中行手机银行 H5 链接（ebsnew.boc.cn/bocphone/...）：productId 是中行
+   内部代码（如 WFZDJQRKA，纯字母形态很常见），监控/净值走中行 BMPS 游客网关
+   （私有仓 bocmob.py）。它**不能**进 prodCode —— 中银理财官网（bocwm.cn）
+   不认这串代码，混进去只会让官网源白查报错；独立存 bocPid 字段。 */
+export const BOC_H5_RE = /ebsnew\.boc\.cn\/bocphone\//i;
+export const BOC_PID_RE = /^[A-Z0-9]{6,20}$/;
+
 /**
  * 解析用户粘贴的链接/代码/文本。
  * @param {string} raw
- * @returns {{code: string, prodCode: string, org: string, ok: boolean, msg: string, bare: boolean}}
+ * @returns {{code: string, prodCode: string, bocPid: string, org: string, ok: boolean, msg: string, bare: boolean}}
  *   bare = 整行只有一个产品代码（形态表没收录的那种，见 ②b）
+ *   bocPid = 中行手机银行内部代码（v135，仅中行链接有；不进 prodCode）
  */
 export function parseProductInput(raw) {
   const text = String(raw == null ? "" : raw).trim();
   const norm = s => String(s).toUpperCase().replace(/[\s"']/g, "");
-  if (!text) return { code: "", prodCode: "", org: "", ok: false, msg: "请粘贴产品链接、产品代码或登记编码", bare: false };
+  if (!text) return { code: "", prodCode: "", bocPid: "", org: "", ok: false, msg: "请粘贴产品链接、产品代码或登记编码", bare: false };
 
   /* ① 收集参数：URL query、hash 路由里的 query，以及「名称=值」形式的参数串 */
   const params = {};
@@ -64,6 +72,16 @@ export function parseProductInput(raw) {
 
   let code = pickParam(LINK_REG_KEYS);
   let prodCode = pickParam(LINK_PROD_KEYS);
+
+  /* v135 中行手机银行链接：productId 提取为 bocPid，绝不混进 prodCode。
+     带 productid 参数的链接不止中行一家，所以先验域再取值。 */
+  let bocPid = "";
+  if (BOC_H5_RE.test(text)) {
+    bocPid = pickParam(["productid"]);
+    if (!BOC_PID_RE.test(bocPid)) bocPid = "";
+    prodCode = "";                 /* 中行内部代码不进产品代码栏（官网源不认它） */
+  }
+
   /* 参数值形态不对就不认。★ 必须含数字：否则 `?code=weixin` 这类**占位参数**
      会被 norm 转成 WEIXIN（6 位纯字母）恰好通过长度关，被当成产品代码入库
      （2026-10-30 审计抓到的：注释声称排除了它，实现没有）。
@@ -125,9 +143,17 @@ export function parseProductInput(raw) {
   /* ③ 判机构 */
   let org = prodCode ? detectOrgByProdCode(prodCode).org : "";
   if (!org && code) org = "chinawealth";
-  const okay = !!(code || prodCode);
+  const okay = !!(code || prodCode || bocPid);
   let msg = "";
-  if (shareLink && !okay) {
+  if (BOC_H5_RE.test(text) && !bocPid) {
+    msg = "这是中行手机银行的产品页链接，但里面没有 productId 参数。"
+      + "请在产品页点「分享」重新复制链接（链接里应带 productId=…），"
+      + "或把登记编码（Z 开头）单独贴上。";
+  } else if (bocPid) {
+    msg = `已提取中行手机银行代码 ${bocPid}（存入「中行手机银行代码」栏，`
+      + "净值/额度走中行通道）。机构栏建议填发行方全名（中银理财自营多为"
+      + "「中银理财」，代销别家请以产品说明书为准）。";
+  } else if (shareLink && !okay) {
     msg = "这是微众的分享短链：产品代码要跟着它的跳转才解得出来，浏览器里跨域做不到。"
       + "请在 App 里用下面的「📱 扫二维码添加」，或到产品页把「产品代码」复制成单独一行"
       + "（如 25112035B）。";
@@ -144,7 +170,7 @@ export function parseProductInput(raw) {
       + "否则请在下方「发行机构」栏填理财公司全名（如「华夏理财」），"
       + "或补「登记编码」（Z 开头，产品说明书 / 中国理财网可查）。";
   }
-  return { code, prodCode, org, ok: okay, msg, bare };
+  return { code, prodCode, bocPid, org, ok: okay, msg, bare };
 }
 
 /**
@@ -155,11 +181,11 @@ export function parseProductInput(raw) {
  * 放行条件：有识别出的机构 / 用户在机构栏填了 / 有登记编码（中国理财网按编码就能取）
  * / 整行就是一个裸代码（网页版没有扫码，裸码是主路径，云端会拿它去微众·网商
  * 货架 454 只目录反查发行方）。
- * @param {{ok?:boolean, code?:string, prodCode?:string, org?:string, bare?:boolean}} r parseProductInput 的结果
+ * @param {{ok?:boolean, code?:string, prodCode?:string, bocPid?:string, org?:string, bare?:boolean}} r parseProductInput 的结果
  * @param {string} manualInst 「发行机构」栏里的内容
  */
 export function rowAddable(r, manualInst) {
   if (!r || !r.ok) return false;
   const org = String(manualInst || "").trim();
-  return !!(r.org || org || r.code || r.bare);
+  return !!(r.org || org || r.code || r.bare || r.bocPid);
 }

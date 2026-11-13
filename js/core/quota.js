@@ -415,7 +415,9 @@ export function ccbQuotaText(q) {
 /** 监控池展示行（v131 取代网页层直接调 webankRows）：
  *  全部产品逐只给行，channel 标轨；bank 轨取 bankSnap 的披露快照。
  *  v132：建行系命中额度时，右侧改显「参考剩余额度」（quotaLabel / quotaSource），
- *  未命中则维持原「最新披露净值」口径，绝不把缺失额度伪装成 0。 */
+ *  未命中则维持原「最新披露净值」口径，绝不把缺失额度伪装成 0。
+ *  v135：中行手机银行轨（quotaSource:"boc"）—— indiAmtRem 精确元值，
+ *  0 = 已售罄（App 前端实证）、>0 = 在售；状态文案 bocStatusText 统一判定。 */
 export function monitorRows(pool, snapshot, watch, bankWatch, bankSnap) {
   const list = Array.isArray(pool) ? pool : [];
   const w = new Set((Array.isArray(watch) ? watch : []).map(x => String(x).toUpperCase()));
@@ -436,6 +438,7 @@ export function monitorRows(pool, snapshot, watch, bankWatch, bankSnap) {
     const brow = ch === "bank" ? bankByCode[code] : null;
     const q = brow ? brow.quota : undefined;
     const hasQuota = q != null && String(q).trim() !== "" && Number.isFinite(Number(q));
+    const isBoc = !!brow && String(brow.quotaSource || "") === "boc";
     return {
       channel: ch,
       code,
@@ -445,19 +448,36 @@ export function monitorRows(pool, snapshot, watch, bankWatch, bankSnap) {
       hit: !!hit,
       saleStatus: hit ? hit.saleStatus : "",
       statusText: ch === "bank"
-        ? (brow ? bankRowText(brow) : "银行披露页 · 待抓取")
+        ? (brow ? (isBoc ? bocStatusText(brow) : bankRowText(brow)) : "银行披露页 · 待抓取")
         : (hit ? saleText(hit.saleStatus) : "App 内可查"),
       quotaText: ch === "bank"
-        ? (hasQuota ? ccbQuotaText(q) : (brow && brow.nav != null ? String(brow.nav) : "—"))
+        ? (hasQuota ? (isBoc ? (Number(q) === 0 ? "已售罄" : fmtYuan(q) + " 元")
+                             : ccbQuotaText(q))
+                    : (brow && brow.nav != null ? String(brow.nav) : "—"))
         : (hit ? (hit.availQuota == null ? "不限额度" : fmtYuan(hit.availQuota) + " 元") : "—"),
-      /* v132：右侧小标签与额度溯源（建行在售清单命中的产品代码）。 */
+      /* v132/v135：右侧小标签与额度溯源。 */
       quotaLabel: ch === "bank"
-        ? (hasQuota ? "参考剩余额度·建行清单" : "最新披露净值") : "参考额度",
+        ? (hasQuota ? (isBoc ? "剩余额度·中行详情" : "参考剩余额度·建行清单")
+                    : "最新披露净值") : "参考额度",
       quotaSource: hasQuota ? String(brow.quotaSource || "ccb") : "",
       quotaFrom: hasQuota ? String(brow.quotaFrom || "") : "",
       err: brow ? String(brow.err || "") : "",
     };
   });
+}
+
+/** v135 中行手机银行轨状态文案（纯函数，Java/网页共用口径在前端只此一份）。
+ *  判据与 App 一致：indiAmtRem 数值 0 → 「已售罄」；>0 → 「在售」；
+ *  额度缺失 → 回退 saleState 原值（绝不臆造语义映射）。 */
+export function bocStatusText(row) {
+  if (!row || typeof row !== "object") return "中行详情 · 待抓取";
+  if (row.err) return "中行详情抓取未成：" + String(row.err).slice(0, 40);
+  const q = Number(row.quota);
+  if (row.quota != null && String(row.quota).trim() !== "" && Number.isFinite(q)) {
+    return q === 0 ? "已售罄" : "在售";
+  }
+  const s = String(row.saleState == null ? "" : row.saleState).trim();
+  return s ? "状态 " + s : "中行详情 · 暂无数据";
 }
 
 /** 银行披露页轨的状态行文案：盯的是「披露更新」（最新净值 + 日期）。 */
@@ -489,6 +509,7 @@ export function bankQuotaNotifyBody(name, code, oldQ, newQ, iso) {
  *  行：{code, name, nav, navDate, changed, err}；code 必有；nav/navDate 可缺
  *  （抓取失败时 err 有值）。v132 追加 quota：只许有限数值或 null（额度缺失
  *  不伪装成 0），quotaSource 命中时必须是 ccb，溯源字段必须是字符串。
+ *  v135：quotaSource 白名单加 "boc"（中行手机银行 BMPS 游客详情轨）。
  *  v132「额度变化通知」追加 quotaChanged（布尔）/ quotaPrev（数值或 null）：
  *  quotaChanged=true 时旧/新额度必须都是有限数值且不相等，防止坏包发空通知。
  *  整包不合法一律拒绝，不让坏数据进页面。 */
@@ -496,6 +517,7 @@ export function validateBankRows(r) {
   if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, why: "回包不是对象" };
   if (r.ok !== true) return { ok: false, why: String(r.error || "monitor-bank 未成功（ok≠true）") };
   if (!Array.isArray(r.rows)) return { ok: false, why: "缺 rows 数组" };
+  const SRC_OK = { ccb: 1, boc: 1 };
   for (const row of r.rows) {
     if (!row || typeof row !== "object" || Array.isArray(row)) return { ok: false, why: "rows 元素不是对象" };
     const c = String(row.code == null ? "" : row.code).trim().toUpperCase();
@@ -506,8 +528,8 @@ export function validateBankRows(r) {
     if (row.quota != null && !Number.isFinite(Number(row.quota))) {
       return { ok: false, why: "code " + c + " 的 quota 非数值" };
     }
-    if (row.quotaSource != null && row.quotaSource !== "ccb") {
-      return { ok: false, why: "code " + c + " 的 quotaSource 不是 ccb" };
+    if (row.quotaSource != null && !SRC_OK[row.quotaSource]) {
+      return { ok: false, why: "code " + c + " 的 quotaSource 不认识：" + row.quotaSource };
     }
     for (const k of ["quotaFrom", "quotaErr", "saleCond"]) {
       if (row[k] != null && typeof row[k] !== "string") {
