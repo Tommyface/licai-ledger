@@ -310,6 +310,19 @@ function eggsBlockHtml(eg) {
   </div>`;
 }
 
+/* 北京时间（Asia/Shanghai）格式化：live.at 是带 +08:00 偏移的时间戳，语义即北京时间。
+   必须显式指定时区，绝不依赖运行环境时区——否则 UTC 环境（如 CI runner）会少 8 小时，
+   导致「现抓」时间显示错误（v134 上线时 Web CI 在 UTC 下报 02:30:00）。 */
+function bjHMS(d) {
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour12: false,
+    hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(d);
+}
+function bjDateTime(d) {
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(d);
+}
+
 /**
  * 完整实时行情表 HTML。
  * @param {any} live LIVE
@@ -321,9 +334,7 @@ export function realtimeTableHtml(live, market, opts = {}) {
   const ds = buildDailySummary(market);
   const eg = estimateEggs(market, live);
   const at = live && live.at ? new Date(live.at) : null;
-  const time = at && isFinite(at.getTime())
-    ? `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}:${String(at.getSeconds()).padStart(2, "0")}`
-    : "";
+  const time = at && isFinite(at.getTime()) ? bjHMS(at) : "";
   const phase = opts.phase && opts.phase.label ? ` · ${opts.phase.label}` : "";
   const checked = opts.checkedAtText ? ` · 查于 ${opts.checkedAtText}` : "";
   const cap = time ? `现抓 ${time}${phase}${checked}` : "尚未取过此刻行情";
@@ -353,7 +364,7 @@ export function realtimeTableText(live, market, opts = {}) {
   const ds = buildDailySummary(market);
   const eg = estimateEggs(market, live);
   const at = live && live.at ? new Date(live.at) : null;
-  const time = at && isFinite(at.getTime()) ? at.toLocaleString("zh-CN", { hour12: false }) : "未取数";
+  const time = at && isFinite(at.getTime()) ? bjDateTime(at) : "未取数";
   const L = [];
   L.push(`债市实时行情表\t现抓 ${time}${opts.phase && opts.phase.label ? ` · ${opts.phase.label}` : ""}`);
   L.push("分组\t名称\t最新\t涨跌\t方向\t来源/口径");
