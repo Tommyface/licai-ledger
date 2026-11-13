@@ -324,11 +324,11 @@ test("v133 保存与展示：待披露可保存、不打死份额、列表自动
   assert.match(APP, /const shares = isBuy/, "份额同步按 金额/净值 动态回冲");
 });
 
-test("v133 版本钉：APP_VER / CACHE 同步 v133", () => {
+test("v133 版本钉：APP_VER / CACHE 同步 v134", () => {
   const ver = APP.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = SW.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v133");
-  assert.equal(cache, "v133");
+  assert.equal(ver, "v134");
+  assert.equal(cache, "v134");
   assert.equal(ver, cache);
 });
 

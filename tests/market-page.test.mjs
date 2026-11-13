@@ -97,13 +97,16 @@ const liveToday = () => "2026-11-09";
 /* v120：线索区在宏观之后，marketHeroHtml 末尾多了 newsHeroHtml() 这一个自由变量。
    这里只验「接线顺序」，线索区自己的校验/渲染在 tests/news.test.mjs 里真跑。 */
 const NEWS_OK = () => "<NEWS>";
-const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_ST_IDLE, mc = MC_OK, nh = NEWS_OK) => new Function(
+/* v134：实时行情表用替身注入 —— 本文件验的是「接线顺序」，
+   表本身的行列/收蛋/免责在 tests/markettable_v134.test.mjs 里真跑。 */
+const RT_OK = () => "<RTTABLE>";
+const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_ST_IDLE, mc = MC_OK, nh = NEWS_OK, rt = RT_OK) => new Function(
   "MARKET", "MARKET_ST", "marketPanelHtml", "marketAiTextSafe", "esc", "marketStateBar",
   "LV", "LIVE", "LIVE_ST", "isTradeDay", "marketAgeText", "marketCheckedAtText",
-  "MACRO", "MACRO_ST", "MC", "today", "histView", "HIST_ST", "newsHeroHtml",
+  "MACRO", "MACRO_ST", "MC", "today", "histView", "HIST_ST", "newsHeroHtml", "realtimeTableHtml",
   `${F.marketHeroHtml.toString()}; return marketHeroHtml();`)(
   m, st, panelOk, aiOk, s => String(s), barOk, LV_OK, null, lst, () => true, ageOk,
-  F.marketCheckedAtText, macro, mst, mc, liveToday, () => null, HIST_ST_IDLE, nh);
+  F.marketCheckedAtText, macro, mst, mc, liveToday, () => null, HIST_ST_IDLE, nh, rt);
 const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */

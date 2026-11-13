@@ -72,6 +72,12 @@ import { MARKET_SCHEMA, validateMarket, marketAiBlock, marketAiTextSafe,
    日终层是 33 格中债估值（T-1），此刻层是 12 项盘中参考价，两层各标各的时点。
    解析/单位/方向/时点四条规则全在 js/core/livebond.js，app.js 只负责发请求与拼装。 */
 import * as LV from "./js/core/livebond.js";
+/* v134：债市「实时行情表」+ 收蛋估算（调研报告落地层）。
+   ★ 纯展示模块：聚合已有的此刻层 12 项 + 日终 33 格成一张表，零新数据源。
+   ★ 收蛋是推算值，只在这里现算现渲染，绝不落 LIVE/MARKET/aiText，
+     绝不进 llmSnapText / liveFactsForBrief / briefFacts 任何模型装配链路。
+     隔离护栏与反向断言见 js/core/markettable.js 文件头与 tests/markettable_v134.test.mjs。 */
+import { realtimeTableHtml, realtimeTableText } from "./js/core/markettable.js";
 /* v118：宏观层 —— CPI / PPI / 制造业 PMI 的月度实际值，同样 JSONP 直连东财数据中心。
    它既不进此刻层（月度 vs 秒级），也不进日终层（统计口径 vs 估值曲线），自成一个时点。
    解析与口径在 js/core/macro.js。 */
@@ -126,7 +132,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v133";
+const APP_VER = "v134";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2567,6 +2573,31 @@ function marketCopyAi() {
     navigator.clipboard.writeText(t).then(done, fallback);
   } else fallback();
 }
+/* v134：复制「实时行情表」纯文本快照（TSV，可贴 Excel）。与 marketCopyAi 分工不同：
+   这个复制的是本机现算的表（含收蛋推算，但整段免责一起带走）；aiText 那条是私有仓
+   已核验的日终快照，给模型当依据用的。两条都只由用户手动点按触发，不自动外发。
+   ★ 收蛋文本在此出现是「用户主动复制」，不是「自动装配进模型」——
+     llmSnapText / liveFactsForBrief / briefFacts 一条都不碰这里，见 v134 专项反向断言。 */
+function marketCopyTable() {
+  const t = realtimeTableText(LIVE, MARKET, {
+    phase: LV.livePhaseOf(new Date(), isTradeDay),
+  });
+  if (!t) return toast("没有可复制的行情表", 2600);
+  const done = () => toast("已复制实时行情表（含收蛋免责说明）");
+  const fallback = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      done();
+    } catch (e) { toast("复制失败：" + String(e).slice(0, 80), 3000); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } else fallback();
+}
 
 function llmBridge() {
   try {
@@ -2977,7 +3008,16 @@ function marketHeroHtml() {
   /* v120：线索区放在宏观之后 —— 时间尺度从「T-1 估值」到「月度统计」再到
      「上一轮抓到的快讯」，越往下越慢、也越不能当数据用。它独立成块，
      不进 llmPanelHtml 的快照、不进研判事实层（见 js/core/news.js 文件头）。 */
-  return bar + liveHtml + daily + macroHtml + newsHeroHtml();
+  /* v134：实时行情表。折叠卡片（v130 起债市页的折叠规矩），默认展开 ——
+     用户要的是「能生成一张实时行情表」，不该藏在第二屏。表体每次 marketPaint()
+     都用当前 LIVE/MARKET 现算，点「↻ 更新此刻」两层一回来就整表重算，不落缓存。
+     ★ 收蛋估算在这个表里现算现展示，绝不写进 LIVE/MARKET，也不接任何模型装配入口。 */
+  const rtHtml = `<details class="card rt-fold" open style="margin:8px 0">
+    <summary class="card-t"><h2>实时行情表</h2><span class="hint">此刻层明细 + 日终矩阵统计 + 收蛋推算</span></summary>
+    ${realtimeTableHtml(LIVE, MARKET, { phase, checkedAtText: marketCheckedAtText(MARKET) })}
+    <div class="row-btn" style="margin-top:6px"><button class="btn gh" style="flex:1" onclick="marketCopyTable()">复制实时行情表（纯文本 · 可贴 Excel）</button></div>
+  </details>`;
+  return bar + liveHtml + rtHtml + daily + macroHtml + newsHeroHtml();
 }
 /** 共用的「接着问」对话区。withMarket=true 时把行情块嵌在快照行之后
     （设置页「模型接入」保持原样）；债市页传 false —— 行情已在上部单独渲染，
@@ -8714,7 +8754,7 @@ Object.assign(window, {
   briefSearchOff, briefSearchOffRetry,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
-  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmPresetXf, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
+  exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketCopyTable, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmPresetXf, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
   openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewBuyRule, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc, tradeFullRedeem,
   monitorStart, monitorStop, monitorRefresh, monitorCfgSave,

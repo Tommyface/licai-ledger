@@ -531,6 +531,42 @@ details.card:not([open]) > summary{margin-bottom:0}
 .lv-hist-miss{color:#b8860b;font-size:10px}
 .lv-hist-err{display:block;font-size:10.5px;color:var(--ink3)}
 
+/* ---------- v134：实时行情表 + 收蛋估算 ----------
+   沿用 .mkt-tbl 骨架（同一套间距/字号），只用文字色表达方向 ——
+   这一层是「明细表」，不是日终矩阵那张实心热力图，不能抢视觉主次。
+   收蛋区块刻意用灰底 + 虚线框 + 「推算值」标签，与上面的行情真值区隔开：
+   报告 §6 点名「推算值误导」是最容易出事的一条，视觉上必须先说清它不是真数。 */
+.rt-fold>summary .hint{font-size:10px;color:var(--ink3);font-weight:400}
+.rt-wrap{margin:2px 0 0}
+.rt-t{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap;font-size:12.5px;font-weight:700;color:var(--ink);margin:2px 0 4px}
+.rt-t-x{font-size:10px;font-weight:400;color:var(--ink3);font-variant-numeric:tabular-nums}
+.rt-tbl th,.rt-tbl td{font-size:10.5px;padding:4px 3px;white-space:nowrap}
+.rt-tbl .rt-h th{border-bottom:1px solid var(--line);color:var(--ink3);font-size:10px}
+.rt-tbl .rt-g th{text-align:left;color:var(--ink2);background:var(--track);border-radius:3px;font-size:10px;font-weight:600;padding:3px 5px}
+.rt-tbl .rt-n{text-align:left;color:var(--ink2);font-weight:600;white-space:normal}
+.rt-tbl .rt-v{font-variant-numeric:tabular-nums;font-weight:700;color:var(--ink)}
+.rt-tbl .rt-v i.rt-u{font-size:9px;font-style:normal;opacity:.65;margin-left:1px}
+.rt-tbl .rt-c,.rt-tbl .rt-d{font-variant-numeric:tabular-nums;font-weight:600}
+.rt-tbl .rt-s{font-size:9.5px;color:var(--ink3);white-space:normal;line-height:1.4}
+.rt-tbl .rt-f th,.rt-tbl .rt-f td{border-top:1px solid var(--line);padding-top:5px}
+.rt-miss{color:#b8860b;font-size:9px;margin-left:4px}
+.rt-up{color:var(--up)}
+.rt-down{color:var(--down)}
+.rt-flat{color:var(--ink3)}
+.rt-none{color:#3a6ea8}
+/* 收蛋：灰底虚线框，明确「这一块不是行情真值」 */
+.rt-egg{margin:9px 0 2px;border:1px dashed var(--line);border-radius:7px;padding:7px 8px;background:var(--track)}
+.rt-egg-t{font-size:11.5px;font-weight:700;color:var(--ink2);display:flex;align-items:center;gap:6px}
+.rt-egg-tag{font-size:9px;font-weight:700;color:#b8860b;border:1px solid #b8860b;border-radius:3px;padding:0 4px;line-height:1.5}
+.rt-egg-src{font-size:9.5px;color:var(--ink3);line-height:1.5;margin:3px 0}
+.rt-egg-no{font-size:10.5px;color:var(--ink3);padding:4px 0}
+.rt-egg-tbl{margin:3px 0 2px}
+.rt-egg-tbl th,.rt-egg-tbl td{font-size:10px;padding:3px 3px;white-space:normal}
+.rt-egg-tbl .rt-n{white-space:nowrap}
+.rt-egg-dn{display:block;font-size:9px;font-weight:400;color:var(--ink3)}
+.rt-egg-b{display:block;font-size:9px;color:var(--ink3)}
+.rt-egg-cap{font-size:9.5px!important;line-height:1.6;margin-top:5px!important;padding-top:5px;border-top:1px solid var(--line)}
+
 /* ---------- v118：中票利差 + 宏观 ----------
    利差表沿用 .mkt-tbl 的骨架（间距、字号、格子形状与矩阵一致），只补两处：
    利差那一格用矩阵的涨跌底色（走阔=绿、收窄=红），变化那一列用文字色 ——
