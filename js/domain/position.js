@@ -18,13 +18,14 @@ import { latestNav, navAt, navHit, navSeries as navSeriesOf } from "./nav.js";
  * @typedef {{ id?: string, navHistory?: Record<string, number | string> }} PositionProduct
  * @typedef {{ id?: string, prodId?: string, type?: string, tradeDate?: string, confirmDate?: string,
  *             confirmNavDate?: string, confirmNav?: number | string, settleDate?: string,
- *             arrivalDate?: string, fullRedeem?: boolean,
+ *             arrivalDate?: string, fullRedeem?: boolean, navPending?: boolean,
  *             amount?: number | string, shares?: number | string, realized?: number | string }} Trade
  * @typedef {{
  *   shares: number, cost: number, market: number, profit: number, realized: number,
  *   lastNav: number, lastDate: string, startDate: string,
  *   holdDays: number, holdAnnual: number, annualValid: boolean,
  *   pendingShares: number, pendingAmount: number, hasPending: boolean, inTransit: boolean,
+ *   navPendingCount: number,
  *   navSeries: [string, number][],
  *   settles: Record<string, { nav: number, shares: number, proceeds: number,
  *                            costOut: number, realized: number, full: boolean }>
@@ -39,10 +40,34 @@ import { latestNav, navAt, navHit, navSeries as navSeriesOf } from "./nav.js";
  * @returns {number}
  */
 export function resolveTradeNav(t, p) {
+  /* v133：按产品购买规则买入、份额等「确认净值日」的净值披露后才确定。
+     必须精确命中当日（navAt），绝不能 navHit 向前取最近 —— 那正是
+     「11.13 净值未出、却拿 11.06 的旧净值把份额算死、凭空冒出 -28.91 浮亏」
+     的根因。未披露时返回 0（份额待定），披露后自动用真实净值重算（回冲）。 */
+  if (t.navPending && t.type === "buy") {
+    const d = t.confirmNavDate || t.confirmDate || t.tradeDate;
+    const v = d ? navAt(p, d) : undefined;
+    return (v !== undefined && v !== null && v !== "" && Number(v) > 0) ? Number(v) : 0;
+  }
   if (t.confirmNav) return Number(t.confirmNav);
   const d = t.confirmNavDate || t.confirmDate || t.tradeDate;
   const hit = navHit(p, d);
   return hit ? Number(hit[1]) : 0;
+}
+
+/**
+ * v133：这笔买入是否「净值待确认」（确认净值日的净值尚未披露）。
+ * 只有标记了 navPending 的买入才可能是；老交易一律 false，行为零回归。
+ * @param {Trade} t
+ * @param {PositionProduct} p
+ * @returns {boolean}
+ */
+export function buyNavPending(t, p) {
+  if (!t || t.type !== "buy" || !t.navPending) return false;
+  const d = t.confirmNavDate || t.confirmDate || t.tradeDate;
+  if (!d) return false;
+  const v = navAt(p, d);
+  return !(v !== undefined && v !== null && v !== "" && Number(v) > 0);
 }
 
 /**
@@ -140,15 +165,24 @@ export function computePosition(p, trades, td) {
     .sort((a, b) => effTradeDate(a).localeCompare(effTradeDate(b)));
   let shares = 0, cost = 0, realized = 0;
   let pendingShares = 0, pendingAmount = 0, startDate = "";
+  let navPendingCount = 0;
   /** @type {Record<string, { nav: number, shares: number, proceeds: number,
    *                          costOut: number, realized: number, full: boolean }>} */
   const settles = {};
   for (const t of ts) {
     const cd = effTradeDate(t);
     const confirmed = !cd || cd <= td;
+    /* v133：确认净值日的净值还没披露 → 份额未定，即使确认日已到也整笔在途，
+       绝不计入 shares/cost（否则会用滞后的最新净值凭空算出浮亏）。净值披露后
+       tradeShares() 精确命中该日净值自动回冲，无需改单。 */
+    const navWait = buyNavPending(t, p);
     if (t.type === "buy") {
       const sh = tradeShares(t, p); const amt = Number(t.amount) || 0;
-      if (!confirmed) { pendingShares += sh; pendingAmount += amt; continue; }
+      if (!confirmed || navWait) {
+        pendingShares += sh; pendingAmount += amt;
+        if (navWait) navPendingCount++;
+        continue;
+      }
       if (!startDate) startDate = cd;
       shares += sh; cost += amt;
     } else {
@@ -175,8 +209,11 @@ export function computePosition(p, trades, td) {
   const last = latestNav(p);
   const lastNav = last ? last[1] : 0;
   const lastDate = last ? last[0] : "";
-  /* 在途：有买入但一份都没确认 → 不显示市值/收益（由 UI 显示 "-"） */
-  const hasPending = pendingShares > 0;
+  /* 在途：有买入但一份都没确认 → 不显示市值/收益（由 UI 显示 "-"）。
+     v133：净值待确认（navPendingCount>0）份额为 0 也算在途 —— 否则
+     pendingShares=0 会让 hasPending=false，market 虽为 0 但 UI 不显示"-"。
+     只加这一支，老交易（无 navPending 标记）行为零回归。 */
+  const hasPending = pendingShares > 0 || navPendingCount > 0;
   const inTransit = shares <= 0 && hasPending;
   const market = inTransit ? 0 : shares * lastNav;
   const profit = market - cost;               /* 持仓浮盈 */
@@ -188,7 +225,8 @@ export function computePosition(p, trades, td) {
   const annualValid = holdDays >= 7;
   if (!annualValid) holdAnnual = 0;
   return { shares, cost, market, profit, realized, lastNav, lastDate, startDate, holdDays, holdAnnual, annualValid,
-           pendingShares, pendingAmount, hasPending, inTransit, navSeries: navSeriesOf(p), settles };
+           pendingShares, pendingAmount, hasPending, inTransit, navPendingCount,
+           navSeries: navSeriesOf(p), settles };
 }
 
 /**

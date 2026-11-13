@@ -329,6 +329,109 @@ export function suggestTradeDates(tradeDate, now = new Date(), orgKey = "") {
 }
 
 /* ============================================================
+   v133 · 产品级「购买规则 / 净值确认逻辑」
+   ============================================================
+   背景：不同理财产品的申购确认规则不一样，写死「按申请日净值、T+1 确认」
+   会算错。例如「安盈稳健日开7号」是「交易日 17:00 前买入 → 按 T+1 净值
+   计算份额、T+2 确认」；11.12（T）买入按 11.13（T+1）净值，而 11.13 净值
+   尚未披露，这笔必须整笔在途、不能提前确认份额，否则会用滞后的旧净值
+   （如停在 11.06 的 1.004402）凭空算出浮亏。
+
+   规则对象（存在产品 p.buyRule，可留空 = 用默认）：
+     · cutoff        "17:00"  申购截止时点（HH:MM）。空串 = 用机构/全局截止。
+     · navOffset     integer  确认净值日 = 受理日 + N 个交易日（默认 0 = 当日）。
+     · confirmOffset integer  份额确认日 = 确认净值日 + N 个交易日（默认 1）。
+       相对「确认净值日」而非受理日：净值披露后才确认份额，时序才对。
+   三个字段都容错归一，非法值回落默认 —— 用户手填错也不会让推算崩掉。
+
+   DEFAULT_BUY_RULE 刻意等于旧的 suggestTradeDates 行为（navOffset=0 →
+   navDate=受理日；confirmOffset=1 → confirmDate=受理日+1；用机构截止），
+   保证没配规则的产品零回归。 */
+
+/** 默认购买规则：按受理日净值、净值日次日确认、沿用机构截止时点。 */
+export const DEFAULT_BUY_RULE = Object.freeze({
+  cutoff: "", navOffset: 0, confirmOffset: 1,
+});
+
+/**
+ * 归一化产品购买规则。任何非法/缺失字段都回落默认，绝不抛错。
+ * @param {any} raw
+ * @returns {{cutoff: string, navOffset: number, confirmOffset: number}}
+ */
+export function normBuyRule(raw) {
+  const r = (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+  /* 截止时点不光要格式对，时分还得在合法范围：只验 /^\d{1,2}:\d{2}$/ 会放过
+     "25:99"，pastCutoff 拿 1599 分钟去比，永远不会触发顺延。 */
+  const cm = /^(\d{1,2}):(\d{2})$/.exec(String(r.cutoff == null ? "" : r.cutoff).trim());
+  const cutoff = (cm && +cm[1] <= 23 && +cm[2] <= 59)
+    ? `${String(+cm[1]).padStart(2, "0")}:${cm[2]}` : "";
+  const off = (v, fallback, max) => {
+    const n = Number(v);
+    return (Number.isInteger(n) && n >= 0 && n <= max) ? n : fallback;
+  };
+  return {
+    cutoff,
+    navOffset: off(r.navOffset, DEFAULT_BUY_RULE.navOffset, 10),
+    confirmOffset: off(r.confirmOffset, DEFAULT_BUY_RULE.confirmOffset, 10),
+  };
+}
+
+/** 产品是否显式配置了购买规则（用于表单提示「按产品规则自动带入」）。 */
+export function hasBuyRule(p) {
+  if (!p || !p.buyRule || typeof p.buyRule !== "object") return false;
+  const r = normBuyRule(p.buyRule);
+  return r.cutoff !== "" || r.navOffset !== DEFAULT_BUY_RULE.navOffset
+    || r.confirmOffset !== DEFAULT_BUY_RULE.confirmOffset;
+}
+
+/** @typedef {{ applyDate: string, confirmDate: string, navDate: string,
+ *             deferred: boolean, rolled: boolean, unknownYears: string[],
+ *             cutoff: string, navOffset: number, confirmOffset: number }} BuyDates */
+
+/**
+ * 按产品购买规则，由「交易日期 + 是否在截止后」推算受理日/确认净值日/确认日。
+ * 与 suggestTradeDates 的差异：
+ *   · 截止时点用规则里的 cutoff（没有才回落机构/全局）；
+ *   · 确认净值日 = 受理日 + navOffset 个交易日（不再恒等于受理日）；
+ *   · 份额确认日 = 确认净值日 + confirmOffset 个交易日（净值披露后才确认）；
+ *   · pastCutoff 由调用方传 afterCutoff 显式决定（补录历史交易时不能拿
+ *     「现在几点」去判断那笔是不是过了截止，那会用今天的时间改写历史）。
+ * 不传 afterCutoff 时沿用 suggestTradeDates 的实时判定，保持零回归。
+ * @param {string} tradeDate
+ * @param {any} buyRule 产品 p.buyRule（内部归一化）
+ * @param {{ now?: Date, orgKey?: string, afterCutoff?: boolean }} [opts]
+ * @returns {BuyDates}
+ */
+export function suggestBuyDates(tradeDate, buyRule, opts = {}) {
+  const rule = normBuyRule(buyRule);
+  const now = opts.now || new Date();
+  const orgKey = opts.orgKey || "";
+  const cutoff = rule.cutoff || cutoffOf(orgKey);
+  const todayStr = localDate(now);
+  const base = isDateStr(tradeDate) ? tradeDate : todayStr;
+  const past = (opts.afterCutoff === true)
+    || (opts.afterCutoff === undefined && base === todayStr && isTradeDay(base) && pastCutoff(now, cutoff));
+  let apply, deferred = false;
+  if (past && base === todayStr && isTradeDay(base)) {
+    apply = nextTradeDay(base); deferred = true;
+  } else if (past) {
+    /* 补录的「截止后」历史单：受理日顺延到下一交易日 */
+    apply = nextTradeDay(rollForward(base)); deferred = true;
+  } else {
+    apply = rollForward(base);
+  }
+  if (!apply) apply = base;
+  const navDate = addTradeDays(apply, rule.navOffset) || apply;
+  const confirmDate = addTradeDays(navDate, rule.confirmOffset) || navDate;
+  const years = Array.from(new Set([yearOf(base), yearOf(apply), yearOf(navDate), yearOf(confirmDate)]))
+    .filter(y => y && !isYearConfigured(y));
+  return {
+    applyDate: apply, confirmDate, navDate, deferred, rolled: apply !== base,
+    unknownYears: years, cutoff, navOffset: rule.navOffset, confirmOffset: rule.confirmOffset,
+  };
+}
+
+/* ============================================================
    净值滞后
    ============================================================ */
 /**

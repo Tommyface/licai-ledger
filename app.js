@@ -33,10 +33,10 @@ import {
   monitorRows, monitorChannelOf, monitorChannelCode, bankNotifyBody, validateBankRows,
 } from "./js/core/quota.js";
 import { sharesOn as sharesOnWith, hasAnyTrade as hasAnyTradeIn,
-  computePosition, settleLedger } from "./js/domain/position.js";
+  computePosition, settleLedger, buyNavPending } from "./js/domain/position.js";
 import { ocrNavLines } from "./js/domain/ocr.js";
-import { configureCalendar, suggestTradeDates, tradeDaysBetween,
-  isTradeDay, prevTradeDay } from "./js/domain/calendar.js";
+import { configureCalendar, suggestTradeDates, suggestBuyDates, normBuyRule, hasBuyRule,
+  tradeDaysBetween, isTradeDay, prevTradeDay } from "./js/domain/calendar.js";
 import { normTomb, mergeTombs, purgeTombs, applyTombs as applyTombsIn } from "./js/domain/tomb.js";
 import { mergeForPush, stampMs } from "./js/domain/sync.js";
 import { syncBadge, syncLine } from "./js/domain/syncstatus.js";
@@ -126,7 +126,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v132";
+const APP_VER = "v133";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -506,6 +506,10 @@ function absorbProduct(keep, drop) {
   for (const k of MERGE_FIELDS) {
     if (!String(keep[k] || "").trim() && String(drop[k] || "").trim()) keep[k] = drop[k];
   }
+  /* v133：购买规则是对象，不能走 MERGE_FIELDS 的 String() 判空（会被算成
+     "[object Object]" 恒非空、永远补不上）。合并重复产品时，按「是否真的配了规则」
+     判定，别让回退默认的 {} 挡住另一份真规则。 */
+  if (!hasBuyRule(keep) && hasBuyRule(drop)) keep.buyRule = drop.buyRule;
   if (!keep.createdAt || (drop.createdAt && drop.createdAt < keep.createdAt)) keep.createdAt = drop.createdAt;
 }
 function migrateData() {
@@ -1089,9 +1093,20 @@ function renderTrade() {
       const isBuy = t.type === "buy";
       const amt = isBuy ? (Number(t.amount) || 0) : settled(t, "proceeds", Number(t.amount) || 0);
       const rz = isBuy ? 0 : settled(t, "realized", Number(t.realized) || 0);
-      const nav = isBuy ? (Number(t.confirmNav) || 0) : settled(t, "nav", Number(t.confirmNav) || 0);
       const navDate = isBuy ? (t.confirmNavDate || t.confirmDate || t.tradeDate || "-")
                             : (t.settleDate || t.tradeDate || "-");
+      /* v133：净值待确认买入落库 confirmNav=0、也不写死 shares；官方披露后按
+         navAt 精确命中确认净值日取真值，份额按 金额/净值 动态回冲（与 position.js
+         resolveTradeNav / tradeShares 同口径），交易记录无需改单自动同步。 */
+      const hitNav = p && navDate ? navAt(p, navDate) : undefined;
+      const exactNav = (hitNav !== undefined && hitNav !== null && hitNav !== "" && Number(hitNav) > 0)
+        ? Number(hitNav) : 0;
+      const nav = isBuy ? (Number(t.confirmNav) || exactNav)
+                        : settled(t, "nav", Number(t.confirmNav) || 0);
+      const shares = isBuy
+        ? ((Number(t.shares) || 0) || (nav > 0 ? (Number(t.amount) || 0) / nav : 0))
+        : (Number(t.shares) || 0);
+      const navPending = isBuy && !!p && buyNavPending(t, p);
       const arrival = t.arrivalDate || t.confirmDate || t.tradeDate || "";
       const inTransit = !isBuy && !!arrival && arrival > today();
       return `<div class="sumline" style="align-items:flex-start">
@@ -1100,7 +1115,10 @@ function renderTrade() {
             <span class="wr" style="font-size:10.5px;padding:2px 6px;border-radius:5px;background:${isBuy ? '#e9f7f1' : '#fdeff0'};color:${isBuy ? '#0d7a52' : '#c02a34'};margin-left:4px">${isBuy ? "买入" : "赎回"}</span>
           </div>
           <div style="font-size:11px;color:var(--ink2);margin-top:3px">
-            ${t.tradeDate} · ${isBuy ? "确认" : "结算"} ${navDate} · 净值 ${nav.toFixed(4)} · ${shown((Number(t.shares) || 0).toFixed(2))}份
+            ${t.tradeDate} · ${isBuy ? "确认净值日" : "结算"} ${navDate} · ${navPending
+              ? '<b style="color:#8a6300">净值待披露 · 份额待确认</b>'
+              : `净值 ${nav.toFixed(4)} · ${shown(shares.toFixed(2))}份`}
+            ${navPending ? `<br><span style="color:#8a6300">整笔在途、不计持仓收益；官方披露 ${esc(navDate)} 净值后自动确认份额</span>` : ""}
             ${!isBuy && arrival ? `<br>到账 ${esc(arrival)} · ${inTransit ? "在途" : "已到账"} · 按 T 日净值结算` : ""}
           </div>
         </div>
@@ -1473,62 +1491,81 @@ function renderTradeForm() {
   const p = DATA.products.find(x => x.id === UI.activePick);
   if (!p) { $("tFormBox").innerHTML = ""; return; }
   const t = today();
-  /* 确认日不再默认「今天」：按交易日历（周末 / 法定假日 / 调休）推算 T+1。
-     15:00 截止之后提交、或交易日本身休市，受理日会顺延 —— 这些都由纯函数
-     js/domain/calendar.js 计算，界面上把推算结果写出来，允许用户手动改。 */
-  const sug = suggestTradeDates(t, new Date(), detectOrg(p));
-  const hitNav = navHit(p, sug.navDate);
-  const defNavDate = hitNav ? hitNav[0] : sug.navDate;
-  const defNav = hitNav ? Number(hitNav[1]).toFixed(4) : "";
+  /* v133：确认日/确认净值日按「产品购买规则」自动带入（写死 T+1 会算错不同
+     产品的申购确认）。默认规则 = 旧的按申请日净值、T+1 确认，零回归。
+     净值只精确命中该确认净值日，绝不向前取最近 —— 未披露就留空，保存后
+     整笔在途、披露后自动回冲份额（见 position.js buyNavPending）。 */
+  const ruleTip = hasBuyRule(p)
+    ? `<div class="note g" style="margin-top:10px;font-size:11.5px">✓ 已按本产品购买规则自动带入：申购截止 <b>${esc(normBuyRule(p.buyRule).cutoff || "机构默认 15:00")}</b> · 确认净值日 <b>T+${normBuyRule(p.buyRule).navOffset}</b> · 份额确认 <b>净值日+${normBuyRule(p.buyRule).confirmOffset}</b>。你只需选购买时间、截止前后和金额；下面三项仍可手动改。</div>`
+    : `<div class="note" style="margin-top:10px;font-size:11.5px">未配置购买规则，按默认（申请日净值、T+1 确认、机构截止 15:00）自动带入。可在「添加产品 / 编辑产品 → 购买规则」里按说明书配置。</div>`;
   $("tFormBox").innerHTML = `
     <div class="note b">当前操作产品：<b>${esc(prodLabel(p))}</b><br>${esc(p.inst || "")}${p.prodCode ? " · 产品代码 " + esc(p.prodCode) : ""}</div>
+    ${ruleTip}
     <div class="field" style="margin-top:12px"><label>交易类型</label>
       <select id="tType" onchange="renderTradeForm2()">
         <option value="buy">买入</option><option value="sell">赎回</option>
       </select>
     </div>
-    <div class="field"><label>交易日期</label>
+    <div class="field"><label>交易日期（购买时间）</label>
       <div class="actin"><input type="date" id="tDate" value="${t}" onchange="onTradeDateChange()"><button class="mini" onclick="document.getElementById('tDate').value=''">清空</button></div>
     </div>
-    <div class="field"><label id="tConfirmLab">交易确认日期</label><div class="actin"><input type="date" id="tConfirm" value="${sug.confirmDate}"></div><div id="tCalTip" class="tip"></div></div>
+    <div class="field" id="tTimingBox"><label>申购时点 <span class="muted">（相对当日申购截止时点）</span></label>
+      <select id="tTiming" onchange="onTradeDateChange()">
+        <option value="before">截止时间前提交</option>
+        <option value="after">截止时间后提交（按下一交易日受理）</option>
+      </select></div>
+    <div class="field"><label id="tConfirmLab">交易确认日期</label><div class="actin"><input type="date" id="tConfirm"></div><div id="tCalTip" class="tip"></div></div>
     <div id="tTypeBox"></div>
-    <div class="field"><label>确认净值日期</label><input type="date" id="tNavDate" value="${defNavDate}" onchange="autoFillNav()"></div>
-    <div class="field"><label>确认净值</label><input type="number" step="0.0001" id="tNav" value="${defNav}" placeholder="留空则自动取该日净值" oninput="calcShares()"></div>
+    <div class="field"><label>确认净值日期</label><input type="date" id="tNavDate" onchange="autoFillNav()"></div>
+    <div class="field"><label>确认净值 <span class="muted">（该日未披露可留空 → 份额待披露）</span></label><input type="number" step="0.0001" id="tNav" placeholder="留空则按确认净值日自动取／待披露" oninput="calcShares()"></div>
     <div id="tSettleTip" class="tip"></div>
     <div id="tShareBox"></div>
     <div class="row-btn" style="margin-top:14px">
       <button class="btn gh" style="flex:1" onclick="closeSheet()">取消</button>
       <button class="btn pri" style="flex:1" onclick="saveTrade()">保存交易</button>
     </div>`;
-  renderCalTip(sug);
+  /* 自动带入统一由 renderTradeForm2() 的买入分支触发（切换交易类型回来时也要重算）。 */
   renderTradeForm2();
 }
-/* 交易日期改动 → 重算确认日与确认净值日期（都可再手动改） */
+/* v133：按产品购买规则 + 交易日期 + 截止前后，自动带入确认日/净值日/净值。
+   买入与赎回都调：赎回的净值日仍由 syncSettleNav() 锁申请日（v129 口径），
+   但确认日/受理日推算共用一套交易日历，不再出现两套标准。 */
+function applyBuyAuto(p) {
+  if (!p) return null;
+  const d = ($("tDate") && $("tDate").value) || today();
+  const after = !!($("tTiming") && $("tTiming").value === "after");
+  const sug = suggestBuyDates(d, p.buyRule, { now: new Date(), orgKey: detectOrg(p), afterCutoff: after });
+  if ($("tConfirm")) $("tConfirm").value = sug.confirmDate;
+  if ($("tNavDate")) $("tNavDate").value = sug.navDate;
+  /* 只精确命中确认净值日：命中就带入，未披露就留空（份额待确认，整笔在途）。 */
+  const exact = navAt(p, sug.navDate);
+  const ready = exact !== undefined && exact !== null && exact !== "" && Number(exact) > 0;
+  if ($("tNav")) $("tNav").value = ready ? Number(exact).toFixed(4) : "";
+  renderCalTip(sug, p, ready);
+  return sug;
+}
+/* 交易日期 / 申购时点改动 → 重算并自动带入（三栏都可再手动改） */
 function onTradeDateChange() {
   const p = DATA.products.find(x => x.id === UI.activePick);
-  const d = $("tDate") ? $("tDate").value : "";
-  if (!p || !d) return;
-  const sug = suggestTradeDates(d, new Date(), detectOrg(p));
-  if ($("tConfirm")) $("tConfirm").value = sug.confirmDate;
-  /* 净值取「受理日当天，没有就向前取最近」：补录历史交易时不会错拿最新的净值 */
-  const hit = navHit(p, sug.navDate);
-  if ($("tNavDate")) $("tNavDate").value = hit ? hit[0] : sug.navDate;
-  if ($("tNav")) $("tNav").value = hit ? Number(hit[1]).toFixed(4) : "";
-  renderCalTip(sug);
-  /* 赎回：净值日期始终锁申请日，不跟随「受理日向前取最近」的买入口径 */
+  if (!p) return;
+  applyBuyAuto(p);
+  /* 赎回：净值日期始终锁申请日，不跟随买入口径（v129）。 */
   if ($("tType") && $("tType").value === "sell") syncSettleNav();
   calcShares();
 }
-/* 推算说明：把「为什么是这个确认日」讲清楚，避免用户误以为系统乱改 */
-function renderCalTip(sug) {
+/* 推算说明：讲清楚「为什么是这个确认日 / 净值日」，避免用户误以为系统乱改 */
+function renderCalTip(sug, p, navReady) {
   const el = $("tCalTip");
   if (!el || !sug) return;
   const why = [];
   if (sug.deferred) why.push("已过当日截止时间，按下一交易日受理");
   else if (sug.rolled) why.push("原日期休市，已顺延");
   if (sug.unknownYears.length) why.push(`${sug.unknownYears.join("/")} 年节假日未配置，按周一至周五估算`);
-  el.textContent = `按交易日历推算：${sug.applyDate} 受理 → 确认日 ${sug.confirmDate}`
-    + (why.length ? `（${why.join("；")}）` : "") + "，可手动修改。";
+  const src = p && hasBuyRule(p) ? "产品购买规则" : "交易日历（默认规则）";
+  let s = `按${src}推算：${sug.applyDate} 受理 → 确认净值日 ${sug.navDate} → 份额确认日 ${sug.confirmDate}`
+    + (why.length ? `（${why.join("；")}）` : "");
+  if (p && navReady === false) s += `；${sug.navDate} 净值尚未披露，保存后整笔在途、不产生浮亏，披露后自动确认份额`;
+  el.textContent = s + "，可手动修改。";
 }
 /* v129 · 赎回结算净值对齐申请日（T 日）。
    净值型产品 T 日申请、按 T 日净值确认、T+1 到账；T 日净值通常 T+1 才披露，
@@ -1566,12 +1603,17 @@ function renderTradeForm2() {
   const pos = p ? position(p) : { shares: 0 };
   const lab = $("tConfirmLab");
   if (lab) lab.textContent = type === "sell" ? "资金到账日（T+1）" : "交易确认日期";
-  const tip = $("tSettleTip");
+  const tip = $("tSettleTip"), calTip = $("tCalTip");
+  /* 申购时点只对买入有意义；赎回按申请日 T 日净值结算，没有「截止前后」的概念。 */
+  if ($("tTimingBox")) $("tTimingBox").style.display = type === "buy" ? "" : "none";
   if (type === "buy") {
     $("tTypeBox").innerHTML = `<div class="field"><label>买入金额（元）</label><input type="number" step="0.01" id="tAmount" placeholder="请输入交易金额" oninput="calcShares()"></div>`;
-    $("tShareBox").innerHTML = `<div class="field"><label>份额（自动计算）</label><input id="tShare" value="自动计算" readonly style="background:#fafbfe;color:var(--ink2)"></div>`;
+    $("tShareBox").innerHTML = `<div class="field"><label>份额（自动计算 / 待披露）</label><input id="tShare" value="自动计算" readonly style="background:#fafbfe;color:var(--ink2)"></div>`;
     if (tip) tip.textContent = "";
     if ($("tNavDate")) $("tNavDate").disabled = false;
+    /* v133：初始化 / 从赎回切回买入，都按产品购买规则重新带入确认日、确认净值日、
+       净值（精确命中，未披露留空 → 份额待披露）。赎回分支会改写这几格，必须重算。 */
+    applyBuyAuto(p);
   } else {
     $("tTypeBox").innerHTML = `<div class="field"><label>赎回份额</label>
       <div class="actin"><input type="number" step="0.0001" id="tShares" placeholder="当前可赎回 ${pos.shares.toFixed(2)} 份" oninput="calcShares()">
@@ -1580,6 +1622,7 @@ function renderTradeForm2() {
     $("tShareBox").innerHTML = `<div class="field"><label>预计到账（元）</label><input id="tAmountShow" value="自动计算" readonly style="background:#fafbfe;color:var(--ink2)"></div>`;
     /* 赎回的净值日期由申请日锁定，不让用户改到 T-1 去（旧版就错在这里）。 */
     if ($("tNavDate")) $("tNavDate").disabled = true;
+    if (calTip) calTip.textContent = `赎回按申请日 ${($("tDate") && $("tDate").value) || today()} 的净值结算、T+1 到账；到账日可手动修改。`;
     syncSettleNav();
   }
   calcShares();
@@ -1587,9 +1630,13 @@ function renderTradeForm2() {
 function autoFillNav() {
   const p = DATA.products.find(x => x.id === UI.activePick); if (!p) return;
   if ($("tType") && $("tType").value === "sell") { syncSettleNav(); calcShares(); return; }
+  /* v133：手动改「确认净值日期」同样只精确命中该日（navAt），绝不 navHit 向前取最近。
+     未披露就留空，保存后整笔在途、份额待披露，官方披露后自动按该日真值回冲。 */
   const d = $("tNavDate").value;
-  const hit = navHit(p, d);
-  if (hit) $("tNav").value = Number(hit[1]).toFixed(4);
+  const exact = d ? navAt(p, d) : undefined;
+  const ready = exact !== undefined && exact !== null && exact !== "" && Number(exact) > 0;
+  if ($("tNav")) $("tNav").value = ready ? Number(exact).toFixed(4) : "";
+  calcShares();
 }
 function calcShares() {
   const p = DATA.products.find(x => x.id === UI.activePick); if (!p) return;
@@ -1597,7 +1644,10 @@ function calcShares() {
   const nav = Number($("tNav").value) || 0;
   if (type === "buy") {
     const amt = Number($("tAmount").value) || 0;
-    $("tShare").value = (nav > 0 && amt > 0) ? (amt / nav).toFixed(4) + " 份" : "自动计算";
+    /* v133：确认净值日未披露 → 明确写「份额待披露」，不是「自动计算」，
+       免得用户以为保存后会立刻按滞后旧净值把份额算死、凭空冒出浮亏。 */
+    $("tShare").value = (nav > 0 && amt > 0) ? (amt / nav).toFixed(4) + " 份"
+      : (amt > 0 && !(nav > 0)) ? "份额待披露（净值披露后自动确认）" : "自动计算";
   } else {
     const sh = Number($("tShares").value) || 0;
     $("tAmountShow").value = nav > 0 ? money(sh * nav) + " 元" : "自动计算";
@@ -1613,7 +1663,6 @@ function saveTrade() {
   const confirmDate = $("tConfirm").value || tradeDate;
   const navDate = $("tNavDate").value || tradeDate;
   let nav = Number($("tNav").value) || 0;
-  if (nav <= 0) return toast("请填写有效的确认净值");
   /* 净值历史只存「官方披露」的值：
      ① 该日期已有净值 → 以已披露值为准（防止交易录入覆盖真实净值）；
      ② 该日期还没有净值 → 不写入。交易自己的确认净值已存在 confirmNav 里，
@@ -1623,16 +1672,29 @@ function saveTrade() {
      真值也会被「已有净值不覆盖」挡住，永远改不回来。 */
   if (!p.navHistory) p.navHistory = {};
   const existing = p.navHistory[navDate];
-  let warned = false, navDisclosed = false;
-  if (existing !== undefined && existing !== null && existing !== "") {
-    navDisclosed = true;
-    if (Math.abs(Number(existing) - nav) > 1e-9) { nav = Number(existing); warned = true; }
+  const navDisclosed = existing !== undefined && existing !== null && existing !== "" && Number(existing) > 0;
+  let warned = false;
+  if (navDisclosed) {
+    /* 该日已有官方净值 → 一律以官方为准（哪怕用户清空了这一格）。 */
+    if (nav > 0 && Math.abs(Number(existing) - nav) > 1e-9) warned = true;
+    nav = Number(existing);
   }
-  let t = { id: uid(), prodId: p.id, type, tradeDate, confirmDate, confirmNavDate: navDate, confirmNav: nav, createdAt: Date.now() };
+  /* v133：买入且确认净值日尚未披露 → 允许空净值保存为「净值待确认」在途单：
+     不打死份额、不计持仓收益；官方披露后 position.js 用 navAt 精确命中该日真值
+     自动回冲份额（见 resolveTradeNav / buyNavPending），无需改单。
+     赎回仍必须有有效净值，沿用 v129 的 T 日结算口径。 */
+  const navPending = type === "buy" && !(nav > 0);
+  if (!(nav > 0) && !navPending) return toast("请填写有效的确认净值");
+  let t = { id: uid(), prodId: p.id, type, tradeDate, confirmDate,
+            confirmNavDate: navDate, confirmNav: nav, createdAt: Date.now() };
+  if (navPending) t.navPending = true;
   if (type === "buy") {
     const amt = Number($("tAmount").value) || 0;
     if (amt <= 0) return toast("请输入买入金额");
-    t.amount = amt; t.shares = Number((amt / nav).toFixed(4));
+    t.amount = amt;
+    /* 待披露不写 shares：tradeShares() 在 navAt 命中前返回 0（整笔在途），
+       命中后自动按官方净值重算，避免用滞后旧净值把份额算死。 */
+    if (!navPending) t.shares = Number((amt / nav).toFixed(4));
   } else {
     /* v129 赎回：T 日申请 → 按 T 日净值结算 → T+1 到账。
        ① settleDate 锁申请日，净值取该日已披露值（上面 existing 已强制覆盖 nav）；
@@ -1658,16 +1720,43 @@ function saveTrade() {
   }
   DATA.trades.push(t);
   saveLocal(); closeSheet();
-  toast(warned ? `已保存。${navDate} 按已披露净值 ${nav.toFixed(4)} 计算`
-    : navDisclosed ? "交易已保存"
-      : `交易已保存。${navDate} 官网还没披露净值，按你填的 ${nav.toFixed(4)} 记入交易（不进净值曲线）`,
-  navDisclosed ? (warned ? 3200 : 2000) : 4200);
+  toast(navPending
+    ? `交易已保存。${navDate} 净值尚未披露，这笔先记为在途、份额待确认，不计持仓收益；官方披露后自动按当日净值确认份额。`
+    : warned ? `已保存。${navDate} 按已披露净值 ${nav.toFixed(4)} 计算`
+      : navDisclosed ? "交易已保存"
+        : `交易已保存。${navDate} 官网还没披露净值，按你填的 ${nav.toFixed(4)} 记入交易（不进净值曲线）`,
+  navPending ? 4600 : navDisclosed ? (warned ? 3200 : 2000) : 4200);
   renderHome(); renderTrade(); renderProd(); autoPush();
 }
 
 /* ============================================================
    产品新增 / 净值录入
    ============================================================ */
+/* v133：产品购买规则表单初值（归一化后按字段取，避免把非法值回显成乱码）。 */
+function buyRuleVal(p, key) {
+  const r = normBuyRule(p && p.buyRule);
+  if (key === "cutoff") return r.cutoff;
+  return String(r[key]);
+}
+/* v133：把表单三格读成一条规则对象。全默认（cutoff 空 / navOffset 0 /
+   confirmOffset 1）时返回 null —— 不往产品里写冗余字段，保持默认口径。 */
+function readBuyRuleForm() {
+  const c = $("pBuyCutoff") ? ($("pBuyCutoff").value || "").trim() : "";
+  const n = $("pBuyNavOffset") ? Number($("pBuyNavOffset").value) : 0;
+  const f = $("pBuyConfirmOffset") ? Number($("pBuyConfirmOffset").value) : 1;
+  const r = normBuyRule({ cutoff: c, navOffset: n, confirmOffset: f });
+  if (!r.cutoff && r.navOffset === 0 && r.confirmOffset === 1) return null;
+  return r;
+}
+/* 表单里的规则实时预览：让用户当场看懂「这样设会得到什么」。 */
+function previewBuyRule() {
+  const el = $("pBuyRulePreview");
+  if (!el) return;
+  const r = readBuyRuleForm();
+  if (!r) { el.textContent = "当前：默认规则（按申请日净值、净值日次日确认、机构截止时点 15:00）。"; return; }
+  const s = suggestBuyDates(today(), r, { now: new Date(), afterCutoff: false });
+  el.textContent = `举例：${s.applyDate} 截止前买入 → 按 ${s.navDate} 净值计算份额 → ${s.confirmDate} 确认份额（截止 ${s.cutoff || "机构默认"}）。`;
+}
 /* 产品表单：新增与编辑共用（pid 为空 = 新增） */
 function prodForm(pid) {
   const p = pid ? DATA.products.find(x => x.id === pid) : null;
@@ -1702,6 +1791,29 @@ function prodForm(pid) {
     <div class="field"><label>确认规则 <span class="muted">（可留空）</span></label>
       <input id="pBenchRule" placeholder="如 最短持有期" value="${esc(p && p.benchRule || "")}">
     </div>
+    <details class="card" style="margin:4px 0 12px">
+      <summary class="card-t" style="cursor:pointer"><h2 style="font-size:13px">购买规则 / 净值确认逻辑 <span class="muted" style="font-weight:400;font-size:11px">（选填，新增买入交易时自动带入）</span></h2></summary>
+      <div style="padding:4px 2px 2px">
+        <div class="note b" style="margin-bottom:10px;font-size:11.5px">不同产品申购确认规则不同。填好后，录入买入交易只需选<b>购买时间</b>和<b>金额</b>，系统按此规则自动带出确认净值日与份额确认日；<b>确认净值日尚未披露净值的买入整笔在途，不产生浮亏</b>，净值披露后自动确认份额。留空则用默认（按申请日净值、净值日次日确认、机构截止时点）。</div>
+        <div class="field"><label>申购截止时点 <span class="muted">（HH:MM，留空用机构默认 15:00）</span></label>
+          <input type="time" id="pBuyCutoff" value="${esc(buyRuleVal(p, "cutoff"))}" step="60" onchange="previewBuyRule()" oninput="previewBuyRule()">
+          <div class="tip">交易日此时刻前提交按当日受理，之后顺延到下一交易日。如「安盈稳健日开7号」为 17:00。</div>
+        </div>
+        <div class="field"><label>确认净值日（按受理日 + N 个交易日）</label>
+          <div class="actin"><select id="pBuyNavOffset" style="flex:1" onchange="previewBuyRule()">
+            ${[0, 1, 2, 3].map(n => `<option value="${n}"${buyRuleVal(p, "navOffset") === String(n) ? " selected" : ""}>T+${n}${n === 0 ? "（当日净值，默认）" : n === 1 ? "（按 T+1 净值，如日开产品）" : ""}</option>`).join("")}
+          </select></div>
+          <div class="tip">份额按这一天的净值计算。日开产品常见「17:00 前买入按 T+1 净值」→ 选 T+1。</div>
+        </div>
+        <div class="field"><label>份额确认日（按确认净值日 + N 个交易日）</label>
+          <div class="actin"><select id="pBuyConfirmOffset" style="flex:1" onchange="previewBuyRule()">
+            ${[0, 1, 2, 3].map(n => `<option value="${n}"${buyRuleVal(p, "confirmOffset") === String(n) ? " selected" : ""}>净值日 +${n}${n === 0 ? "（当日确认）" : n === 1 ? "（默认）" : ""}</option>`).join("")}
+          </select></div>
+          <div class="tip">份额到账日。净值通常 T+1 披露，故确认日在净值日之后。</div>
+        </div>
+        <div id="pBuyRulePreview" class="tip"></div>
+      </div>
+    </details>
     <div class="field"><label>③ 产品名称 *（建议带机构简称）</label>
       <input id="pName" placeholder="如 北银理财京华远见春系列诚享7天持有期29号理财产品" value="${esc(p && p.name || "")}" oninput="onProdCodeInput()">
     </div>
@@ -1716,6 +1828,7 @@ function prodForm(pid) {
       <button class="btn pri" style="flex:1" onclick="saveProduct('${pid || ""}')">${p ? "保存修改" : "保存产品"}</button>
     </div>`);
   onProdCodeInput();
+  previewBuyRule();
 }
 /* 表单里这一栏的初值与提示：只有**手工那一折**才回填进输入框。
    抓取补齐的那一折留在提示里说明，绝不假装成用户填的 —— 否则用户清空输入框
@@ -1830,6 +1943,10 @@ function saveProduct(pid) {
   const benchEl = $("pBench"), benchRuleEl = $("pBenchRule");
   if (benchEl) patch.benchmark = (benchEl.value || "").trim();
   if (benchRuleEl) patch.benchRule = (benchRuleEl.value || "").trim();
+  /* v133：购买规则。整对象随产品同步（mergeForPush 深拷贝整包）；
+     全默认时 readBuyRuleForm() 返回 null，落库写 {} 作为「明确回退默认」标记
+     （见下方落库处注释），既不往产品里塞冗余字段，也能盖掉云端旧规则。 */
+  const buyRule = readBuyRuleForm();
   let target;
   if (pid) {
     target = DATA.products.find(x => x.id === pid);
@@ -1850,6 +1967,13 @@ function saveProduct(pid) {
     DATA.products.push(target);
     if (UI.activePick !== undefined) UI.activePick = target.id;
   }
+  /* v133 购买规则落库：新增/编辑两条路径共用，放在 Object.assign 之后。
+     回退默认写空对象而不是 delete：mergeForPush 的「只填空白」会把云端旧规则
+     补回被删掉的字段（连单设备都删不掉），{} 在合并里算非空，能真正覆盖云端
+     旧值；而 normBuyRule({}) 恰好等于默认规则、hasBuyRule() 也判「未配置」，
+     行为与删字段一致。反过来从没配过规则的设备（无此字段）仍会保留云端规则。 */
+  if (buyRule) target.buyRule = buyRule;
+  else target.buyRule = {};
   /* 规模这一栏：判据全在 disc.js 的 setManualAssetValue（只收元、留空只撤手工那一折）。
      放在 fetchStatus 之前，让后面的提示看到的就是刚落账的状态。 */
   const avEl = $("pAsset");
@@ -8591,7 +8715,7 @@ Object.assign(window, {
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
   exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmPresetXf, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,
-  openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewLink, qrPick, qrShot,
+  openNav, openProd, openProdDetail, openSync, openTrade, openUnknownSources, pickDay, pickProduct, previewBuyRule, previewLink, qrPick, qrShot,
   queryProduct, refreshAna, refreshNav, renderPick, renderTradeForm2, resetManualFetch, saveFromLink, saveDisc, tradeFullRedeem,
   monitorStart, monitorStop, monitorRefresh, monitorCfgSave,
   monitorWatchOne, monitorWatchAll, monitorWatchNone,

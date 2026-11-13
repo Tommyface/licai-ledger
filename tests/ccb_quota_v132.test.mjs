@@ -74,11 +74,11 @@ test("validateBankRows：quota 只许有限数值/null，溯源字段只许字�
   assert.equal(validateBankRows(pack({ ...CCB_ROW, quotaErr: {} })).ok, false);
 });
 
-test("v132 版本钉：APP_VER / CACHE 同步 v132", () => {
+test("版本钉：APP_VER / CACHE 同步 v133", () => {
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v132");
-  assert.equal(cache, "v132");
+  assert.equal(ver, "v133");
+  assert.equal(cache, "v133");
   assert.equal(ver, cache);
 });
 

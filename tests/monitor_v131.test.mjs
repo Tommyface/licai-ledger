@@ -115,12 +115,12 @@ test("v131 接线：双轨 watch、refresh 带配置、池子渲染走 monitorRo
   assert.match(html, /蓝色「披露页」标/, "分流图例说明");
 });
 
-test("版本钉：APP_VER / CACHE 同步 v132", () => {
+test("版本钉：APP_VER / CACHE 同步 v133", () => {
   const sw = readFileSync(new URL("../sw.js", import.meta.url), "utf8");
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   assert.equal(ver, cache);
-  assert.equal(ver, "v132");
+  assert.equal(ver, "v133");
 });
 
 /* 私有仓契约（文件在 ../data24 不在网页仓，这里用源码级断言钉住网页层可见的行为）：
