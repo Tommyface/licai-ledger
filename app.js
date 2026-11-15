@@ -112,6 +112,12 @@ import { reportSession, reportNavFacts, reportMarketFacts, reportPortfolioRows,
   reportScenarios, reportCalHtml,
   /* v125：信息面三路 → 数据块的纯函数（过滤/截断/口径收口都在 report.js，可单测）。 */
   reportNewsFacts, reportFundingFacts, reportSearchFacts } from "./js/domain/report.js";
+/* v136：走势专题（P0）。纯函数层：口径体检 → 一致性检测 → 观察点/证伪线 → 专题事实块。
+   事实层复用 reportFactsText，模型调用复用 BRIEF 状态机与原生桥；不新增云端链路。 */
+import { TREND_PROMPT_VER, TREND_INSTRUCTIONS,
+  trendCaliber, trendConsistency, trendScenarios, trendFactsText,
+  trendAuditValues, trendWatcher, trendCaliberHtml, trendQuestionHint }
+  from "./js/domain/trend.js";
 import { pubCalNext } from "./js/domain/pubcal.js";
 
 /* ---------- 常量 ---------- */
@@ -132,7 +138,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v135";
+const APP_VER = "v136";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -3137,6 +3143,10 @@ function llmSend(text) {
   if (!bg.ok) return toast(bg.why, 6000);
   const q = String(text == null ? "" : text).trim();
   if (!q) return toast("先写一句要问的话", 2600);
+  /* v136 缺口④：问答快照只有单点净值，问「未来走势/会不会涨」会逼模型凭空推断。
+     命中就提示改走专题入口 —— 这一问不发出、不占轮次、不计费（判据在 trend.js，可单测）。 */
+  const trendHint = trendQuestionHint(q);
+  if (trendHint) return toast(trendHint, 6000);
   if (!LLM.hasKey || !(LLM.cfg && LLM.cfg.baseUrl)) return toast(llmDegrade({ inApp: true, hasKey: LLM.hasKey }) || "先配端点", 4200);
   /* 上一轮落进上文 —— 成 / 败 / 超时都算一轮，失败那轮多半已经到过端点。 */
   if (LLM.turn) { LLM.turns.push(LLM.turn); LLM.turn = null; }
@@ -3913,6 +3923,9 @@ function renderProdDetail() {
     <div class="row-btn" style="margin-top:8px">
       <button class="btn pri" style="flex:1" onclick="closeSheet();openNav('${p.id}')">录入净值</button>
       <button class="btn gh" style="flex:1" onclick="openAna('${p.id}')">持仓体检</button>
+    </div>
+    <div class="row-btn" style="margin-top:8px">
+      <button class="btn pri" style="flex:1" onclick="openBriefTrend('${p.id}')">走势专题 · 口径体检 + 并列情景 + 观察点</button>
     </div>`);
 }
 /* 区间起点日期 */
@@ -7901,10 +7914,14 @@ function inflightWrite(slot, o) {
 }
 function inflightClear(slot) { inflightWrite(slot, null); }
 
-/** 研判缓存键：组合与单只分开存，互不覆盖。 */
+/** v136：这一份是不是「走势专题」。mode 挂在 target 上，缓存键 / 指纹 / 指令 /
+    事实块 / 卡片全部按它分派 —— 同一条 BRIEF 状态机，不另建一条请求链路。 */
+function trendMode() { return !!(BRIEF.target && BRIEF.target.mode === "trend"); }
+/** 研判缓存键：组合与单只分开存，互不覆盖；专题再单独一格，别把研报结论画到专题头上。 */
 function briefKey(t) {
   const x = t || BRIEF.target || { kind: "portfolio" };
-  return x.kind === "product" ? "p:" + String(x.id || "") : "all";
+  return (x.kind === "product" ? "p:" + String(x.id || "") : "all")
+    + (x.mode === "trend" ? "|trend" : "");
 }
 function briefCacheRead() {
   try {
@@ -7939,6 +7956,7 @@ function briefCacheGet() {
     （同一个 llmPanelHtml、同一套轮次与计费口径），所以"和现在一样"是结构上的一样，
     不是照着画了一遍。 */
 function renderBriefSheet() {
+  const tm = trendMode();
   /* ★ 这里原来有一句 closeSheet()。它是「切页面就打断研判」的元凶：
      每次重绘都退一格历史，真机上退到初始条目会重载文档。详见 openSheet 下面那段。 */
   let pack = null, packErr = "";
@@ -7958,11 +7976,12 @@ function renderBriefSheet() {
   const searchOn = !!(llmBridge() && LLM.cfg && LLM.cfg.search !== false);
   const btnText = running ? "生成中…"
     : (BRIEF.phase === "error" ? "重试（另计一次）"
-      : (hasOut ? "重新生成（另计一次）" : "生成研报（1 次请求）"));
+      : (hasOut ? "重新生成（另计一次）"
+        : (tm ? "生成走势专题（1 次请求）" : "生成研报（1 次请求）")));
   const tierBtn = (t, txt) => `<button class="bf-chip${BRIEF.tier === t ? " on" : ""}"
       onclick="briefTierSet('${t}')" ${running ? "disabled" : ""}>${txt}</button>`;
   const area = briefCardArea(stale);
-  openSheet(`<div class="sheet-t"><h3>AI 研判</h3><button class="x" onclick="closeSheet()">✕</button></div>
+  openSheet(`<div class="sheet-t"><h3>${tm ? "走势专题" : "AI 研判"}</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div class="bf-bar">
       <div class="bf-tgt"><b>${esc(label)}</b>
         <span>${esc(BRIEF_TIER_LABEL[BRIEF.tier] || BRIEF_TIER_LABEL[BRIEF_TIER_DETAIL])} · 本次 ${chars} 字</span>
@@ -7970,7 +7989,7 @@ function renderBriefSheet() {
       <button class="btn pri bf-go" ${running ? "disabled" : ""} onclick="briefRun(${hasOut ? "true" : "false"})">${btnText}</button>
     </div>
     <div class="bf-chips">${tierBtn(BRIEF_TIER_DETAIL, "明细档")}${tierBtn(BRIEF_TIER_AGG, "聚合档（不发产品名）")}</div>
-    ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：<b>研报数据块 ${built.chars} 字</b>（${built.kind === "product" ? "净值轨迹 + 本地测算" : "持仓一览 + 本地测算"} + 债市表，全部由本机算出；模型只写怎么读）</div>` : ""}
+    ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：<b>${tm ? "走势专题数据块" : "研报数据块"} ${built.chars} 字</b>（${tm ? "口径体检 + 净值轨迹 + 并列情景 + 观察点/证伪线" : (built.kind === "product" ? "净值轨迹 + 本地测算" : "持仓一览 + 本地测算")} + 债市表，全部由本机算出；模型只写怎么读${tm ? "、看什么" : ""}）</div>` : ""}
     ${searchOn ? `<div class="note r" style="margin:0 0 10px">
       端点开着<b>「要求端点做联网检索」</b>，研判用不上它 —— 模型为了凑出处会去搜。
       真机实测：同一份数据、同一个模型，开着 <b>91 秒</b>（撞原生 90 秒读超时，一个字没回来），关掉 <b>15 秒</b>。
@@ -7987,7 +8006,7 @@ function renderBriefSheet() {
       结论只存本机，<b>不写台账、不推云端</b>；模型说的话不会自动改任何一条数据。
       点一次按钮就是一次请求、一次计费 —— 数据没变时第二次点击不会再发（除非按「重新研判」）。
     </div>
-    ${llmPanelHtml(false, "追问这一份研判")}`);
+    ${llmPanelHtml(false, tm ? "追问这一份专题" : "追问这一份研判")}`);
 }
 /**
  * 卡片区（v112）。
@@ -8014,20 +8033,23 @@ function briefCardArea(stale) {
     /* 没生成过就没有「生成时间」这一行 —— 画一句「时间不明」等于告诉读者这里本该有个时间。 */
     atText: BRIEF.at ? briefTimeText(BRIEF.at) : "",
   };
+  /* v136：口径横幅是本地体检算出来的，与模型回传无关 —— 超时/降级/网页版没桥
+     四种情况下它都照画，且必须排在最上面：先看清主口径，再读下面的结论。 */
+  const banner = trendMode() ? trendCaliberHtml(facts.caliber) : "";
   if (BRIEF.res && BRIEF.shape === "brief") {
     /* 旧口径的结论（v108~v111 存下的条目，或模型按旧格式回的）：事实区照画，
        结论用它自己那张条目卡 —— 强行塞进研报模板会丢掉 basis 标签。 */
-    return groundBannerHtml(BRIEF.grounding)
+    return banner + groundBannerHtml(BRIEF.grounding)
       + reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
       + briefCardHtml(BRIEF.res, {
         tier: BRIEF.tier, chars: BRIEF.chars, dropped: BRIEF.dropped, stale,
         atText: briefTimeText(BRIEF.at), ms: BRIEF.ms,
       });
   }
-  if (BRIEF.res) return groundBannerHtml(BRIEF.grounding)
+  if (BRIEF.res) return banner + groundBannerHtml(BRIEF.grounding)
     + reportCardHtml(Object.assign({ rep: BRIEF.res }, opt));
   if (BRIEF.raw) {
-    return groundBannerHtml(BRIEF.grounding)
+    return banner + groundBannerHtml(BRIEF.grounding)
       + reportCardHtml(Object.assign({ rep: null, placeholderHtml: "" }, opt))
       + briefRawHtml(BRIEF.raw, { stale, atText: briefTimeText(BRIEF.at) });
   }
@@ -8051,7 +8073,7 @@ function briefCardArea(stale) {
   } else {
     ph = `<div class="rp-sec"><div class="rp-none">点上面的「生成研报」，让模型写三段怎么读这两张表。上面这些是本地算的，不用等它。</div></div>`;
   }
-  return reportCardHtml(Object.assign({ rep: null, placeholderHtml: ph }, opt));
+  return banner + reportCardHtml(Object.assign({ rep: null, placeholderHtml: ph }, opt));
 }
 /**
  * 同一个目标吗？研判「生成中能不能重新打开」全靠这一条判断。
@@ -8062,6 +8084,8 @@ function briefSameTarget(t) {
   const a = BRIEF.target || { kind: "portfolio" };
   const b = t || { kind: "portfolio" };
   if ((a.kind || "portfolio") !== (b.kind || "portfolio")) return false;
+  /* v136：同一只产品的「研报」与「走势专题」是两份不同的结论，不能互相顶掉。 */
+  if (String(a.mode || "") !== String(b.mode || "")) return false;
   if ((a.kind || "portfolio") !== "product") return true;
   return String(a.id || "") === String(b.id || "");
 }
@@ -8108,6 +8132,16 @@ function openBriefProduct(pid) {
   const p = DATA.products.find(x => x.id === pid);
   if (!p) return toast("产品不存在，请刷新后重试");
   openBrief({ kind: "product", id: pid });
+}
+/** v136 走势专题入口：产品详情页那颗按钮。先挡住「序列不足」这一档 ——
+    只有 1 个点时口径体检、三档情景、证伪线全都算不出来，发出去就是让模型编。 */
+function openBriefTrend(pid) {
+  const p = DATA.products.find(x => x.id === pid);
+  if (!p) return toast("产品不存在，请刷新后重试");
+  if (navSeries(p).filter(x => isFinite(Number(x[1])) && Number(x[1]) > 0).length < 2) {
+    return toast("这只产品的净值序列不足 2 个披露点，走势专题需要至少两个点 —— 先去「录入净值」", 5600);
+  }
+  openBrief({ kind: "product", id: pid, mode: "trend" });
 }
 function briefTierSet(t) {
   if (BRIEF.phase === "running") return toast("生成中不能换档，等它落定", 3000);
@@ -8291,17 +8325,31 @@ function briefFacts() {
   if (t.kind === "product") {
     const it = all.find(x => x.id === t.id) || {};
     const p = DATA.products.find(x => x.id === t.id);
-    const nav = reportNavFacts(p ? navSeries(p) : [], { today: td });
-    return {
+    const series = p ? navSeries(p) : [];
+    const nav = reportNavFacts(series, { today: td });
+    const watch0 = reportWatch(nav, mk, ses, { cal });
+    /* v136：口径体检 / 一致性 / 观察点证伪线**只在专题模式**装配，研报链路一个字段不加。
+       本期不新增官方万份收益录入（方案决策 3），officialWan 传 null：
+       只做净值序列自身的启发式体检，不拿折算值冒充官方值、不谎称交叉核对。 */
+    const tm = trendMode();
+    const caliber = tm ? trendCaliber(p, { today: td, officialWan: null }) : null;
+    const consistency = tm ? trendConsistency(series, null) : null;
+    /* 情景表只挂在单只这一支（组合层没有单条净值序列，不硬凑）—— 这个相对位置
+       由 tests/app_core.test.mjs 的 v114 断言钉住，所以 scenarios 写在 return 之后不行，
+       改成先装配 out 再补 watch，既保持位置又只算一次。 */
+    const out = {
       session: ses, kind: "product",
       name: agg ? "这一只（名称已隐去）" : String(it.name || ""),
       inst: agg ? "" : String(it.inst || ""),
       nav, market: mk, cal, live: lvBrief, macro: mcBrief,
       /* v125：信息面三路（直抓线索 / 资金面 / 检索包）。null = 本机没有这份，渲染端按块内口径写「没有」。 */
       news: newsFactsForBrief(), funding: fundingFactsForBrief(), search: searchFactsForBrief(),
-      scenarios: reportScenarios(nav, { k: 5 }),
-      watch: reportWatch(nav, mk, ses, { cal }), gaps: briefGaps(lvBrief),
+      caliber, consistency,
+      scenarios: tm ? trendScenarios(nav, { k: 5 }) : reportScenarios(nav, { k: 5 }),
+      watch: watch0, gaps: briefGaps(lvBrief),
     };
+    if (tm) out.watch = trendWatcher(caliber, consistency, out.scenarios).concat(watch0);
+    return out;
   }
   const rows = reportPortfolioRows(all, { today: td })
     .map((r, i) => (agg ? Object.assign({}, r, { name: "产品" + (i + 1) }) : r));
@@ -8315,15 +8363,21 @@ function briefFacts() {
 function briefPack() {
   const t = BRIEF.target || { kind: "portfolio" };
   const facts = briefFacts();
-  const input = reportFactsText({
+  const tm = trendMode();
+  const q = {
     session: facts.session, kind: facts.kind, name: facts.name, inst: facts.inst,
     nav: facts.nav, rows: facts.rows, market: facts.market, gaps: facts.gaps, live: facts.live,
     scenarios: facts.scenarios, cal: facts.cal, macro: facts.macro, today: today(),
     /* v125：信息面三路进数据块（晴雨摘要已并入 facts.market.ai，渲染端自取）。 */
     news: facts.news, funding: facts.funding, search: facts.search,
-  });
+  };
+  /* v136：专题只换「事实块 + 指令」，其余（发送、超时、缓存、降级、免责）全部沿用。
+     trendFactsText 内部复用 reportFactsText，口径段与观察点段是前后加的两段。 */
+  const input = tm
+    ? trendFactsText(Object.assign({}, q, { caliber: facts.caliber, consistency: facts.consistency }))
+    : reportFactsText(q);
   const built = {
-    v: 2, input, instructions: REPORT_INSTRUCTIONS, chars: input.length,
+    v: tm ? 3 : 2, input, instructions: tm ? TREND_INSTRUCTIONS : REPORT_INSTRUCTIONS, chars: input.length,
     tier: BRIEF.tier, kind: facts.kind, blocks: [], dropped: [], over: false,
   };
   /* 指纹带上时点：盘前生成的那一份，到盘后叙述重心已经不对了，应当作废重来。
@@ -8342,7 +8396,8 @@ function briefPack() {
     fundingAsOf: (NEWS && NEWS.funding && NEWS.funding.asOf) || "",
     ayAt: (AY_PACK && AY_PACK.asOf) || "",
     tier: BRIEF.tier,
-    ver: REPORT_PROMPT_VER + "|" + facts.session.key + (facts.live ? "|L" + lvSlot : ""),
+    /* v136：提示词版本进指纹 —— 专题与研报是两套契约，改了指令不能让用户看到旧结论。 */
+    ver: (tm ? TREND_PROMPT_VER : REPORT_PROMPT_VER) + "|" + facts.session.key + (facts.live ? "|L" + lvSlot : ""),
   });
   return { built, fp, facts };
 }
@@ -8520,7 +8575,9 @@ function briefRepaint() {
   if (LLM.host === "brief" && sheetOpen()) { renderBriefSheet(); return; }
   /* 弹层已经关了 / 人在别的页面：结论回来时提醒一句，但**绝不把窗口弹回来**。
      不提醒的话，用户只能靠自己再点开才发现 —— 在他的感受里那十几秒就是「被打断了」。 */
-  if (BRIEF.phase === "done") toast("研判生成好了 — 回「持仓体检 → AI 研判」就能看", 3800);
+  if (BRIEF.phase === "done") toast(trendMode()
+    ? "走势专题生成好了 — 回「产品详情 → 走势专题」就能看"
+    : "研判生成好了 — 回「持仓体检 → AI 研判」就能看", 3800);
 }
 function briefChunk(seq, total, text) {
   if (BRIEF.phase !== "running") return;
@@ -8630,11 +8687,16 @@ function briefDone(metaJson) {
      坏一段只丢一段，不会像 JSON 那样坏一个逗号整份作废。 */
   const pr = parseReport(text);
   if (pr.ok) {
-    BRIEF.phase = "done"; BRIEF.shape = "report";
+    const tm = trendMode();
+    /* v136：专题沿用同一个 parseReport（头部三行 + `##` 分段，五段正好落在
+       REPORT_MAX_PARAS 内），但 shape / promptVer 要标成专题 —— 缓存恢复时
+       不会把专题结论当成普通研报，也便于事后辨认这一份用的是哪套契约。 */
+    if (tm) pr.report.promptVer = TREND_PROMPT_VER;
+    BRIEF.phase = "done"; BRIEF.shape = tm ? "trend" : "report";
     BRIEF.res = pr.report; BRIEF.raw = ""; BRIEF.at = Date.now();
     BRIEF.dropped = pr.dropped || null;
     BRIEF.audit = reportNumberAudit(reportPlainText(pr.report), briefAuditValues());
-    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: "report", res: pr.report,
+    briefCachePut({ fp: BRIEF.fp, at: BRIEF.at, tier: BRIEF.tier, shape: tm ? "trend" : "report", res: pr.report,
       raw: "", chars: BRIEF.chars, dropped: BRIEF.dropped, ms: BRIEF.ms, audit: BRIEF.audit,
       grounding: BRIEF.grounding });
     briefPushTurn(pr.report);
@@ -8731,6 +8793,9 @@ function briefAuditValues() {
   };
   if (f.news && f.news.ok) titleNums(f.news.items);
   if (f.search && f.search.ok) titleNums(f.search.items);
+  /* v136：专题新增的口径倍数、观察阈值、证伪线净值全部进白名单 —— 模型照抄这些数
+     若被判「编造」，是最伤信任的一类误报。编造出来的 99.9 依然不在集合里。 */
+  if (trendMode()) for (const n of trendAuditValues(f)) push(n);
   return v;
 }
 /** 把这一份塞进追问的上文：追问时模型能看见自己刚才说了什么。
@@ -8763,7 +8828,7 @@ function llmRoute(id) {
    ⚠️ 这段注释必须留在 Object.assign 之外：清单的解析按逗号切分，
    写在花括号里会把整段注释当成一个名字。 */
 Object.assign(window, {
-  openBriefPortfolio, openBriefProduct, briefRun, briefCancel, briefTierSet,
+  openBriefPortfolio, openBriefProduct, openBriefTrend, briefRun, briefCancel, briefTierSet,
   briefSearchOff, briefSearchOffRetry,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,

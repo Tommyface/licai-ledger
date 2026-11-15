@@ -65,8 +65,12 @@ export const BRIEF_BASIS_LABEL = { ledger: "台账", check: "体检", market: "�
 export const BRIEF_SECTION_TITLE = { structure: "结构", product: "产品", market: "市场" };
 const SECTION_KEYS = ["structure", "product", "market"];
 
-/** 禁用词：收益预测与「目标价」类表述。命中 headline → 整份拒收（结论不可信）。 */
-export const BRIEF_BANNED_RE = /(预期收益|预计收益|收益率预测|预测收益|预测净值|必涨|稳赚|保本保收益|目标净值|止损位|止盈位|止损价|止盈价)/;
+/** 禁用词：收益预测、概率化结论与「目标价」类表述。命中 headline → 整份拒收（结论不可信）。
+    v136 走势专题带来的新增项：外部专家式输出里的「概率 <10%」「收益中枢下修半档」
+    「前瞻收益」「上涨空间」都属于没有可核依据的预测，一并拦掉 —— 数字交给确定性代码，
+    模型只写「看什么、什么会使结论失效」。改这条要同步跑 tests/brief.test.mjs 与
+    tests/report.test.mjs（两条解析路径都用它）。 */
+export const BRIEF_BANNED_RE = /(预期收益|预计收益|收益率预测|预测收益|预测净值|必涨|稳赚|保本保收益|目标净值|止损位|止盈位|止损价|止盈价|概率|收益中枢|中枢下修|前瞻收益|涨跌幅预测|预计涨幅|目标收益|上涨空间|下行空间)/;
 /** 固定页脚：不构成投资建议。所有呈现路径都要带上，包括降级原文。 */
 export const BRIEF_DISCLAIMER = "以上为信息整理，不构成投资建议；模型可能出错，请自行核对。";
 
