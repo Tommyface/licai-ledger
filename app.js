@@ -116,7 +116,8 @@ import { reportSession, reportNavFacts, reportMarketFacts, reportPortfolioRows,
    事实层复用 reportFactsText，模型调用复用 BRIEF 状态机与原生桥；不新增云端链路。 */
 import { TREND_PROMPT_VER, TREND_INSTRUCTIONS,
   trendCaliber, trendConsistency, trendScenarios, trendFactsText,
-  trendAuditValues, trendWatcher, trendCaliberHtml, trendQuestionHint }
+  trendAuditValues, trendWatcher, trendCaliberHtml, trendQuestionHint,
+  trendFreshness, trendFreshHtml }
   from "./js/domain/trend.js";
 import { pubCalNext } from "./js/domain/pubcal.js";
 
@@ -138,7 +139,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v136";
+const APP_VER = "v137";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -7989,15 +7990,23 @@ function renderBriefSheet() {
       <button class="btn pri bf-go" ${running ? "disabled" : ""} onclick="briefRun(${hasOut ? "true" : "false"})">${btnText}</button>
     </div>
     <div class="bf-chips">${tierBtn(BRIEF_TIER_DETAIL, "明细档")}${tierBtn(BRIEF_TIER_AGG, "聚合档（不发产品名）")}</div>
+    ${tm ? `<div class="row-btn" style="margin:0 0 10px"><button class="btn gh" style="flex:1" ${running ? "disabled" : ""} onclick="trendInfoRefresh()">更新信息面（新闻快照 + 检索）</button></div>` : ""}
     ${built ? `<div class="cap" style="padding:2px 0 8px">本次会发到端点：<b>${tm ? "走势专题数据块" : "研报数据块"} ${built.chars} 字</b>（${tm ? "口径体检 + 净值轨迹 + 并列情景 + 观察点/证伪线" : (built.kind === "product" ? "净值轨迹 + 本地测算" : "持仓一览 + 本地测算")} + 债市表，全部由本机算出；模型只写怎么读${tm ? "、看什么" : ""}）</div>` : ""}
-    ${searchOn ? `<div class="note r" style="margin:0 0 10px">
+    ${searchOn ? (tm ? `<div class="note" style="margin:0 0 10px">
+      端点开着<b>「要求端点做联网检索」</b>。走势专题允许联网找「最新金融信息」，但三条闸不变：
+      检索内容只以<b>线索 · 待核</b>入数据块；<b>检索正文里的数字不进审计白名单</b>，模型照抄就会被数字审计判红；
+      真机实测开着检索明显更慢（91 秒撞 90 秒读超时的案例），赶时间可以先关。
+      <div class="row-btn" style="margin-top:8px">
+        <button class="btn gh" style="flex:1" onclick="briefSearchOff()">本次先关掉检索（不重发）</button>
+      </div>
+    </div>` : `<div class="note r" style="margin:0 0 10px">
       端点开着<b>「要求端点做联网检索」</b>，研判用不上它 —— 模型为了凑出处会去搜。
       真机实测：同一份数据、同一个模型，开着 <b>91 秒</b>（撞原生 90 秒读超时，一个字没回来），关掉 <b>15 秒</b>。
       <div class="row-btn" style="margin-top:8px">
         <button class="btn gh" style="flex:1" onclick="briefSearchOff()">先关掉检索（不重发）</button>
       </div>
       <div class="cap" style="padding:6px 0 0">关掉之后，下面的追问也不会再带出处 —— 需要出处时回设置页再勾上。</div>
-    </div>` : ""}
+    </div>`) : ""}
     ${packErr ? `<div class="note r">装配数据块时出错：${esc(packErr)}</div>` : ""}
     ${area}
     <div class="cap" style="padding:10px 0 0">
@@ -8034,8 +8043,13 @@ function briefCardArea(stale) {
     atText: BRIEF.at ? briefTimeText(BRIEF.at) : "",
   };
   /* v136：口径横幅是本地体检算出来的，与模型回传无关 —— 超时/降级/网页版没桥
-     四种情况下它都照画，且必须排在最上面：先看清主口径，再读下面的结论。 */
-  const banner = trendMode() ? trendCaliberHtml(facts.caliber) : "";
+     四种情况下它都照画，且必须排在最上面：先看清主口径，再读下面的结论。
+     v137（P1）：紧跟着画信息面四路时点横幅（渲染层现算，不进指纹）——
+     超龄的信息面必须亮出来，不能静默当「最新」用。 */
+  const banner = trendMode()
+    ? trendCaliberHtml(facts.caliber)
+      + trendFreshHtml(trendFreshness({ news: NEWS, ay: AY_PACK, market: MARKET, live: LIVE }))
+    : "";
   if (BRIEF.res && BRIEF.shape === "brief") {
     /* 旧口径的结论（v108~v111 存下的条目，或模型按旧格式回的）：事实区照画，
        结论用它自己那张条目卡 —— 强行塞进研报模板会丢掉 basis 标签。 */
@@ -8147,6 +8161,28 @@ function briefTierSet(t) {
   if (BRIEF.phase === "running") return toast("生成中不能换档，等它落定", 3000);
   BRIEF.tier = t === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
   renderBriefSheet();
+}
+
+/** v137 P1：一键刷新信息面（走势专题面板那颗按钮）。
+    顺序 = 新闻快照（newsRefresh force 旁路 TTL；通道 off / 未配置同步时它自己
+    短路并说清原因，不会炸）→ AnySearch 检索（有 key 才发，「一次检索一次配额」
+    铁律不变）。债市快照与盘中参考**不在这里代刷**：它们各有自己的时效口径与
+    刷新入口（债市页「更新此刻」），横幅负责指出谁过期、面板只管它管得动的两路。
+    刷完 briefRepaint() 让时点横幅立刻反映新时点；不触碰 BRIEF 结论与指纹 ——
+    指纹不含新鲜度，这一下不会把「数据没变直接用上一份」的省费闸打碎。 */
+let _trendInfoBusy = false;
+async function trendInfoRefresh() {
+  if (_trendInfoBusy) return;
+  _trendInfoBusy = true;
+  toast("刷新信息面：新闻快照 → 检索（若已配 key）", 2600);
+  try {
+    await newsRefresh({ force: true });
+    if (nativeFetchAvailable() && ayHasKey()) await anysearchRun();
+    toast("信息面已更新 —— 过期与否看专题里的时点横幅", 3600);
+  } finally {
+    _trendInfoBusy = false;
+    briefRepaint();
+  }
 }
 
 /* ---------- AI 研判：装配 / 发送 / 回传（v108 · T4）----------
@@ -8829,7 +8865,7 @@ function llmRoute(id) {
    写在花括号里会把整段注释当成一个名字。 */
 Object.assign(window, {
   openBriefPortfolio, openBriefProduct, openBriefTrend, briefRun, briefCancel, briefTierSet,
-  briefSearchOff, briefSearchOffRetry,
+  briefSearchOff, briefSearchOffRetry, trendInfoRefresh,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,
   exportFullBackup, exportJSON, go, importFullBackup, importJSON, ledgermeCheckNow, ledgermeLoginFlow, ledgermeLogout, marketCopyAi, marketCopyTable, marketRefreshAll, newsChannelSet, newsRefresh, anysearchRun, anysearchSetKey, anysearchClearKey, ocrPick, ocrShot, onBdSearch, onDetSearch, onProdCodeInput, onTradeDateChange, llmAsk, llmCancel, llmClearChat, llmClearKey, llmDataToggle, llmPresetXf, llmRetry, llmSaveCfg, llmSetKey, openAna, openAnaIndex, openDisc, openLinkAdd, openLlm, openMarket, openMonthly,

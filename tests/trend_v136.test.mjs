@@ -354,8 +354,8 @@ test("⑧ 接线：模块、入口、mode 分派、横幅、审计白名单、�
 test("⑧ 版本钉 v136：APP_VER / CACHE 同步、新模块进 SHELL、两份测试清单双登记", () => {
   const ver = /const APP_VER = "(v\d+)"/.exec(APP)[1];
   const cache = /const CACHE = "licai-ledger-(v\d+)"/.exec(SW)[1];
-  assert.equal(ver, "v136");
-  assert.equal(cache, "v136");
+  assert.equal(ver, "v137");
+  assert.equal(cache, "v137");
   assert.equal(ver, cache);
   assert.match(SW, /"\.\/js\/domain\/trend\.js"/, "漏进 SHELL 会离线整页空白");
   assert.ok(PKG.includes("tests/trend_v136.test.mjs"), "npm test 要登记");

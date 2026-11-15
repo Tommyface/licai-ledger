@@ -1,7 +1,9 @@
 name: Pages Deploy
+# v137：改为仅手动触发（workflow_dispatch）。仓库 Pages 未启用期间，
+# push 触发只会每次失败一次、白烧 Actions 分钟并留红标；启用 Pages 的动作
+# 仍是网页一键（Settings → Pages → Source: GitHub Actions），启用后回这里
+# 手动跑一次即可完成部署；若想恢复 push 自动部署，把 push 触发加回来。
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read

@@ -20,11 +20,11 @@ const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url),
 const BOC_LINK = "https://ebsnew.boc.cn/bocphone/VueLocalCli4/bocFinanceDetail/index.html"
   + "#/productDetail?functionCode=bocFinanceProductDetail&productId=WFZDJQRKA&lastShortUrl=dCEO2otAzz";
 
-test("v135 版本钉：APP_VER / CACHE 同步 v136，专项进两份测试清单", () => {
+test("v135 版本钉：APP_VER / CACHE 同步 v137，专项进两份测试清单", () => {
   const ver = /const APP_VER = "([^"]+)"/.exec(app)[1];
   const cache = /const CACHE = "licai-ledger-([^"]+)"/.exec(sw)[1];
-  assert.equal(ver, "v136");
-  assert.equal(cache, "v136");
+  assert.equal(ver, "v137");
+  assert.equal(cache, "v137");
   assert.match(pkg, /bocmob_v135\.test\.mjs/, "npm test 登记");
   assert.match(ci, /bocmob_v135\.test\.mjs/, "CI 登记");
 });

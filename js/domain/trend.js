@@ -502,3 +502,85 @@ export function trendQuestionHint(q) {
   return "问走势请走「走势专题」：产品详情 → 走势专题，那里带净值序列、口径体检、并列情景与观察点/证伪线。"
     + "这里的问答只有单点净值，直接问会让模型凭空推断 —— 这一问没有发出，也没有计费。";
 }
+
+/* ================= v137 · P1：信息面新鲜度（自动 + 可核） =================
+   方案 4.4 第 1 条：专题卡片顶部显示信息面四路的时点，超期明说「建议刷新」，
+   不静默用旧数据冒充最新。四路 = 新闻快照（NEWS.asOf）/ 检索包（AY_PACK.asOf）/
+   债市快照（MARKET.weather.asOf，交易日日终）/ 盘中参考（LIVE.at，毫秒）。
+
+   ★ 两条边界（改任何一条都要同步改 tests/trend_p1_v137.test.mjs）：
+     1. 新鲜度只在**渲染层**现算：不进 briefPack、不进指纹 fp —— 时点每分钟都在变，
+        进指纹会把「数据没变，直接用上一份」的省费闸打碎；
+     2. 只标注、不代替刷新：横幅给出「建议刷新」，真正的刷新永远是用户点按钮
+        （newsRefresh(force) / anysearchRun()），不后台自动跑（铁律 #5）。 */
+
+/** 超龄阈值（小时）。news/ay=36h（每日 3 档 cron + 手动检索的合理跨度）；
+    market=72h（交易日日终估值，跨周末顺延属正常）；live=12h（盘中数据隔日必旧）。 */
+export const TREND_FRESH_LIMITS = { news: 36, ay: 36, market: 72, live: 12 };
+
+/** 时点 → 距 now 的小时数。支持「YYYY-MM-DD HH:MM」「YYYY-MM-DD」（按 +08:00，
+    北京时点）与毫秒数；解析不了返回 NaN —— NaN 一律按「missing」处理，
+    绝不把读不懂的时点当成「新鲜」。 */
+export function trendAgeHours(dt, now = Date.now()) {
+  if (dt == null || dt === "") return NaN;
+  if (typeof dt === "number") return isFinite(dt) ? (now - dt) / 3600000 : NaN;
+  const s = String(dt).trim();
+  if (!s) return NaN;
+  const t = Date.parse(s.includes(":")
+    ? s.replace(" ", "T") + "+08:00"
+    : s + "T00:00:00+08:00");
+  return isFinite(t) ? (now - t) / 3600000 : NaN;
+}
+
+/** 四路时点盘点 → { items, stale, missing, allOk, note }。
+    每项：{ key, label, missing, stale, ageH, asOfText, ageText, lim, hint }。
+    missing = 没有数据或时点读不懂；stale = 有数据但超过阈值。两者互斥。 */
+export function trendFreshness(src, now = Date.now()) {
+  const item = (key, label, dt, lim, hint) => {
+    const h = trendAgeHours(dt, now);
+    const missing = !isFinite(h);
+    return {
+      key, label, missing, stale: !missing && h > lim, ageH: missing ? NaN : h,
+      asOfText: missing ? "" : String(typeof dt === "number" ? "" : dt).slice(0, 16),
+      ageText: missing ? "" : h >= 24 ? (h / 24).toFixed(1) + " 天前" : Math.round(h) + " 小时前",
+      lim, hint,
+    };
+  };
+  const news = src && src.news, ay = src && src.ay;
+  const market = src && src.market, live = src && src.live;
+  const items = [
+    item("news", "新闻快照", news ? news.asOf : null, TREND_FRESH_LIMITS.news, "每日 3 档 cron"),
+    item("ay", "检索包", ay ? ay.asOf : null, TREND_FRESH_LIMITS.ay, "手动检索 · 非发布时间"),
+    item("market", "债市快照", market && market.weather ? market.weather.asOf : null, TREND_FRESH_LIMITS.market, "交易日日终 · 周末顺延"),
+    item("live", "盘中参考", live ? live.at : null, TREND_FRESH_LIMITS.live, "实时行情 · 盘中有效"),
+  ];
+  const stale = items.filter(i => i.stale);
+  const missing = items.filter(i => i.missing);
+  const note = missing.length === items.length
+    ? "信息面四路都没有数据 —— 点「更新信息面」先取一次"
+    : stale.length
+      ? "信息面已过期，建议刷新：" + stale.map(i => i.label).join("、")
+      : missing.length
+        ? "缺 " + missing.map(i => i.label).join("、") + "（不影响其余三路照常使用）"
+        : "";
+  return { items, stale, missing, allOk: stale.length === 0 && missing.length === 0, note };
+}
+
+/** 横幅渲染。复用 rp-audit 卡样式（与口径横幅同族，零新增 CSS）：
+    warn 色只在有过期项时出现，全新鲜时不打扰。 */
+export function trendFreshHtml(fresh) {
+  if (!fresh || !Array.isArray(fresh.items)) return "";
+  const row = i => {
+    const mark = i.missing ? "·" : i.stale ? "✗" : "✓";
+    const val = i.missing
+      ? "没有数据"
+      : esc(i.asOfText) + "（北京）· " + i.ageText + (i.stale ? " · 超龄" : "");
+    return `<div><span class="${i.stale ? "rp-bad" : ""}">${mark}</span> ${esc(i.label)}：${val}`
+      + ` <span style="opacity:.62">（${esc(i.hint)}）</span></div>`;
+  };
+  const cls = fresh.stale && fresh.stale.length ? " warn" : "";
+  const head = fresh.allOk ? "信息面时点 · 四路都在有效期内" : "信息面时点 · 有过期或缺项，看下面";
+  return `<div class="rp-audit${cls}" data-trend-fresh="1"><b>${esc(head)}</b>`
+    + fresh.items.map(row).join("")
+    + (fresh.note ? `<div>${esc(fresh.note)}</div>` : "") + "</div>";
+}
