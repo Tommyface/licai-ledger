@@ -110,9 +110,9 @@ const runHero = (m, st = ST_IDLE, lst = LIVE_ST_IDLE, macro = null, mst = MACRO_
 const ST = (over = {}) => ({ phase: "idle", at: 0, err: "", cached: false, ...over });
 
 /* ---------- 1. 首页入口接线 ---------- */
-test("首页原交易中心快捷入口已换成债市晴雨表，底部交易 tab 保留", () => {
+test("首页原交易中心快捷入口已换成债市行情，底部交易 tab 保留", () => {
   const home = html.slice(html.indexOf('id="pg-home"'), html.indexOf('id="pg-trade"'));
-  assert.ok(home.includes("<b>债市晴雨表</b>"), "首页找不到债市晴雨表入口");
+  assert.ok(home.includes("<b>债市行情</b>"), "首页找不到债市行情入口");
   assert.ok(/onclick="openMarket\(\)"/.test(home), "整行没接 openMarket()");
   /* v130：首页入口不显示小字（用户需求 4）—— marketHint / monthlyHint 挂点移除，
      renderHome 侧的写入保留容错（if ($(...)) 判空），元素不在就跳过。 */
@@ -184,7 +184,7 @@ test("10 处内部重绘全部走 llmRepaint，没有一处漏回 openLlm（回�
 test("债市页：上部行情（marketHeroHtml）、下部对话（llmPanelHtml(false)），顺序固定", () => {
   const i = app.indexOf("function renderMarketSheet()");
   const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
-  assert.ok(src.includes("<h3>债市晴雨表</h3>"), "标题不对");
+  assert.ok(src.includes("<h3>债市行情</h3>"), "标题不对");
   const h = src.indexOf("marketHeroHtml()");
   const p = src.indexOf("llmPanelHtml(false");
   assert.ok(h > 0 && p > h, "行情必须排在对话框前面");

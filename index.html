@@ -855,15 +855,15 @@ details.card:not([open]) > summary{margin-bottom:0}
       <!-- v104：首页原「交易中心」快捷入口换成「债市晴雨表」。交易记录/新增交易
            仍从底部「交易」tab 进（pg-trade 内 + 新增交易按钮不变），功能不丢。 -->
       <div class="entry slim" onclick="openMarket()">
-        <div class="ic">晴</div>
-        <div class="tx"><b>债市晴雨表</b></div>
+        <div class="ic">行情</div>
+        <div class="tx"><b>债市行情</b></div>
         <button class="go" onclick="event.stopPropagation();openMarket()">查看</button>
       </div>
       <!-- v63：体检的台账页入口。放整行而不是产品名后面挂个小链接 ——
            它是「组合级」的动作（选一只来查），跟资产月报、交易中心是同一层。 -->
       <div class="entry slim" onclick="openAnaIndex()">
-        <div class="ic">检</div>
-        <div class="tx"><b>持仓体检</b></div>
+        <div class="ic">析</div>
+        <div class="tx"><b>持仓分析</b></div>
         <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
       </div>
       <!-- v130：首页监控入口整行移除（用户反馈首页臃肿；底部 tabbar 第 5 个
@@ -956,8 +956,8 @@ details.card:not([open]) > summary{margin-bottom:0}
       <!-- v63：交易中心的体检入口，跟台账页那行是同一个落点（openAnaIndex）。
            放在「我的产品」这张卡里：体检判的就是产品列表 + 净值 + 披露三处数据齐不齐。 -->
       <div class="entry" onclick="openAnaIndex()">
-        <div class="ic">检</div>
-        <div class="tx"><b>持仓体检</b></div>
+        <div class="ic">析</div>
+        <div class="tx"><b>持仓分析</b></div>
         <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
       </div>
     </details>

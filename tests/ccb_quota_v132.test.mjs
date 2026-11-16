@@ -77,8 +77,8 @@ test("validateBankRows：quota 只许有限数值/null，溯源字段只许字�
 test("版本钉：APP_VER / CACHE 同步 v138", () => {
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v138");
-  assert.equal(cache, "v138");
+  assert.equal(ver, "v139");
+  assert.equal(cache, "v139");
   assert.equal(ver, cache);
 });
 

@@ -139,7 +139,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v138";
+const APP_VER = "v139";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2414,7 +2414,7 @@ function renderAna(force) {
       : force ? `按「强制重算」于 ${anaTimeText(Date.now())} 重算`
         : `本次体检在 ${anaTimeText(Date.now())} 现算（这只产品还没有体检记录）`;
   }
-  openSheet(`<div class="sheet-t"><h3>持仓体检</h3><button class="x" onclick="closeSheet()">✕</button></div>
+  openSheet(`<div class="sheet-t"><h3>持仓分析</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div class="note b" style="margin-bottom:12px">
       给 <b>${esc(prodLabel(p))}</b> 做一遍体检。<br>
       判据全部来自本账本已有的数据与已录的披露规则（净值 / 份额 / 持有天数 / 赎回费档），
@@ -2473,7 +2473,7 @@ function openAnaIndex() {
       ${st.state === "fresh" ? `<div class="pk"><i>${esc(anaSumLine(st.checks))} · ${esc(anaTimeText(st.at))}</i></div>` : ""}
     </div>`;
   }).join("");
-  openSheet(`<div class="sheet-t"><h3>持仓体检</h3><button class="x" onclick="closeSheet()">✕</button></div>
+  openSheet(`<div class="sheet-t"><h3>持仓分析</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div class="note b" style="margin-bottom:12px">
       体检是<b>一只一只</b>判的，选一只看它自己的 9 项。
       判据全部来自本账本已有的数据与已录的披露规则（净值 / 份额 / 持有天数 / 赎回费档），
@@ -3128,7 +3128,7 @@ function renderLlmSheet() {
 /** 宿主二：首页「债市晴雨表」。上部行情、下部对话框，一次弹层里两件事都在。
     网页版没有模型桥时行情照显，对话框给降级提示（llmStatusLine 内已收口）。 */
 function renderMarketSheet() {
-  openSheet(`<div class="sheet-t"><h3>债市晴雨表</h3><button class="x" onclick="closeSheet()">✕</button></div>
+  openSheet(`<div class="sheet-t"><h3>债市行情</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div id="mktHero">${marketHeroHtml()}</div>
     ${llmStatusLine()}
     ${llmPanelHtml(false, "代入台账接着问模型")}`);
@@ -3919,16 +3919,23 @@ function renderProdDetail() {
     ${adviceCard(p, pos)}
     ${switchCard(p, pos)}
     <div class="row-btn" style="margin-top:14px">
-      <button class="btn gh" style="flex:1" onclick="openDisc('${p.id}')">录入 / 修改配置</button>
-      <button class="btn pri" style="flex:1" onclick="closeSheet();editProd('${p.id}')">编辑产品</button>
-    </div>
-    <div class="row-btn" style="margin-top:8px">
       <button class="btn pri" style="flex:1" onclick="closeSheet();openNav('${p.id}')">录入净值</button>
-      <button class="btn gh" style="flex:1" onclick="openAna('${p.id}')">持仓体检</button>
+      <button class="btn gh" style="flex:1" onclick="openAna('${p.id}')">持仓分析</button>
     </div>
-    <div class="row-btn" style="margin-top:8px">
-      <button class="btn pri" style="flex:1" onclick="openBriefTrend('${p.id}')">走势专题 · 口径体检 + 并列情景 + 观察点</button>
-    </div>`);
+    <details class="card" style="margin:8px 0 0">
+      <summary class="card-t"><h2 style="font-size:13px">AI 研判</h2><span class="hint">本机整理 / 走势分析</span></summary>
+      <div class="row-btn" style="margin-top:8px">
+        <button class="btn gh" style="flex:1" onclick="openBriefProduct('${p.id}')">用 AI 读一遍（研报）</button>
+        <button class="btn gh" style="flex:1" onclick="openBriefTrend('${p.id}')">走势分析</button>
+      </div>
+    </details>
+    <details class="card" style="margin:8px 0 0">
+      <summary class="card-t"><h2 style="font-size:13px">更多操作</h2><span class="hint">配置 / 编辑</span></summary>
+      <div class="row-btn" style="margin-top:8px">
+        <button class="btn gh" style="flex:1" onclick="openDisc('${p.id}')">录入 / 修改配置</button>
+        <button class="btn gh" style="flex:1" onclick="closeSheet();editProd('${p.id}')">编辑产品</button>
+      </div>
+    </details>`);
 }
 /* 区间起点日期 */
 function rangeStartDate(days) {
@@ -8626,8 +8633,8 @@ function briefRepaint() {
   /* 弹层已经关了 / 人在别的页面：结论回来时提醒一句，但**绝不把窗口弹回来**。
      不提醒的话，用户只能靠自己再点开才发现 —— 在他的感受里那十几秒就是「被打断了」。 */
   if (BRIEF.phase === "done") toast(trendMode()
-    ? "走势专题生成好了 — 回「产品详情 → 走势专题」就能看"
-    : "研判生成好了 — 回「持仓体检 → AI 研判」就能看", 3800);
+    ? "走势分析生成好了 — 回「产品详情 → 走势分析」就能看"
+    : "研判生成好了 — 回「持仓分析 → AI 研判」就能看", 3800);
 }
 function briefChunk(seq, total, text) {
   if (BRIEF.phase !== "running") return;

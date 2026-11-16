@@ -499,7 +499,7 @@ const TREND_Q_RE =
 export function trendQuestionHint(q) {
   const s = String(q == null ? "" : q);
   if (!s.trim() || !TREND_Q_RE.test(s)) return "";
-  return "问走势请走「走势专题」：产品详情 → 走势专题，那里带净值序列、口径体检、并列情景与观察点/证伪线。"
+  return "问走势请走「走势分析」：产品详情 → 走势分析，那里带净值序列、口径体检、并列情景与观察点/证伪线。"
     + "这里的问答只有单点净值，直接问会让模型凭空推断 —— 这一问没有发出，也没有计费。";
 }
 

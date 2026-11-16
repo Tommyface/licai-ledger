@@ -75,8 +75,8 @@ test("v134 真源 market.reference.json 通过既有 validateMarket（本轮不�
 test("v134 版本钉：APP_VER / CACHE 同步 v138，新模块进 SHELL", () => {
   const ver = APP.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = SW.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v138");
-  assert.equal(cache, "v138");
+  assert.equal(ver, "v139");
+  assert.equal(cache, "v139");
   assert.equal(ver, cache);
   assert.match(SW, /"\.\/js\/core\/markettable\.js"/, "离线预缓存不能漏新模块");
   assert.match(APP, /from "\.\/js\/core\/markettable\.js"/, "app.js 必须 import");
@@ -347,9 +347,9 @@ test("v134 index.html 有实时表与收蛋样式，折叠卡片沿用 v130 的 
 });
 
 test("v134 零回归：既有债市判据与页面锚点未被动过", () => {
-  assert.match(APP, /const APP_VER = "v138"/);
+  assert.match(APP, /const APP_VER = "v139"/);
   assert.match(APP, /marketPanelHtml\(MARKET/);
   assert.match(APP, /LV\.liveBlockHtml\(LIVE/);
   assert.match(APP, /function marketRefreshAll\(/);
-  assert.match(HTML, /债市晴雨表/);
+  assert.match(HTML, /债市行情/);
 });
