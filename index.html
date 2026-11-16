@@ -866,6 +866,13 @@ details.card:not([open]) > summary{margin-bottom:0}
         <div class="tx"><b>持仓分析</b></div>
         <button class="go" onclick="event.stopPropagation();openAnaIndex()">查看</button>
       </div>
+      <!-- v140 P1-4：AI 研判提为首页一级入口。用已导出的 openBriefPortfolio（组合研报），
+           不内联 openBrief —— 后者按设计不在 window 导出清单（handlers 双向校验会报）。 -->
+      <div class="entry slim" onclick="openBriefPortfolio()">
+        <div class="ic">AI</div>
+        <div class="tx"><b>AI 研判</b></div>
+        <button class="go" onclick="event.stopPropagation();openBriefPortfolio()">查看</button>
+      </div>
       <!-- v130：首页监控入口整行移除（用户反馈首页臃肿；底部 tabbar 第 5 个
            tab「监控」就是它的常驻入口，功能不丢）。 -->
     </div>

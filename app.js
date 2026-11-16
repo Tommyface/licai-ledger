@@ -139,7 +139,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v139";
+const APP_VER = "v140";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -2475,6 +2475,7 @@ function openAnaIndex() {
   }).join("");
   openSheet(`<div class="sheet-t"><h3>持仓分析</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div class="note b" style="margin-bottom:12px">
+      只有<b>一只</b>产品时直接进入分析；多只时才列这张选择页。
       体检是<b>一只一只</b>判的，选一只看它自己的 9 项。
       判据全部来自本账本已有的数据与已录的披露规则（净值 / 份额 / 持有天数 / 赎回费档），
       <b>没有一项是模型猜的</b>；缺字段那几项只会写「信息不足（缺 X）」。
@@ -2520,7 +2521,13 @@ function openAnaIndex() {
    否则在债市页发一句，答案回来会被替换成「模型接入」页，行情当场消失。 */
 const LLM = { phase: "idle", id: "", buf: null, meta: null, res: null, q: "", err: "",
   timer: 0, cfg: null, hasKey: false, costWarn: false, turns: [], turn: null, withData: false,
-  host: "llm" };
+  host: "llm",
+  /* v140 P2-B：追问/研判的回投上下文。host 退化为「当前显示哪页」的显示标记，
+     真正的「答案回来画哪里」由 askCtx.repaint 决定 —— 切页面不再画错窗口。
+     每次发问（llmSend / briefRun / 各自的 inflight 恢复）都重新登记。 */
+  askCtx: null };
+/** 登记这一问的回投去处：owner 仅作可读标记，repaint 是答案回来时真正调用的重绘函数。 */
+function llmAskFrom(owner, repaint) { LLM.askCtx = { owner, repaint }; }
 /** 这个会话已经发出去几个请求（含失败与超时的那些 —— 它们多半已经计费了，占额度）。 */
 function llmUsed() { return LLM.turns.length + (LLM.turn ? 1 : 0); }
 
@@ -2915,13 +2922,19 @@ function llmRepaint() {
      追问的回答晚到十几秒，用户早就切走了，屏幕突然跳出一个弹层是很吓人的事。
      但「设置页里那块内联面板」不是弹层：它发问时也该刷新，所以走 renderLlm()，只换内容。 */
   if (!sheetOpen()) {
-    if (LLM.host !== "brief" && LLM.host !== "market") {
+    /* v140 P2-B：弹层关了就绝不把窗口弹回。设置页那块内联面板（非弹层）仍走 renderLlm。
+       host 三态字面保留（market-page/livepoll 测试钉住），但回投去处以 askCtx 为准。 */
+    const owner = LLM.askCtx && LLM.askCtx.owner;
+    if (owner !== "brief" && LLM.host !== "brief" && LLM.host !== "market") {
       renderLlm();
       /* 与研判对称：答回来了但人不在那一屏，说一句就够，别把窗口弹回去。 */
       if (LLM.phase === "done") toast("问的答回来了 — 点「接着问」就能看", 3800);
     }
     return;
   }
+  /* v140 P2-B：有登记的回投函数就回它那里 —— 这是「答案回到发起它的那一页」的真相。
+     没有 askCtx 时退回 host 分派（兼容旧路径 / 历史调用）。 */
+  if (LLM.askCtx && typeof LLM.askCtx.repaint === "function") { LLM.askCtx.repaint(); return; }
   if (LLM.host === "market") renderMarketSheet();
   else if (LLM.host === "brief") renderBriefSheet();
   else renderLlmSheet();
@@ -3125,13 +3138,17 @@ function renderLlmSheet() {
     </div>
     ${llmPanelHtml(true, "接着问")}`);
 }
-/** 宿主二：首页「债市晴雨表」。上部行情、下部对话框，一次弹层里两件事都在。
-    网页版没有模型桥时行情照显，对话框给降级提示（llmStatusLine 内已收口）。 */
+/** 宿主二：首页「债市行情」。v140 P2-A：看与问分离 —— 这里只放行情，
+    不再把对话框塞进同一个弹层。想问模型：复制问句 → 设置页「模型接入」（llmPanelHtml 那套）。
+    网页版本就没有模型桥，行情照显，问的那一侧在设置页给降级提示。 */
 function renderMarketSheet() {
   openSheet(`<div class="sheet-t"><h3>债市行情</h3><button class="x" onclick="closeSheet()">✕</button></div>
     <div id="mktHero">${marketHeroHtml()}</div>
-    ${llmStatusLine()}
-    ${llmPanelHtml(false, "代入台账接着问模型")}`);
+    ${(MARKET && marketAiTextSafe(MARKET)) ? `<div class="row-btn" style="margin-top:10px">
+      <button class="btn gh" style="flex:1" onclick="marketCopyAi()">复制债市快照（去「模型接入」问模型）</button>
+    </div>` : ""}
+    <div class="cap" style="padding:10px 0 0">这一页只看行情。想带着债市快照问模型：点上面复制，
+      再到「设置 → 模型接入」粘贴提问 —— 那里才有对话框，答案只回那一页。</div>`);
 }
 /** 发一轮。要发的话由调用方给：新问从输入框取，重试把上一轮那句原样再给一次。
     顺序是「先闸门后动手」：额度到数就连一个字符都不该发出去，不是等请求做完才提示。 */
@@ -3157,6 +3174,10 @@ function llmSend(text) {
   LLM.turn = { q, a: "", err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 } };
   LLM.q = "";                 /* 输入框清空：发出去的那句已经在「第 N 轮 · 问」那一行上 */
   LLM.id = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  /* v140 P2-B：登记这一问回投到哪里 —— 在研判弹层里问就回研判层，否则回模型接入页。
+     答案晚到时 llmRepaint 按 askCtx.repaint 回投，不再靠可变的 host 猜。 */
+  llmAskFrom(LLM.host === "brief" ? "brief" : "llm",
+    LLM.host === "brief" ? renderBriefSheet : renderLlmSheet);
   /* 计时器和提示说的是同一个数：到 llmEffTimeoutMs() 就落「超时」，不加缓冲。
      v124：这个数跟着配置走 —— App 内把读超时调大时，页面也等得更久；
      页面计时器永远比原生读超时晚 15 秒，断开与报错只发生一次、来自原生那侧。 */
@@ -7895,21 +7916,47 @@ const BRIEF_CACHE_VER = 3;
 const BRIEF_CACHE_MAX = 8;
 /** 一次会话里最多点几次研判。与 LLM_MAX_ROUNDS 同理：每一份都是一次真实计费。 */
 const BRIEF_MAX_RUNS = 6;
-const BRIEF = {
-  target: null,          /* {kind:"portfolio"} | {kind:"product", id} */
+/* v140 P2-C：BRIEF 从单例改为「结果级按目标分槽 + 运行级单例」。
+   目的：研报与走势（乃至不同产品）各自持有自己的结论与进度，切目标只换
+   activeKey，不再「清空后把上一只的结论画到新目标头上」。
+
+   设计要点（改动面控制到 3 处：这里 / openBrief / briefInflightAdopt）：
+   - 结果级字段（target/phase/res/raw/err/dropped/shape/audit/grounding/fp/tier/
+     chars/ms/at/stale）用属性描述符代理到 byKey[activeKey] 这个「槽」；
+     下面 139 处 BRIEF.xxx 读写点因此一行都不用改，读写的仍是当前槽。
+   - 运行级字段（id/buf/timer/t0/runs）保持单例：同一时刻只有一发请求在飞，
+     回调按 BRIEF.id 认人（llmRoute），天然不会串到另一个目标 —— 分槽只分结果。 */
+const BRIEF_SLOT_DEFAULTS = {
+  target: null,          /* {kind:"portfolio"} | {kind:"product", id, mode?} */
   phase: "idle",         /* idle | building | running | done | error */
-  id: "", buf: null, fp: "", tier: BRIEF_TIER_DETAIL,
-  res: null, raw: "", err: "", at: 0, chars: 0, dropped: null, timer: 0,
-  /* v112：res 有两种形状 —— "report"（研报体，三段）与 "brief"（旧的 JSON 卡片）。
-     用 shape 分派，不靠「有没有 paras」猜：猜错就会把旧结论画成空卡。 */
+  fp: "", tier: BRIEF_TIER_DETAIL,
+  res: null, raw: "", err: "", at: 0, chars: 0, dropped: null,
+  /* v112：res 两种形状 —— "report"（研报体三段）/"brief"（旧 JSON 卡片），用 shape 分派。 */
   shape: "", audit: null,
-  /* v124：这一份的联网判据（llmParse 的 grounding 落地）。null = 没判过 / 未结构化。 */
+  /* v124：这一份的联网判据；null = 没判过 / 未结构化。 */
   grounding: null,
-  t0: 0,                 /* 这一发是什么时候出去的：落定后算「用时」，写进卡片 */
-  ms: 0,                 /* 上一次落定的实测耗时（毫秒）—— 90 秒读超时是这一版的硬约束 */
-  runs: 0,               /* 本次页面生命周期内已发几次（刷新归零，与 LLM 轮次同一口径） */
+  ms: 0,                 /* 上一次落定的实测耗时（毫秒）—— 90 秒读超时是硬约束 */
   stale: "",             /* 缓存命中但指纹已变时的那句话 */
 };
+const BRIEF = {
+  byKey: Object.create(null),   /* key -> 结果级槽；key 见 briefKey() */
+  activeKey: "all",             /* 当前显示的槽 */
+  /* 运行级单例：一发在飞，回调按 id 认人，分槽不分这些。 */
+  id: "", buf: null, timer: 0, t0: 0, runs: 0,
+};
+/** 取（必要时建）一个结果级槽。 */
+function briefSlot(key) {
+  if (!BRIEF.byKey[key]) BRIEF.byKey[key] = Object.assign({}, BRIEF_SLOT_DEFAULTS);
+  return BRIEF.byKey[key];
+}
+/** 结果级字段的代理描述符：读写都落到当前 activeKey 的槽。 */
+for (const _k of Object.keys(BRIEF_SLOT_DEFAULTS)) {
+  Object.defineProperty(BRIEF, _k, {
+    configurable: true, enumerable: true,
+    get() { return briefSlot(BRIEF.activeKey)[_k]; },
+    set(v) { briefSlot(BRIEF.activeKey)[_k] = v; },
+  });
+}
 /* ---------- 「这一发还在路上」记录（v115）----------
    WebView 被系统回收、或历史回退落到初始条目重载文档时，JS 里的 BRIEF.id / LLM.id
    会跟着一起没掉。可原生的请求跑在 Java 线程上，不随文档死；它回传时按 id 找人，
@@ -8004,6 +8051,10 @@ function renderBriefSheet() {
       onclick="briefTierSet('${t}')" ${running ? "disabled" : ""}>${txt}</button>`;
   const area = briefCardArea(stale);
   openSheet(`<div class="sheet-t"><h3>${tm ? "走势专题" : "AI 研判"}</h3><button class="x" onclick="closeSheet()">✕</button></div>
+    <div class="tabs" style="margin:0 0 10px">
+      <button class="${tm ? "" : "on"}" onclick="briefSwitchMode('')">研报</button>
+      <button class="${tm ? "on" : ""}" onclick="briefSwitchMode('trend')">走势分析</button>
+    </div>
     <div class="bf-bar">
       <div class="bf-tgt"><b>${esc(label)}</b>
         <span>${esc(BRIEF_TIER_LABEL[BRIEF.tier] || BRIEF_TIER_LABEL[BRIEF_TIER_DETAIL])} · 本次 ${chars} 字</span>
@@ -8141,9 +8192,14 @@ function openBrief(t) {
     renderBriefSheet();
     return;
   }
-  BRIEF.target = t || { kind: "portfolio" };
+  /* v140 P2-C：切目标 = 换 activeKey 到那个槽，各槽结论/进度互不覆盖。
+     briefCacheGet/Put 都按 briefKey() 取当前槽，所以下面这段"清 + 读缓存"仍只作用于新槽。 */
+  const next = t || { kind: "portfolio" };
+  BRIEF.activeKey = briefKey(next);
+  BRIEF.target = next;
   LLM.host = "brief";
-  /* 切目标必须清干净：不清就会把上一只的结论画在新目标头上 —— 那种错看起来"很像真的"。 */
+  /* 新槽没有就建一个空槽（briefSlot 里给了全字段默认），再按缓存回填；
+     不清别的槽 —— 这是分槽与旧单例最本质的区别。 */
   BRIEF.res = null; BRIEF.raw = ""; BRIEF.err = ""; BRIEF.dropped = null;
   BRIEF.shape = ""; BRIEF.audit = null; BRIEF.grounding = null;
   BRIEF.fp = ""; BRIEF.at = 0; BRIEF.ms = 0; BRIEF.phase = "idle";
@@ -8182,6 +8238,23 @@ function briefTierSet(t) {
   if (BRIEF.phase === "running") return toast("生成中不能换档，等它落定", 3000);
   BRIEF.tier = t === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
   renderBriefSheet();
+}
+/** v140 P1-5：研判弹层内「研报 / 走势分析」目标切换。
+    复用 openBrief 既有的清状态 + 读对应 key 缓存（briefKey 已按 mode 分 4 格），
+    不另造清理逻辑。生成中拦截（与 openBrief 同一口径）；切走势沿用 openBriefTrend
+    的「序列≥2 点」准入，避免1个点时让模型编。 */
+function briefSwitchMode(mode) {
+  if (BRIEF.phase === "running") return toast("这一份还在生成，等它落定再切换", 3000);
+  const want = mode === "trend" ? "trend" : "";
+  const x = BRIEF.target || { kind: "portfolio" };
+  if (want === "trend" && x.kind === "product") {
+    const p = DATA.products.find(z => z.id === x.id);
+    if (p && navSeries(p).filter(v => isFinite(Number(v[1])) && Number(v[1]) > 0).length < 2) {
+      return toast("这只产品净值序列不足 2 个披露点，走势分析至少要两个点 —— 先去「录入净值」", 5600);
+    }
+  }
+  if (x.kind === "product") return openBrief({ kind: "product", id: x.id, mode: want });
+  return openBrief({ kind: "portfolio", mode: want });
 }
 
 /** v137 P1：一键刷新信息面（走势专题面板那颗按钮）。
@@ -8532,6 +8605,9 @@ async function briefRun(force) {
   }
   BRIEF.phase = "running";
   BRIEF.id = "b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  /* v140 P2-B：研判这一发也登记回投（回研判层）。它走 briefRepaint（br[id]→brief），
+     这里登记是为了让 llmRepaint 在「答回来但 host 被切走」时也有正确去处。 */
+  llmAskFrom("brief", renderBriefSheet);
   BRIEF.buf = null; BRIEF.err = ""; BRIEF.raw = ""; BRIEF.res = null; BRIEF.dropped = null;
   BRIEF.grounding = null;
   BRIEF.shape = ""; BRIEF.audit = null;
@@ -8590,7 +8666,11 @@ function briefInflightAdopt() {
   const age = Date.now() - t0;
   /* 已经超过上限的那一发不必接：接回来也只能立刻判超时，反而把「上一份结论」顶掉。 */
   if (!(age >= 0) || age >= llmEffTimeoutMs()) { inflightClear("brief"); return false; }
-  BRIEF.target = rec.target && rec.target.kind ? rec.target : { kind: "portfolio" };
+  /* v140 P2-C：重载后 activeKey 默认 all，先按在飞记录切到它自己的槽，
+     再恢复运行级字段（id/t0 单例）。否则一份单只产品的在飞研判会被画到组合槽上。 */
+  const recTarget = rec.target && rec.target.kind ? rec.target : { kind: "portfolio" };
+  BRIEF.activeKey = briefKey(recTarget);
+  BRIEF.target = recTarget;
   BRIEF.tier = rec.tier === BRIEF_TIER_AGG ? BRIEF_TIER_AGG : BRIEF_TIER_DETAIL;
   BRIEF.chars = Number(rec.chars) || 0;
   BRIEF.fp = String(rec.fp || "");
@@ -8623,6 +8703,8 @@ function llmInflightAdopt() {
   LLM.phase = "running";
   LLM.res = null; LLM.err = ""; LLM.buf = null; LLM.meta = null;
   LLM.turn = { q: LLM.q, a: "", err: "", sources: [], dropped: [], shape: "", usage: { input: 0, output: 0 } };
+  /* v140 P2-B：恢复的在飞追问登记回投（重载后 host 默认 llm → 回模型接入页）。 */
+  llmAskFrom("llm", renderLlmSheet);
   LLM.timer = setTimeout(() => llmTimeout(LLM.id), Math.max(1000, llmEffTimeoutMs() - age));
   return true;
 }
@@ -8885,7 +8967,7 @@ function llmRoute(id) {
    ⚠️ 这段注释必须留在 Object.assign 之外：清单的解析按逗号切分，
    写在花括号里会把整段注释当成一个名字。 */
 Object.assign(window, {
-  openBriefPortfolio, openBriefProduct, openBriefTrend, briefRun, briefCancel, briefTierSet,
+  openBriefPortfolio, openBriefProduct, openBriefTrend, briefRun, briefCancel, briefTierSet, briefSwitchMode,
   briefSearchOff, briefSearchOffRetry, trendInfoRefresh,
   addNav, aixhubCheckNow, aixhubLoginFlow, aixhubLogout, applyApkUpdate, autoFillNav, bulkNav, calcShares, calMove, checkApkUpdate, clearAll,
   clearAnaCache, clearBdSearch, clearDetSearch, closeSheet, commitNav, delNav, delProd, delTrade, editProd,

@@ -125,5 +125,5 @@ test("V138-13 APP_VER 与 CACHE 同版本（动态读，不在测试里钉死）
   const cache = SW.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   const ver = APP.match(/const APP_VER = "(v\d+)"/)[1];
   assert.equal(ver, cache);
-  assert.equal(ver, "v139", "本版应升到 v139");
+  assert.equal(ver, "v140", "本版应升到 v140");
 });

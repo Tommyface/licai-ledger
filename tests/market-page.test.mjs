@@ -181,16 +181,15 @@ test("10 处内部重绘全部走 llmRepaint，没有一处漏回 openLlm（回�
 });
 
 /* ---------- 3. 两个宿主的渲染顺序与「行情只渲染一次」 ---------- */
-test("债市页：上部行情（marketHeroHtml）、下部对话（llmPanelHtml(false)），顺序固定", () => {
+test("v140 P2-A：债市页只放行情 + 复制问句，看与问分离（不再内嵌对话框）", () => {
   const i = app.indexOf("function renderMarketSheet()");
   const src = app.slice(i, app.indexOf("\nfunction ", i + 5));
   assert.ok(src.includes("<h3>债市行情</h3>"), "标题不对");
-  const h = src.indexOf("marketHeroHtml()");
-  const p = src.indexOf("llmPanelHtml(false");
-  assert.ok(h > 0 && p > h, "行情必须排在对话框前面");
-  assert.ok(src.includes('llmPanelHtml(false, "代入台账接着问模型")'), "对话框标题不是「代入台账接着问模型」");
+  assert.ok(src.includes("marketHeroHtml()"), "缺行情主体");
+  assert.ok(!src.includes("llmPanelHtml("), "P2-A 后债市页不该再内嵌对话框");
+  assert.ok(!src.includes("llmStatusLine()"), "P2-A 后债市页不该再有模型状态行");
+  assert.ok(src.includes("marketCopyAi()"), "缺「复制快照去模型接入问」的引导按钮");
   assert.ok(!src.includes("marketPanelHtml(MARKET)"), "债市页不该直接再渲染一遍行情（应在 hero 内）");
-  assert.ok(src.includes("llmStatusLine()"), "缺模型状态/降级提示行");
 });
 
 test("模型接入页保持原样：端点配置 + llmPanelHtml(true, 接着问)，行情仍内嵌", () => {

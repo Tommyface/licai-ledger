@@ -327,8 +327,8 @@ test("v133 保存与展示：待披露可保存、不打死份额、列表自动
 test("v133 版本钉：APP_VER / CACHE 同步 v138", () => {
   const ver = APP.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = SW.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v139");
-  assert.equal(cache, "v139");
+  assert.equal(ver, "v140");
+  assert.equal(cache, "v140");
   assert.equal(ver, cache);
 });
 

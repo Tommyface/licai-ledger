@@ -144,7 +144,7 @@ test("P1-12 版本钉：APP_VER 与 CACHE 同步为 v137，旧测试不再持有
   const swSrc = readFileSync(new URL("../sw.js", import.meta.url), "utf-8");
   const ver = appSrc.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = swSrc.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v139");
+  assert.equal(ver, "v140");
   assert.equal(cache, ver, "APP_VER 与 CACHE 必须同版本（handlers 总测同款判据）");
   const prev = "v" + (Number(ver.slice(1)) - 1);
   for (const f of ["bocmob_v135", "monitor_v131", "ccb_quota_v132", "buyrule_v133", "markettable_v134", "trend_v136"]) {
