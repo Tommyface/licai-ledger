@@ -139,7 +139,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v137";
+const APP_VER = "v138";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -285,6 +285,7 @@ function newsChannelLoad() {
    两条数据不许混：口径不同（盘中参考价 vs 日终估值），界面上不做差、不互补。 */
 const LS_LIVE = "licai.liveBond";
 const LIVE_TTL = 60 * 1000;             /* 打开债市页时的自动刷新阈值（此刻层要快一点） */
+const LIVE_POLL_MS = 30 * 1000;         /* v138：前台轮询间隔。仅在债市页打开且页面可见时静默刷此刻层 */
 const LIVE_COOL = 5 * 1000;             /* 手动连点冷却：5 秒内重复点只算一次 */
 const LIVE_TIMEOUT = 8000;              /* 单请求超时：一个 ulist + 一个 trends2 */
 let LIVE = null;
@@ -5517,6 +5518,19 @@ function liveRefresh(opts = {}) {
   return _liveBusy;
 }
 
+/** v138：前台轮询此刻层。做到「像行情终端那样自己动」——但只在真的看得见时才动：
+    ① 页面在前台（visibilityState=visible，后台 JS 定时器会被系统冻结，强刷只是白烧流量）；
+    ② 债市页弹层确实开着且宿主就是 market（mktHero 是债市页独有节点，胜过 sheetOpen 的泛判断）；
+    ③ 距上次尝试已过 LIVE_TTL（与打开页时同一条闸，避免刚打开就被轮询再打一次）。
+    真正发请求交给 liveRefresh({silent:true}) —— 它自带 _liveBusy 防重入、冷却与失败留痕，
+    这里不另起网络栈、不改缓存、不碰日终层。失败静默：块里会写「这一次没取到」。 */
+function liveAutoPollTick() {
+  if (document.visibilityState !== "visible") return;
+  if (LLM.host !== "market" || !$("mktHero")) return;
+  if (Date.now() - (LIVE_ST.lastTry || 0) < LIVE_TTL) return;
+  liveRefresh({ silent: true });
+}
+
 /** 读本机缓存。校验不过就当没有 —— 磁盘上的东西同样不可信。 */
 function liveCacheLoad() {
   try {
@@ -8935,6 +8949,9 @@ Object.assign(window, {
       checkCloudUpdate(); renderNotify();
       /* App 回到前台：立刻按节流核对一次净值（切后台期间可能正好披露了新一天） */
       if (nativeFetchAvailable()) { try { window.__nativeAutoFetch(); } catch (e) { } }
+      /* v138：回到前台且债市页正开着，立刻补一次此刻层（仍过 LIVE_TTL 闸）——
+         后台那 30 秒定时器被冻结过，回来不该等着下一拍才更新。 */
+      liveAutoPollTick();
     } else if (DIRTY) {
       /* 正要进后台：抢一发。WebView 可能在后台被回收，这一发抢到的就是不掉的那笔。
          不 await —— 页面已经看不见了，成功与否由顶栏胶囊下次显示时说话。 */
@@ -8944,6 +8961,9 @@ Object.assign(window, {
   /* 胶囊上的「40 秒前 / 5 分前」是算出来的，不是事件驱动的：没有新事件时它也会旧，
      所以每分钟重画一次（纯本地，零网络请求）。 */
   setInterval(syncStateView, 60000);
+  /* v138：此刻层前台轮询。间隔 30 秒，但 liveAutoPollTick 内部三重闸门全过才会真发请求
+     （前台 + 债市页打开 + 过 TTL），其余情况零网络开销。 */
+  setInterval(liveAutoPollTick, LIVE_POLL_MS);
   /* 注册 Service Worker（仅 https / localhost 生效，file:// 下自动跳过）
      SW 是「外壳缓存优先」，新版本必须等新 SW 装上并接管才生效 ——
      否则用户会一直看到旧的 index.html / app.js，表现为「推了代码但页面没变」。

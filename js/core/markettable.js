@@ -49,6 +49,17 @@ const esc = s => String(s == null ? "" : s)
 /** 方向短标签：与 market.js 的 MARKET_DIR_LABEL 同义，给窄表格用。 */
 export const RT_DIR_SHORT = { up: "红·涨", down: "绿·跌", flat: "白·平", none: "蓝·无" };
 
+/** v138：实时层口径说明。回答一个反复被问的问题——「为什么下面是 11-13 收盘、是不是停更了」。
+    三层口径摆在一起说清：此刻层（东财，自动刷新）/ 日终层（中债官方，17:30 发布、
+    周末与当日发布前停在上一交易日，是发布节奏不是停更）/ 两者不跨层运算。
+    HTML 与复制导出的纯文本都带这段，两处读同一常量，不许各写一份。 */
+export const LIVE_POLL_NOTE =
+  "此刻层每 30 秒自动刷新（仅债市页在前台时；「现抓」是本机拿到这一口的时刻）。" +
+  "涨跌列是与上一交易日收盘价的差：收益率按 bp（下行记红）、期货/指数按涨跌幅、回购按 bp。" +
+  "下方日终 33 格来自中债官方估值曲线，每个交易日 17:30 左右发布；周末与当日 17:30 前" +
+  "停在上一交易日是官方发布节奏，不是停更，今日曲线发布后点「↻ 更新此刻」会自动带上。" +
+  "两层口径不同，不做差、不互补。";
+
 /* ============================================================
    一、聚合实时行情表（纯展示，零推算）
    ============================================================ */
@@ -351,6 +362,7 @@ export function realtimeTableHtml(live, market, opts = {}) {
     <div class="cap">此刻层为东方财富 ${esc(LIVE_SRC)} 盘中参考价（JSONP 本机直连），方向按
       ${esc(MARKET_DIR_LABEL.up)} 的同一语义判定：收益率下行记红、上行记绿。
       指数为上证口径、回购为交易所 GC 系列，不是银行间 DR007。复制按钮导出的是这张表的纯文本快照（制表符分隔，可直接贴 Excel）。</div>
+    <div class="cap" data-live-poll-note="1">${esc(LIVE_POLL_NOTE)}</div>
     ${eggsBlockHtml(eg)}
   </div>`;
 }
@@ -378,6 +390,8 @@ export function realtimeTableText(live, market, opts = {}) {
     const s = ds.stat;
     L.push(`日终层 33 格\t${ds.cutoff || ds.asOf}\t红 ${s.up}/绿 ${s.down}/白 ${s.flat}/蓝 ${s.none}\t${ds.count}/${ds.total}\t${ds.verified ? "已核验" : "未核验"}\t${ds.source}`);
   } else L.push("日终层 33 格\t暂无快照");
+  L.push("");
+  L.push(`【实时层口径】${LIVE_POLL_NOTE}`);
   L.push("");
   L.push(`【债基收蛋估算 · ${eg.ok ? eg.basisLabel : "本次不做估算"}】`);
   if (eg.ok) {
