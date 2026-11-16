@@ -238,13 +238,23 @@ test("版本钉子总测：APP_VER 与 CACHE 同版本，且测试里不许再�
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
   assert.equal(ver, cache, "APP_VER 与 CACHE 必须同版本（scripts/check-version.sh 也会查）");
   /* 扫全部测试文件：收敛后它们只许出现「动态读版本」的正则，不许出现写死的版本号。
-     只查两种曾经散落的形态：licai-ledger-vNN / const APP_VER = "vNN"（断言里）. */
+     查四种散落形态（v141 P0-1 补全）：
+       ① licai-ledger-vNN（旧形态）
+       ② includes('const APP_VER = "vNN"')（旧形态）
+       ③ assert.equal(ver|cache|APP_VER…, "vNN")（v98 后新增文件长回来的形态）
+       ④ assert.match(X, /const APP_VER = "vNN"/)（正则里写死版本）
+     排除 backup.test.mjs 的备份夹具数据（meta.app: "v103" 是结构样例，不是版本钉）。 */
   const offenders = [];
   for (const f of fs.readdirSync(path.join(root, "tests")).filter(x => x.endsWith(".mjs"))) {
+    if (f === "backup.test.mjs") continue;   /* 夹具数据含 v103，语义是备份元数据样例 */
     const s = read("tests/" + f);
     if (/licai-ledger-v\d+/.test(s)) offenders.push(`${f}: 硬编码 licai-ledger-vNN`);
     if (/includes\(['"]const APP_VER = "v\d+"|includes\(['"]const CACHE = "licai-ledger-v\d+/.test(s))
-      offenders.push(`${f}: 硬编码版本断言`);
+      offenders.push(`${f}: 硬编码版本断言(includes)`);
+    if (/assert\.(equal|notEqual|strictEqual)\(\s*(ver|cache|APP_VER|CACHE)\s*,\s*["']v\d+["']/.test(s))
+      offenders.push(`${f}: 硬编码版本断言(equal)`);
+    if (/(const APP_VER = |const CACHE = "licai-ledger-)v\d+["']?\//.test(s) && /assert\.match\(/.test(s))
+      offenders.push(`${f}: 硬编码版本断言(match 正则)`);
   }
   assert.deepEqual(offenders, [], "版本钉子已收敛到一处，别再把版本号写回测试：\n  " + offenders.join("\n  "));
 });

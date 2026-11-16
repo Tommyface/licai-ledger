@@ -77,8 +77,6 @@ test("validateBankRows：quota 只许有限数值/null，溯源字段只许字�
 test("版本钉：APP_VER / CACHE 同步 v138", () => {
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v140");
-  assert.equal(cache, "v140");
   assert.equal(ver, cache);
 });
 
@@ -90,8 +88,8 @@ test("v132 接线：渲染层用 quotaLabel + 建行清单角标，两处测试�
   assert.match(html, /参考剩余额度/, "③ 段口径说明");
   assert.match(html, /建行清单/);
   assert.match(html, /额度数值有变化也会推一条系统通知/, "③ 段写明额度变化会通知");
-  assert.match(pkg, /ccb_quota_v132\.test\.mjs/, "npm test 登记");
-  assert.match(ci, /ccb_quota_v132\.test\.mjs/, "CI 登记（漏一个等于该链路只在本地跑过）");
+  assert.match(pkg, /"test":\s*"node --test tests\/\*\.test\.mjs"/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(ci, /run: npm test/, "CI 直接调 npm test（单一来源）");
 });
 
 /* 私有仓契约：公开仓 CI 只 checkout licai-ledger，双仓同检出时才全量断言

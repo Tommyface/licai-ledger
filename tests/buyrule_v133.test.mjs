@@ -327,13 +327,11 @@ test("v133 保存与展示：待披露可保存、不打死份额、列表自动
 test("v133 版本钉：APP_VER / CACHE 同步 v138", () => {
   const ver = APP.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = SW.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v140");
-  assert.equal(cache, "v140");
   assert.equal(ver, cache);
 });
 
 test("v133 两处测试清单都登记 buyrule_v133.test.mjs（漏一个等于只在本地跑过）", () => {
-  assert.match(PKG, /buyrule_v133\.test\.mjs/, "npm test 登记");
-  assert.match(CI, /buyrule_v133\.test\.mjs/, "CI 登记");
+  assert.match(PKG, /"test":\s*"node --test tests\/\*\.test\.mjs"/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(CI, /run: npm test/, "CI 直接调 npm test（单一来源）");
   assert.match(HTML, /交易记录/, "静态卡片结构未被动过");
 });

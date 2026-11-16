@@ -75,16 +75,14 @@ test("v134 真源 market.reference.json 通过既有 validateMarket（本轮不�
 test("v134 版本钉：APP_VER / CACHE 同步 v138，新模块进 SHELL", () => {
   const ver = APP.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = SW.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
-  assert.equal(ver, "v140");
-  assert.equal(cache, "v140");
   assert.equal(ver, cache);
   assert.match(SW, /"\.\/js\/core\/markettable\.js"/, "离线预缓存不能漏新模块");
   assert.match(APP, /from "\.\/js\/core\/markettable\.js"/, "app.js 必须 import");
 });
 
 test("v134 两处测试清单都登记专项（漏一个等于只在本地跑过）", () => {
-  assert.match(PKG, /markettable_v134\.test\.mjs/, "npm test 登记");
-  assert.match(CI, /markettable_v134\.test\.mjs/, "CI 登记");
+  assert.match(PKG, /"test":\s*"node --test tests\/\*\.test\.mjs"/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(CI, /run: npm test/, "CI 直接调 npm test（单一来源）");
 });
 
 /* ============================================================
@@ -347,7 +345,7 @@ test("v134 index.html 有实时表与收蛋样式，折叠卡片沿用 v130 的 
 });
 
 test("v134 零回归：既有债市判据与页面锚点未被动过", () => {
-  assert.match(APP, /const APP_VER = "v140"/);
+  assert.match(APP, /const APP_VER = "v\d+"/);
   assert.match(APP, /marketPanelHtml\(MARKET/);
   assert.match(APP, /LV\.liveBlockHtml\(LIVE/);
   assert.match(APP, /function marketRefreshAll\(/);

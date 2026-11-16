@@ -117,13 +117,12 @@ test("V138-11 本版不碰日终层：33 格相关渲染函数未在 markettable
 
 /* ---- ⑤ 双登记 + 版本动态比对（不写死 vNN）---- */
 test("V138-12 新测试已进 package.json 与 ci.yml 两份清单", () => {
-  assert.match(PKG, /tests\/livepoll_v138\.test\.mjs/);
-  assert.match(CI, /tests\/livepoll_v138\.test\.mjs/);
+  assert.match(PKG, /"test":\s*"node --test tests\/\*\.test\.mjs"/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(CI, /run: npm test/, "CI 直接调 npm test（单一来源）");
 });
 
 test("V138-13 APP_VER 与 CACHE 同版本（动态读，不在测试里钉死）", () => {
   const cache = SW.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   const ver = APP.match(/const APP_VER = "(v\d+)"/)[1];
   assert.equal(ver, cache);
-  assert.equal(ver, "v140", "本版应升到 v140");
 });

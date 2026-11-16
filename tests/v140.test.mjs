@@ -143,6 +143,6 @@ test("V-1 版本钉 APP_VER 与 CACHE 同版本，专项进双清单", () => {
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   assert.equal(ver, cache);
-  assert.match(pkg.scripts.test, /tests\/v140\.test\.mjs/);
-  assert.match(ci, /tests\/v140\.test\.mjs/);
+  assert.match(pkg.scripts.test, /tests\/\*\.test\.mjs/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(ci, /run: npm test/, "CI 直接调 npm test（单一来源）");
 });

@@ -1263,13 +1263,17 @@ test("放宽只用于显示与文案，不许用于真调用：登录 / 抓取 /
 /* ---- 测试清单本身也要有门禁（v61）----
    曾经出过「测试文件只加进了 package.json，CI 的显式 node --test 清单没同步」，
    结果是本地绿、线上那个文件从没跑过 —— 这种错不会让任何测试变红，只能靠对账。 */
-test("npm test 与 CI 的 node --test 清单是同一批文件", () => {
+test("npm test 与 CI 测试入口是单一来源：通配 tests/*.test.mjs", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const listed = s => (s.match(/tests\/[A-Za-z0-9_.-]+\.mjs/g) || []);
-  const a = listed(pkg.scripts.test), b = listed(ci);
-  assert.ok(a.length >= 11, `测试文件只有 ${a.length} 个，短到不对劲`);
-  assert.deepEqual(b, a, "CI 与 npm test 跑的不是同一批（顺序也要对齐，方便对账）");
+  /* v141：磁盘目录是唯一真相。npm test 必须走通配，CI 必须直接调 npm test——
+     任何一处改回硬编码清单都会重新引入「两份清单漂移」漏洞。 */
+  assert.match(pkg.scripts.test, /tests\/\*\.test\.mjs/, "npm test 必须用 tests/*.test.mjs 通配");
+  assert.ok(!/node --test tests\/[A-Za-z]/.test(pkg.scripts.test), "npm test 不许再列硬编码文件名");
+  assert.match(ci, /run: npm test/, "CI 测试步必须直接调 npm test（单一来源）");
+  /* 磁盘上确实有一批 *.test.mjs，且都被通配覆盖（同步 fs 扫描，纯本地零成本）。 */
+  const files = readdirSync(new URL("./", import.meta.url)).filter(x => x.endsWith(".test.mjs"));
+  assert.ok(files.length >= 40, `磁盘测试文件只有 ${files.length} 个，短到不对劲`);
 });
 
 /* ---- 持仓体检的入口位置（v63 定稿）----

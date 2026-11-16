@@ -120,7 +120,6 @@ test("版本钉：APP_VER / CACHE 同步 v138", () => {
   const ver = app.match(/const APP_VER = "(v\d+)"/)[1];
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   assert.equal(ver, cache);
-  assert.equal(ver, "v140");
 });
 
 /* 私有仓契约（文件在 ../data24 不在网页仓，这里用源码级断言钉住网页层可见的行为）：

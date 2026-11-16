@@ -140,7 +140,7 @@ test("版本钉子：APP_VER 与 CACHE 动态同版本 + SHELL 收 quota.js；�
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   assert.equal(ver, cache, "APP_VER 与 CACHE 必须同版本");
   assert.match(sw, /"\.\/js\/core\/quota\.js"/, "import 闭包漏进 SHELL 会整页 404");
-  assert.ok(pkg.scripts.test.includes("tests/quota.test.mjs"), "新测试要登记进 npm test 硬编码清单");
+  assert.match(pkg.scripts.test, /tests\/\*\.test\.mjs/, "npm test 走通配，磁盘目录即唯一清单");
 });
 
 test("v129：阶段 1 探测透传已从网页层下线（quota.js 纯函数仍由单测覆盖）", () => {
@@ -492,5 +492,5 @@ test("v128 版本钉子：APP_VER 与 CACHE 动态同版本、SHELL 收 quota.js
   const cache = sw.match(/const CACHE = "licai-ledger-(v\d+)"/)[1];
   assert.equal(ver, cache, "v128 版本钉子必须同步");
   assert.match(sw, /"\.\/js\/core\/quota\.js"/, "复用同一模块，import 闭包不能漏进 SHELL");
-  assert.ok(pkg.scripts.test.includes("tests/quota.test.mjs"), "测试要登记进 npm test 硬编码清单");
+  assert.match(pkg.scripts.test, /tests\/\*\.test\.mjs/, "npm test 走通配，磁盘目录即唯一清单");
 });

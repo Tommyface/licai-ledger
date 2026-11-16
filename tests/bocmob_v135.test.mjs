@@ -23,10 +23,9 @@ const BOC_LINK = "https://ebsnew.boc.cn/bocphone/VueLocalCli4/bocFinanceDetail/i
 test("v135 版本钉：APP_VER / CACHE 同步 v138，专项进两份测试清单", () => {
   const ver = /const APP_VER = "([^"]+)"/.exec(app)[1];
   const cache = /const CACHE = "licai-ledger-([^"]+)"/.exec(sw)[1];
-  assert.equal(ver, "v140");
-  assert.equal(cache, "v140");
-  assert.match(pkg, /bocmob_v135\.test\.mjs/, "npm test 登记");
-  assert.match(ci, /bocmob_v135\.test\.mjs/, "CI 登记");
+  assert.equal(ver, cache, "APP_VER 与 CACHE 必须同版本（版本钉已收敛到 handlers 总测 + check-version.sh）");
+  assert.match(pkg, /"test":\s*"node --test tests\/\*\.test\.mjs"/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(ci, /run: npm test/, "CI 直接调 npm test（单一来源）");
 });
 
 test("BOC 链接识别：ebsnew.boc.cn/bocphone/ 命中", () => {

@@ -86,6 +86,6 @@ test("E-8 版本钉：APP_VER 与 CACHE 动态同版本", () => {
 });
 
 test("E-9 新专项进 package.json 与 ci.yml 双清单", () => {
-  assert.match(pkg.scripts.test, /tests\/entry_v139\.test\.mjs/);
-  assert.match(ci, /tests\/entry_v139\.test\.mjs/);
+  assert.match(pkg.scripts.test, /tests\/\*\.test\.mjs/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(ci, /run: npm test/, "CI 直接调 npm test（单一来源）");
 });

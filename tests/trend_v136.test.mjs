@@ -354,12 +354,10 @@ test("⑧ 接线：模块、入口、mode 分派、横幅、审计白名单、�
 test("⑧ 版本钉 v136：APP_VER / CACHE 同步、新模块进 SHELL、两份测试清单双登记", () => {
   const ver = /const APP_VER = "(v\d+)"/.exec(APP)[1];
   const cache = /const CACHE = "licai-ledger-(v\d+)"/.exec(SW)[1];
-  assert.equal(ver, "v140");
-  assert.equal(cache, "v140");
   assert.equal(ver, cache);
   assert.match(SW, /"\.\/js\/domain\/trend\.js"/, "漏进 SHELL 会离线整页空白");
-  assert.ok(PKG.includes("tests/trend_v136.test.mjs"), "npm test 要登记");
-  assert.ok(CI.includes("tests/trend_v136.test.mjs"), "CI 的 node --test 清单要登记");
+  assert.match(PKG, /"test":\s*"node --test tests\/\*\.test\.mjs"/, "npm test 走通配，磁盘目录即唯一清单");
+  assert.match(CI, /run: npm test/, "CI 直接调 npm test（单一来源）");
 });
 
 /* ═══════════ 9. 隔离 / 零后端反向断言 ═══════════ */

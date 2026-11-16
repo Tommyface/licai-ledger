@@ -13,6 +13,7 @@
 import { $, pad, fmtDate, parseDate, today, money, signMoney, pct, cls, uid, esc, toast, dayDiff,
   maskMoney, maskTone }
   from "./js/core/util.js";
+import { createLoader, makeState } from "./js/core/loader.js";
 import { ORG_NAME, detectOrg, detectOrgByProdCode, prodCodeOf, fetchStatus,
   regCodeOf, regCodeFromCloud } from "./js/core/orgs.js";
 import { parseProductInput, rowAddable } from "./js/core/paste.js";
@@ -139,7 +140,7 @@ const LS_ANA = "licai.anaCache";
 /* 前端版本号：与 sw.js 的 CACHE 后缀必须一致（scripts/check-version.sh 会校验）。
    升版时两处一起改：这里 + sw.js 的 CACHE。
    页面上会显示出来 —— 之前「推了代码但页面没变」排查起来全靠猜，有了它一眼可判。 */
-const APP_VER = "v140";
+const APP_VER = "v141";
 const NAV_API = "https://xinxipilu.chinawealth.com.cn/lcxp-platService";
 const DETAIL_PAGE = "https://xinxipilu.chinawealth.com.cn/queryMenu/prodType/prodTypeDetail?prodRegCode=";
 
@@ -313,8 +314,10 @@ const LS_MACRO = "licai.macro";
 const MACRO_TTL = 6 * 60 * 60 * 1000;
 const MACRO_TIMEOUT = 8000;
 let MACRO = null;
-const MACRO_ST = { phase: "idle", at: 0, err: "", lastTry: 0 };
-let _macroBusy = null;
+/* v141 P1-1：宏观是第一个迁到统一装载器的源。MACRO_ST 由 makeState 建（四字段
+   与原来逐字一致），MACRO/MACRO_ST 的引用保持稳定 —— marketHeroHtml 的 new Function
+   注入测试和所有消费点一行不改。busy / TTL / 失败保留旧值 / 状态推进收口到 loader。 */
+const MACRO_ST = makeState();
 let RULES_QUOTES = {};
 /* 提醒状态（本机）：on = 用户是否开启了系统通知；lastCheck = 上次比对云端的时间戳；
    v95：seen = 已提醒过的「产品id@披露日」去重集（B1）；quiet/thresh 默认档出自
@@ -2909,7 +2912,7 @@ function openMarket() {
      静默失败不打扰：块里会写「这一次没取到」和原因，旧值仍在。 */
   if (Date.now() - (LIVE_ST.lastTry || 0) > LIVE_TTL) liveRefresh({ silent: true });
   /* v118：宏观 TTL 6 小时。月度数据，没必要每次点开都拉三个请求。 */
-  if (!MACRO || Date.now() - (MACRO_ST.lastTry || 0) > MACRO_TTL) macroRefresh({ silent: true });
+  if (macroLoader.needRefresh()) macroRefresh({ silent: true });
   /* v119：指数日 K TTL 15 分钟。histRefresh 自己判 TTL，这里不用再套一层判断。 */
   histRefresh({ silent: true });
   /* v120：信息面线索。只有 cloud 通道、且超过 TTL 才静默拉一次；off 不请求。 */
@@ -5696,50 +5699,45 @@ function histCacheSave() {
  * 与此刻层同一个取舍（10 个报价里挂一个不该全扔），理由也同一个：它们互相不依赖。
  * @param {{silent?: boolean}} [opts]
  */
-function macroRefresh(opts = {}) {
-  if (_macroBusy) return _macroBusy;
-  MACRO_ST.phase = "loading";
-  MACRO_ST.err = "";
-  MACRO_ST.lastTry = Date.now();
-  _macroBusy = (async () => {
-    try {
-      const rs = await Promise.all(MC.MACRO_ITEMS.map(
-        it => jsonpGet(n => MC.macroUrl(it, n), MACRO_TIMEOUT)));
-      /** @type {Record<string, any>} */
-      const out = {};
-      const whys = [];
-      for (let i = 0; i < MC.MACRO_ITEMS.length; i++) {
-        const it = MC.MACRO_ITEMS[i], r = rs[i];
-        if (!r.ok) {
-          out[it.key] = { key: it.key, ok: false, why: r.why || "没取到", series: [], latest: null, prev: null };
-          whys.push(`${it.key}：${r.why || "没取到"}`);
-          continue;
-        }
-        const p = MC.macroParse(r.data, it);
-        out[it.key] = p;
-        if (!p.ok) whys.push(`${it.key}：${p.why}`);
+/* v141 P1-1：busy 去重 / 状态推进 / 失败保留旧值 交给统一装载器；
+   run 里只留「宏观专属」的取数与聚合，成功后自己写 MACRO（loader 约定
+   run 返回 undefined = 数据已自行 set）。onOk/onErr 承接重画与 toast。 */
+const macroLoader = createLoader({
+  state: MACRO_ST,
+  get: () => MACRO,
+  set: v => { MACRO = v; },
+  ttl: MACRO_TTL,
+  errSlice: 140,
+  toast: (msg, ms) => toast(msg, ms),
+  onOk: () => { macroCacheSave(); marketPaint(); },
+  onErr: () => { marketPaint(); },
+  run: async () => {
+    const rs = await Promise.all(MC.MACRO_ITEMS.map(
+      it => jsonpGet(n => MC.macroUrl(it, n), MACRO_TIMEOUT)));
+    /** @type {Record<string, any>} */
+    const out = {};
+    const whys = [];
+    for (let i = 0; i < MC.MACRO_ITEMS.length; i++) {
+      const it = MC.MACRO_ITEMS[i], r = rs[i];
+      if (!r.ok) {
+        out[it.key] = { key: it.key, ok: false, why: r.why || "没取到", series: [], latest: null, prev: null };
+        whys.push(`${it.key}：${r.why || "没取到"}`);
+        continue;
       }
-      /* 三项全挂才算这一次失败；部分成功照收，缺的那项在块里自己说明原因。 */
-      if (!MC.MACRO_ITEMS.some(it => out[it.key] && out[it.key].ok)) {
-        throw new Error(whys.join("；") || "三项都没取到");
-      }
-      MACRO = out;
-      MACRO_ST.phase = "ok";
-      MACRO_ST.err = whys.length ? whys.join("；") : "";
-      MACRO_ST.at = Date.now();
-      macroCacheSave();
-      marketPaint();
-      return true;
-    } catch (e) {
-      MACRO_ST.phase = "err";
-      MACRO_ST.err = String((e && e.message) || e).slice(0, 140);
-      marketPaint();
-      if (!opts.silent) toast(`宏观没取到：${MACRO_ST.err}`, 4200);
-      return false;
-    } finally { _macroBusy = null; }
-  })();
-  return _macroBusy;
-}
+      const p = MC.macroParse(r.data, it);
+      out[it.key] = p;
+      if (!p.ok) whys.push(`${it.key}：${p.why}`);
+    }
+    /* 三项全挂才算这一次失败；部分成功照收，缺的那项在块里自己说明原因。
+       部分成功时把原因写进 err（loader 成功路径不覆盖 err，这里显式带上）。 */
+    if (!MC.MACRO_ITEMS.some(it => out[it.key] && out[it.key].ok)) {
+      throw new Error(whys.join("；") || "三项都没取到");
+    }
+    MACRO = out;                                   /* run 自己 set（返回 undefined） */
+    MACRO_ST.err = whys.length ? whys.join("；") : "";
+  },
+});
+function macroRefresh(opts = {}) { return macroLoader.refresh(opts); }
 
 /** 读本机缓存。版本/来源不符就当没有 —— 与此刻层同一条规矩。 */
 function macroCacheLoad() {

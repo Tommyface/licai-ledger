@@ -60,8 +60,10 @@ jobs:
       # 有改动待推时绝不许显示「已同步」——那等于放用户去卸载）、
       # 月报的逐日加总口径、底层配置与申赎规则的空值语义（v60）、
       # 债市晴雨表的整包校验与方向判据（v100）。
-      # ★ 这份列表必须与 package.json 的 npm test 一致：漏一个文件，那条链路上的
-      #   口径就只在本地被执行过，CI 全绿也不代表它没坏。monthly.test.mjs 是这次
-      #   补上的——它早就在 npm test 里，却一直没进 CI，属于同一类漏洞。
+      # ★ v141 单一来源：package.json 的 npm test 用 tests/*.test.mjs 通配，磁盘目录
+      #   就是唯一真相——新增 *.test.mjs 自动进 CI，不再有「两份清单漂移」漏洞。
+      #   （历史教训：monthly.test.mjs 早就在 npm test 却漏进 CI，backup.test.mjs
+      #   更是从未进过任何清单，整整 9 项加密测试只在本地跑过。app_core 的清单
+      #   总测会守 npm test 的通配模式，防止有人改回易漏的硬编码列表。）
       - name: 纯逻辑测试
-        run: node --test tests/app_core.test.mjs tests/handlers.test.mjs tests/calendar.test.mjs tests/tomb.test.mjs tests/sync_merge.test.mjs tests/board.test.mjs tests/syncstatus.test.mjs tests/update.test.mjs tests/monthly.test.mjs tests/disc.test.mjs tests/analysis.test.mjs tests/advice.test.mjs tests/switchadv.test.mjs tests/llm.test.mjs tests/nav.test.mjs tests/webank.test.mjs tests/market.test.mjs tests/nativefetch.test.mjs tests/market-page.test.mjs tests/navstats.test.mjs tests/brief.test.mjs tests/report.test.mjs tests/pubcal.test.mjs tests/livebond.test.mjs tests/macro.test.mjs tests/news.test.mjs tests/websearch.test.mjs tests/anysearch.test.mjs tests/quota.test.mjs tests/redeem_v129.test.mjs tests/ui_v130.test.mjs tests/monitor_v131.test.mjs tests/ccb_quota_v132.test.mjs tests/buyrule_v133.test.mjs tests/markettable_v134.test.mjs tests/bocmob_v135.test.mjs tests/trend_v136.test.mjs tests/trend_p1_v137.test.mjs tests/livepoll_v138.test.mjs tests/entry_v139.test.mjs tests/v140.test.mjs
+        run: npm test

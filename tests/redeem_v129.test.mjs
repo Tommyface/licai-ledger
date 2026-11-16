@@ -145,8 +145,8 @@ test("接线：赎回表单锁 T 日、有全部赎回按钮、渲染走 settleL
     "累计已实现必须与持仓计算同源");
   assert.match(app, /settleLedger\(DATA\.products, DATA\.trades, td\)/,
     "月报也要吃动态结算表");
-  assert.ok(pkg.scripts.test.includes("tests/redeem_v129.test.mjs"),
-    "专项回归要登记进 npm test 硬编码清单");
+  assert.match(pkg.scripts.test, /tests\/\*\.test\.mjs/,
+    "npm test 走通配，磁盘目录即唯一清单");
 });
 
 test("接线：阶段 1 自检已下线、监控池与产品页全量一致", () => {
